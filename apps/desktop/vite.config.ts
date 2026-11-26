@@ -1,5 +1,5 @@
 import react from "@vitejs/plugin-react";
-import { defineConfig } from "vite";
+import { defineConfig } from "vitest/config";
 
 // Settings follow the Tauri guide for Vite: https://v2.tauri.app/start/frontend/vite/
 export default defineConfig({
@@ -20,5 +20,10 @@ export default defineConfig({
     target: process.env.TAURI_ENV_PLATFORM === "windows" ? "chrome105" : "safari13",
     minify: process.env.TAURI_ENV_DEBUG ? false : "oxc",
     sourcemap: Boolean(process.env.TAURI_ENV_DEBUG),
+  },
+  test: {
+    environment: "happy-dom",
+    setupFiles: ["./src/test/setup.ts"],
+    include: ["src/**/*.test.{ts,tsx}"],
   },
 });

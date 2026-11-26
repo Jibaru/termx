@@ -18,7 +18,8 @@
     "typecheck": "pnpm --filter @termx/desktop typecheck",
     "tauri": "pnpm --filter @termx/desktop tauri",
     "lint": "pnpm --filter @termx/desktop lint && prettier --check .",
-    "format": "prettier --write ."
+    "format": "prettier --write .",
+    "test": "pnpm --filter @termx/desktop test"
   },
   "devDependencies": {
     "prettier": "^3.10.1"
