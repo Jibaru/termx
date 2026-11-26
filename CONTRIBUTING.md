@@ -109,10 +109,19 @@ level, including `debug` and `trace`:
 Log sizes, counts, identifiers, durations, exit codes and error kinds instead:
 `bytes = chunk.len()`, never `chunk`.
 
-Paths are safe to log. Every record passes through a filter that replaces the
-home directory with `~` in the message and in every text field. For a path
-that leaves the application some other way (an error returned to the
-interface, a file you write), use `termx_core::diagnostics::redact::path`.
+Nothing in the logger can recognise such data, so these rules are enforced by
+review. Treat a logging call that takes a value from a PTY, from the
+environment or from a file as a bug.
+
+What the logger does enforce is redaction of the user's identity: every record
+passes through a filter that replaces the home directory with `~`, the name in
+any other home-shaped path (`/Users/x`, `/home/x`, `C:\Users\x`) with
+`<user>`, and the bare user name with `<user>`, in the message and in every
+text field. So paths are safe to log. For a path that leaves the application
+some other way (an error returned to the interface, a file you write), use
+`termx_core::diagnostics::redact::path`. Keep
+[docs/logging.md](docs/logging.md#privacy) accurate when you change any of
+this: it tells users exactly what is guaranteed.
 
 ### In Rust
 
@@ -139,18 +148,32 @@ error!(session_id, error = %source, "could not resize the terminal");
 Log an error once, where it is handled, not at every level it passes through.
 Panics are recorded automatically by the panic hook.
 
-A Tauri command that can fail returns `CommandResult` and wraps its result in
-`logged`, which writes one `ERROR` record with the command name and gives the
-frontend a `CommandError`:
+`warn!` and `error!` write to the file before they return, so that the record
+survives a crash right after it. That costs a few microseconds: fine for
+things that go wrong, not for a hot loop. `info!` and lower are queued and
+cost almost nothing, but can be dropped under extreme load.
+
+A Tauri command that can fail or panic returns `CommandResult` and runs its
+body inside `logged` (`logged_async` for an `async fn`). The wrapper writes one
+`ERROR` record with the command name, gives the frontend a `CommandError`, and
+turns a panic into an error:
 
 ```rust
 use super::error::{CommandResult, logged};
 
 #[tauri::command]
 pub fn rename_session(id: u32, title: String) -> CommandResult<()> {
-    logged("rename_session", sessions::rename(id, &title))
+    logged("rename_session", || sessions::rename(id, &title))
 }
 ```
+
+A panic must never escape a command: in a synchronous command it unwinds into
+the platform's event loop and can abort the application, and in an
+asynchronous one it leaves the promise in the frontend pending forever. Only a
+command whose body cannot fail or panic may skip the wrapper.
+
+Commands must not take a file system path to write to from the frontend. The
+webview is less trusted than the Rust side: choose the location in Rust.
 
 Run the app with `TERMX_LOG=debug` to see the more verbose levels. Debug
 builds also print the records to stderr. In tests, build a logger with
@@ -165,6 +188,10 @@ to assert on what was written.
   automatically. For an error you catch and handle yourself, call
   `reportError("where-it-happened", error)` from `src/lib/errorReporting.ts`
   if it is worth knowing about.
+- Throw `Error` objects. For anything else that is thrown or rejected, only
+  the type and the top-level key names are logged, never the value
+  (`src/lib/logSafe.ts`). Put what must be known in the message of the error,
+  and nothing that must not be logged.
 - `console.log` and friends do not reach the log file.
 - The same privacy rules apply to everything passed to these functions.
 
