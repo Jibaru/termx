@@ -57,6 +57,7 @@ termx is a [Tauri 2](https://v2.tauri.app) application.
 | `crates/termx-core`      | Rust library with the core logic. No UI or Tauri dependencies. |
 | `apps/desktop/src-tauri` | Tauri shell that exposes the core to the webview.              |
 | `apps/desktop/src`       | Frontend, written in React and TypeScript and built with Vite. |
+| `e2e`                    | End-to-end tests, which drive the real application.            |
 | `plugin`                 | Placeholder for the future Claude Code plugin.                 |
 
 ## Prerequisites
@@ -146,6 +147,14 @@ cargo test --workspace
 pnpm lint
 pnpm typecheck
 pnpm test
+```
+
+Run the end-to-end tests, which open the real application (see
+[CONTRIBUTING.md](CONTRIBUTING.md#end-to-end-tests)):
+
+```sh
+pnpm e2e:build
+pnpm e2e
 ```
 
 ## Logs and bug reports
