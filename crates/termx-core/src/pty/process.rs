@@ -23,7 +23,13 @@ type Child = Box<dyn portable_pty::Child + Send + Sync>;
 /// in an [`Arc`].
 ///
 /// Dropping the handle kills the process if it is still running, reaps it and
-/// joins the helper threads: nothing is left behind.
+/// joins the helper threads: nothing is left behind. This waits for the
+/// process to be gone, which is immediate for one that exits when asked but
+/// takes the whole [grace period](PtyCommand::kill_grace) for one that does
+/// not. Where that matters, call [`kill`](Self::kill) first, which never
+/// blocks, and drop the handle later or on another thread;
+/// [`PtyManager::shutdown`](super::PtyManager::shutdown) does this for all
+/// its terminals at once.
 ///
 /// # Examples
 ///
@@ -92,6 +98,8 @@ struct ChildState {
     child: std::process::Child,
     /// Sends `SIGHUP` to the child.
     hangup: Box<dyn portable_pty::ChildKiller + Send + Sync>,
+    /// How long the child gets to exit after `SIGHUP` before `SIGKILL`.
+    kill_grace: Duration,
     /// Set by `kill`: when the waiter thread must send `SIGKILL` if the
     /// process is still alive.
     force_kill_at: Option<Instant>,
@@ -104,11 +112,6 @@ struct ChildState {
 struct ChildControl {
     killer: Mutex<Box<dyn portable_pty::ChildKiller + Send + Sync>>,
 }
-
-/// How long a process is given to exit after `SIGHUP` before it is sent
-/// `SIGKILL` (Unix only).
-#[cfg(unix)]
-const KILL_GRACE: Duration = Duration::from_millis(250);
 
 /// How long the end of the output stream is held back for the exit status
 /// to be published, once the terminal reports end of file (Unix only).
@@ -165,7 +168,7 @@ impl Pty {
         // closed, or end of file would never be reported on Unix.
         drop(slave);
 
-        Self::attach(master, child, size)
+        Self::attach(master, child, size, command.kill_grace_period())
     }
 
     /// Wires a freshly spawned child up to the helper threads.
@@ -177,7 +180,12 @@ impl Pty {
         master: Master,
         mut child: Child,
         size: PtySize,
+        kill_grace: Duration,
     ) -> Result<(Self, PtyOutput), PtyError> {
+        // Windows terminates a process at once: there is no grace period.
+        #[cfg(windows)]
+        let _ = kill_grace;
+
         let streams = match Streams::open(master.as_ref()) {
             Ok(streams) => streams,
             Err(error) => {
@@ -228,6 +236,7 @@ impl Pty {
             let state = Arc::new(Mutex::new(ChildState {
                 hangup: portable_pty::ChildKiller::clone_killer(&child),
                 child,
+                kill_grace,
                 force_kill_at: None,
             }));
             let reader_task = {
@@ -367,10 +376,12 @@ impl Pty {
     /// [`wait_timeout`](Self::wait_timeout) to observe the exit.
     ///
     /// On Unix the process is sent `SIGHUP`, as when a terminal window is
-    /// closed. If it is still alive 250 ms later, it is sent `SIGKILL` in the
-    /// background. On Windows the process is terminated immediately, and the
-    /// remaining processes attached to the console are terminated when the
-    /// console is closed.
+    /// closed, which lets it save its state and exit on its own. If it is
+    /// still alive after the grace period of its command
+    /// ([`PtyCommand::kill_grace`], three seconds by default), it is sent
+    /// `SIGKILL` in the background. On Windows the process is terminated
+    /// immediately, and the remaining processes attached to the console are
+    /// terminated when the console is closed.
     ///
     /// # Errors
     ///
@@ -391,7 +402,7 @@ impl Pty {
                 Ok(None) if state.force_kill_at.is_none() => {
                     let sent = state.hangup.kill().map_err(PtyError::Kill);
                     if sent.is_ok() {
-                        state.force_kill_at = Instant::now().checked_add(KILL_GRACE);
+                        state.force_kill_at = Instant::now().checked_add(state.kill_grace);
                     }
                     sent
                 }

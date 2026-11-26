@@ -976,14 +976,84 @@ fn kill_terminates_a_long_running_process() {
 }
 
 /// A command that prints `ready` and then runs until it is forcibly killed.
-/// On Unix it ignores the hang-up signal a polite kill sends.
+/// On Unix it ignores the hang-up signal a polite kill sends, and is given a
+/// short grace period so that the tests using it stay quick.
 fn stubborn_process() -> PtyCommand {
-    if cfg!(unix) {
+    let command = if cfg!(unix) {
         PtyCommand::new("/bin/sh")
             .args(["-c", "trap '' HUP; echo ready; while :; do sleep 1; done"])
     } else {
         helper(&["sleep"])
-    }
+    };
+    command.kill_grace(Duration::from_millis(250))
+}
+
+#[cfg(unix)]
+#[test]
+fn process_cleaning_up_after_a_kill_is_not_cut_short() {
+    guarded(|| {
+        // On hang-up this process takes half a second to "save its state",
+        // then exits with a code of its own. A grace period of 250 ms used
+        // to kill it by force in the middle.
+        let command = PtyCommand::new("/bin/sh").args([
+            "-c",
+            "trap 'sleep 0.5; exit 3' HUP; echo ready; while :; do sleep 0.1; done",
+        ]);
+        let mut session = Session::spawn(&command);
+        session.wait_for("ready");
+
+        session.pty.kill().unwrap();
+        let status = session.exit_status();
+
+        assert_eq!(
+            status.code(),
+            Some(3),
+            "the clean-up was interrupted: {status}"
+        );
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn kill_grace_period_is_configurable() {
+    guarded(|| {
+        // A process ignoring the hang-up lives for the grace period...
+        let patient = stubborn_process().kill_grace(Duration::from_millis(1500));
+        let mut session = Session::spawn(&patient);
+        session.wait_for("ready");
+        session.pty.kill().unwrap();
+        assert_eq!(
+            session.pty.wait_timeout(Duration::from_millis(700)),
+            None,
+            "the process was killed by force before its grace period was over"
+        );
+        let status = session.exit_status();
+        assert!(
+            status
+                .signal()
+                .is_some_and(|signal| signal.contains("Kill")),
+            "{status}"
+        );
+
+        // ...and not at all without one.
+        let impatient = stubborn_process().kill_grace(Duration::ZERO);
+        let mut session = Session::spawn(&impatient);
+        session.wait_for("ready");
+        let started = Instant::now();
+        session.pty.kill().unwrap();
+        let status = session.exit_status();
+        assert!(
+            status
+                .signal()
+                .is_some_and(|signal| signal.contains("Kill")),
+            "{status}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "a forced kill took {:?}",
+            started.elapsed()
+        );
+    });
 }
 
 #[test]

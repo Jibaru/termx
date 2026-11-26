@@ -19,6 +19,19 @@ pub const COLORTERM: &str = "truecolor";
 /// they are running inside termx.
 pub const TERM_PROGRAM: &str = "termx";
 
+/// How long a process is given by default to exit on its own when it is
+/// killed, before it is killed by force. See [`PtyCommand::kill_grace`].
+///
+/// A shell exits within milliseconds. Programs that save their state when
+/// the terminal goes away (an editor writing a swap file, Claude Code
+/// flushing its session) need tens to hundreds of milliseconds, more on a
+/// busy machine, and being cut short costs the user data. Three seconds
+/// leaves them an order of magnitude of margin, while a program that is
+/// truly stuck delays closing its terminal, or quitting the application, by
+/// a pause that is still short. Terminals are killed in parallel, so that
+/// pause does not grow with their number.
+pub const DEFAULT_KILL_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// Locale given to a process when the environment does not select one (Unix
 /// only). See [`PtyCommand`].
 pub const DEFAULT_LOCALE: &str = if cfg!(target_os = "macos") {
@@ -173,6 +186,7 @@ pub struct PtyCommand {
     env: Vec<(OsString, OsString)>,
     env_remove: Vec<String>,
     login_shell: bool,
+    kill_grace: std::time::Duration,
 }
 
 impl PtyCommand {
@@ -188,6 +202,7 @@ impl PtyCommand {
             env: Vec::new(),
             env_remove: Vec::new(),
             login_shell: false,
+            kill_grace: DEFAULT_KILL_GRACE,
         }
     }
 
@@ -286,6 +301,25 @@ impl PtyCommand {
         self
     }
 
+    /// Sets how long the process is given to exit on its own when it is
+    /// killed ([`Pty::kill`](super::Pty::kill), or the handle being
+    /// dropped), before it is killed by force. The default is
+    /// [`DEFAULT_KILL_GRACE`].
+    ///
+    /// On Unix the process is first sent `SIGHUP`, and `SIGKILL` only if it
+    /// is still running when the grace period is over. A zero duration
+    /// kills by force right away. Killing never blocks whatever the value;
+    /// only dropping the handle waits, and only for a process that ignores
+    /// the first signal.
+    ///
+    /// Windows has no equivalent of the polite signal: the process is
+    /// always terminated immediately and this setting is ignored.
+    #[must_use]
+    pub fn kill_grace(mut self, grace: std::time::Duration) -> Self {
+        self.kill_grace = grace;
+        self
+    }
+
     /// The program this command runs.
     #[must_use]
     pub fn program(&self) -> &OsStr {
@@ -297,6 +331,11 @@ impl PtyCommand {
     #[must_use]
     pub fn is_login_shell(&self) -> bool {
         self.login_shell
+    }
+
+    /// The grace period set with [`kill_grace`](Self::kill_grace).
+    pub(super) fn kill_grace_period(&self) -> std::time::Duration {
+        self.kill_grace
     }
 
     /// Validates the command and converts it to a portable-pty builder.
@@ -644,6 +683,22 @@ mod tests {
         let mut builder = builder_with_env(&[]);
         PtyCommand::new("prog").apply_environment(&mut builder);
         assert_eq!(env_of(&builder, "LANG"), None);
+    }
+
+    #[test]
+    fn kill_grace_defaults_to_a_generous_value_and_can_be_set() {
+        use std::time::Duration;
+
+        let command = PtyCommand::new("prog");
+        assert_eq!(command.kill_grace_period(), DEFAULT_KILL_GRACE);
+        assert!(DEFAULT_KILL_GRACE >= Duration::from_secs(1));
+        assert_eq!(
+            PtyCommand::default_shell().kill_grace_period(),
+            DEFAULT_KILL_GRACE
+        );
+
+        let command = command.kill_grace(Duration::from_millis(40));
+        assert_eq!(command.kill_grace_period(), Duration::from_millis(40));
     }
 
     #[test]
