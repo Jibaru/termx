@@ -89,7 +89,7 @@ pub use self::panic::PANIC_TARGET;
 pub use self::rate_limit::{Decision, RateLimiter};
 pub use self::record::{MAX_VALUE_BYTES, TRUNCATION_MARKER};
 pub use self::redact::Redactor;
-pub use self::rotate::{LogFile, Retention, is_log_file_name, log_files, prune};
+pub use self::rotate::{LogFile, Retention, is_log_file_name, log_files, prune, verify_log_dir};
 pub use self::system::SystemInfo;
 pub use self::writer::LOG_TARGET;
 
