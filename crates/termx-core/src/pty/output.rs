@@ -15,6 +15,8 @@ use super::lock;
 /// ([`READ_BUFFER_SIZE`](super::READ_BUFFER_SIZE) bytes).
 pub const OUTPUT_BUFFER_CAPACITY: usize = 1024 * 1024;
 
+type ReadyCallback = Arc<dyn Fn() + Send + Sync>;
+
 #[derive(Default)]
 struct State {
     /// Bytes read from the PTY and not yet taken by the consumer.
@@ -25,6 +27,8 @@ struct State {
     receiver_dropped: bool,
     /// The [`Pty`](super::Pty) is being dropped: stop as soon as possible.
     shut_down: bool,
+    /// Called when there is something new to receive.
+    on_readable: Option<ReadyCallback>,
 }
 
 #[derive(Default)]
@@ -75,15 +79,34 @@ impl OutputSink {
         if state.receiver_dropped || state.shut_down {
             return;
         }
+        // The callback is edge-triggered: it fires when the buffer stops
+        // being empty, not for every push into a buffer the consumer has
+        // already been told about.
+        let callback = if state.buffer.is_empty() && !bytes.is_empty() {
+            state.on_readable.clone()
+        } else {
+            None
+        };
         state.buffer.extend_from_slice(bytes);
         drop(state);
         self.channel.readable.notify_one();
+        // Called without the lock, so that it may use the output.
+        if let Some(callback) = callback {
+            callback();
+        }
     }
 
     /// Marks the end of the stream. Buffered bytes can still be received.
     pub(super) fn finish(&self) {
-        lock(&self.channel.state).finished = true;
+        let callback = {
+            let mut state = lock(&self.channel.state);
+            state.finished = true;
+            state.on_readable.clone()
+        };
         self.channel.readable.notify_all();
+        if let Some(callback) = callback {
+            callback();
+        }
     }
 
     /// Tells the reader thread to stop forwarding output and to stop as soon
@@ -158,6 +181,67 @@ impl PtyOutput {
         self.recv_until(Instant::now().checked_add(timeout))
     }
 
+    /// Registers a callback invoked whenever there is something new to
+    /// receive, as an alternative to dedicating a thread to blocking in
+    /// [`recv`](Self::recv).
+    ///
+    /// The callback is called each time output arrives while the buffer is
+    /// empty, and once when the stream ends. If output is already waiting
+    /// (or the stream has already ended) it is called immediately. After a
+    /// call, drain the stream with `recv_timeout(Duration::ZERO)` until it
+    /// reports [`Timeout`](RecvTimeoutError::Timeout) or
+    /// [`Closed`](RecvTimeoutError::Closed); the callback will not fire
+    /// again before the buffer has been emptied.
+    ///
+    /// The callback runs on the PTY's reader thread (or on the calling
+    /// thread for the immediate call), so it must return quickly and must
+    /// not block: typically it only wakes up an event loop or an async
+    /// task, which then does the draining. Backpressure is unaffected: the
+    /// output stays in the bounded buffer until it is received.
+    ///
+    /// Registering a callback replaces the previous one.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use std::sync::mpsc;
+    /// use std::time::Duration;
+    /// use termx_core::pty::{Pty, PtyCommand, PtySize, RecvTimeoutError};
+    ///
+    /// # fn main() -> Result<(), termx_core::pty::PtyError> {
+    /// let (pty, mut output) = Pty::spawn(&PtyCommand::default_shell(), PtySize::default())?;
+    ///
+    /// // One event loop can serve every terminal: no thread per session.
+    /// let (events, event_loop) = mpsc::channel();
+    /// output.on_readable(move || {
+    ///     let _ = events.send("terminal 1 is readable");
+    /// });
+    ///
+    /// for _event in event_loop {
+    ///     loop {
+    ///         match output.recv_timeout(Duration::ZERO) {
+    ///             Ok(chunk) => { /* forward the chunk to the UI */ }
+    ///             Err(RecvTimeoutError::Timeout) => break,
+    ///             Err(RecvTimeoutError::Closed) => return Ok(()),
+    ///         }
+    ///     }
+    /// }
+    /// # drop(pty);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn on_readable(&mut self, callback: impl Fn() + Send + Sync + 'static) {
+        let callback: ReadyCallback = Arc::new(callback);
+        let ready_now = {
+            let mut state = lock(&self.channel.state);
+            state.on_readable = Some(Arc::clone(&callback));
+            !state.buffer.is_empty() || state.finished
+        };
+        if ready_now {
+            callback();
+        }
+    }
+
     /// Waits for output until `deadline`, or forever if it is `None`.
     fn recv_until(&mut self, deadline: Option<Instant>) -> Result<Vec<u8>, RecvTimeoutError> {
         let mut state = lock(&self.channel.state);
@@ -206,6 +290,7 @@ impl Drop for PtyOutput {
         let mut state = lock(&self.channel.state);
         state.receiver_dropped = true;
         state.buffer = Vec::new();
+        state.on_readable = None;
         drop(state);
         self.channel.writable.notify_all();
     }
@@ -325,6 +410,100 @@ mod tests {
         assert_eq!(output.recv_timeout(SOON).unwrap(), b"second");
         assert_eq!(output.recv(), None);
         producer.join().unwrap();
+    }
+
+    /// Registers a callback counting its calls.
+    fn count_calls(output: &mut PtyOutput) -> Arc<std::sync::atomic::AtomicUsize> {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        output.on_readable({
+            let calls = Arc::clone(&calls);
+            move || {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+        calls
+    }
+
+    #[test]
+    fn readable_callback_fires_when_the_buffer_stops_being_empty() {
+        use std::sync::atomic::Ordering::SeqCst;
+
+        let (sink, mut output) = channel();
+        let calls = count_calls(&mut output);
+        assert_eq!(calls.load(SeqCst), 0, "nothing to receive yet");
+
+        sink.push(b"one");
+        assert_eq!(calls.load(SeqCst), 1);
+        // More output for a consumer that was already notified: no new call.
+        sink.push(b"two");
+        assert_eq!(calls.load(SeqCst), 1);
+
+        assert_eq!(output.recv_timeout(Duration::ZERO).unwrap(), b"onetwo");
+        assert_eq!(
+            output.recv_timeout(Duration::ZERO),
+            Err(RecvTimeoutError::Timeout)
+        );
+
+        // The buffer was emptied, so the next output notifies again.
+        sink.push(b"three");
+        assert_eq!(calls.load(SeqCst), 2);
+
+        // The end of the stream notifies too.
+        sink.finish();
+        assert_eq!(calls.load(SeqCst), 3);
+        assert_eq!(output.recv_timeout(Duration::ZERO).unwrap(), b"three");
+        assert_eq!(
+            output.recv_timeout(Duration::ZERO),
+            Err(RecvTimeoutError::Closed)
+        );
+    }
+
+    #[test]
+    fn readable_callback_fires_immediately_when_output_is_waiting() {
+        use std::sync::atomic::Ordering::SeqCst;
+
+        let (sink, mut output) = channel();
+        sink.push(b"early");
+        assert_eq!(count_calls(&mut output).load(SeqCst), 1);
+
+        let (sink, mut output) = channel();
+        sink.finish();
+        assert_eq!(count_calls(&mut output).load(SeqCst), 1);
+    }
+
+    #[test]
+    fn readable_callback_may_use_the_channel_without_deadlocking() {
+        // The callback runs outside the buffer lock: a consumer may be
+        // receiving on another thread while it runs.
+        let (sink, mut output) = channel();
+        let (wake_tx, wake_rx) = mpsc::channel();
+        output.on_readable(move || {
+            let _ = wake_tx.send(());
+        });
+
+        let consumer = thread::spawn(move || {
+            let mut received = Vec::new();
+            for () in wake_rx {
+                loop {
+                    match output.recv_timeout(Duration::ZERO) {
+                        Ok(chunk) => received.extend_from_slice(&chunk),
+                        Err(RecvTimeoutError::Timeout) => break,
+                        Err(RecvTimeoutError::Closed) => return received,
+                    }
+                }
+            }
+            received
+        });
+
+        let mut expected = Vec::new();
+        for index in 0..2_000u32 {
+            let bytes = index.to_le_bytes();
+            sink.push(&bytes);
+            expected.extend_from_slice(&bytes);
+        }
+        sink.finish();
+
+        assert_eq!(consumer.join().unwrap(), expected);
     }
 
     /// Fills the buffer, starts a push that must block, then runs `unblock`

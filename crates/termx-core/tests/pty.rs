@@ -328,6 +328,54 @@ fn output_stream_reports_its_end() {
 }
 
 #[test]
+fn output_can_be_consumed_without_a_blocking_thread() {
+    guarded(|| {
+        // One loop serves two terminals, woken up by their notifications and
+        // never blocking on either of them.
+        let (events_tx, events_rx) = mpsc::channel::<usize>();
+        let mut terminals: Vec<(Pty, PtyOutput, Vec<u8>, bool)> =
+            ["first-terminal", "second-terminal"]
+                .iter()
+                .enumerate()
+                .map(|(index, text)| {
+                    let (pty, mut output) =
+                        Pty::spawn(&helper(&["repeat", "500", text]), PtySize::default()).unwrap();
+                    let events = events_tx.clone();
+                    output.on_readable(move || {
+                        let _ = events.send(index);
+                    });
+                    (pty, output, Vec::new(), false)
+                })
+                .collect();
+
+        while terminals.iter().any(|(_, _, _, ended)| !ended) {
+            let index = events_rx
+                .recv_timeout(TIMEOUT)
+                .expect("no notification although a stream is still open");
+            let (_, output, raw, ended) = &mut terminals[index];
+            loop {
+                match output.recv_timeout(Duration::ZERO) {
+                    Ok(chunk) => raw.extend_from_slice(&chunk),
+                    Err(RecvTimeoutError::Timeout) => break,
+                    Err(RecvTimeoutError::Closed) => {
+                        *ended = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        for ((pty, _, raw, _), text) in terminals.iter().zip(["first-terminal", "second-terminal"])
+        {
+            assert!(pty.wait_timeout(TIMEOUT).unwrap().success());
+            let visible = visible_text(raw);
+            assert_eq!(numbered_lines(&visible, text).len(), 500, "lines were lost");
+            assert!(visible.contains("END-OF-OUTPUT"));
+        }
+    });
+}
+
+#[test]
 fn utf8_output_survives_chunking() {
     guarded(|| {
         // Two, three and four byte characters, without spaces (ConPTY may
