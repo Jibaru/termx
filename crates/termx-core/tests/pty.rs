@@ -17,7 +17,7 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::{OnceLock, mpsc};
+use std::sync::{Arc, Barrier, OnceLock, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -410,6 +410,59 @@ fn large_burst_is_fully_delivered_to_a_slow_consumer() {
             LINES * 102 + "END-OF-OUTPUT\r\n".len(),
             "the number of bytes delivered is wrong"
         );
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Concurrency
+// ---------------------------------------------------------------------------
+
+#[test]
+fn many_threads_can_spawn_at_the_same_time() {
+    guarded(|| {
+        // Restoring many sessions at start-up spawns them in parallel, which
+        // used to fail at random on macOS.
+        const THREADS: usize = 48;
+        const ROUNDS: usize = 3;
+        termx_core::pty::raise_open_file_limit().expect("cannot raise the open file limit");
+
+        for round in 0..ROUNDS {
+            let barrier = Arc::new(Barrier::new(THREADS));
+            let spawners: Vec<_> = (0..THREADS)
+                .map(|index| {
+                    let barrier = Arc::clone(&barrier);
+                    thread::spawn(move || {
+                        let marker = format!("spawned-{round}-{index}");
+                        let command = helper(&["print", &marker]);
+                        barrier.wait();
+                        let (pty, output) = Pty::spawn(&command, PtySize::default())
+                            .map_err(|error| format!("{marker}: {error}"))?;
+                        let mut session = Session {
+                            pty,
+                            output,
+                            raw: Vec::new(),
+                        };
+                        session.read_to_end();
+                        let status = session.exit_status();
+                        if status.success() && session.text().contains(&marker) {
+                            Ok(())
+                        } else {
+                            Err(format!("{marker}: {status}; got {:?}", session.text()))
+                        }
+                    })
+                })
+                .collect();
+
+            let failures: Vec<String> = spawners
+                .into_iter()
+                .filter_map(|spawner| spawner.join().expect("a spawner panicked").err())
+                .collect();
+            assert!(
+                failures.is_empty(),
+                "{} of {THREADS} concurrent spawns failed: {failures:#?}",
+                failures.len()
+            );
+        }
     });
 }
 

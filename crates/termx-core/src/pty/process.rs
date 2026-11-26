@@ -125,9 +125,7 @@ impl Pty {
         let size = size.validate()?;
         let builder = command.to_builder()?;
 
-        let PtyPair { slave, master } = native_pty_system()
-            .openpty(size.to_native())
-            .map_err(|error| PtyError::Open(format!("{error:#}")))?;
+        let PtyPair { slave, master } = open_pty(size)?;
         let child = slave
             .spawn_command(builder)
             .map_err(|error| PtyError::Spawn {
@@ -466,6 +464,42 @@ impl Shared {
 
         let writer = lock(&self.writer).take();
         drop(writer);
+    }
+}
+
+/// How many times creating a pseudo-terminal is attempted, and the pause
+/// before the second attempt (doubled before each further one).
+const OPEN_ATTEMPTS: u32 = 5;
+const OPEN_RETRY_PAUSE: Duration = Duration::from_millis(5);
+
+/// Creates a pseudo-terminal, one caller at a time.
+///
+/// `openpty(3)` is not safe to call from several threads at once on macOS:
+/// concurrent calls fail at random ("Unknown error: -6"), which used to break
+/// a third of the spawns when many sessions were started in parallel. The
+/// call is quick, so a process-wide lock costs nothing; the retries cover a
+/// transient failure caused by something outside this module.
+fn open_pty(size: PtySize) -> Result<PtyPair, PtyError> {
+    static OPENING: Mutex<()> = Mutex::new(());
+
+    let mut pause = OPEN_RETRY_PAUSE;
+    let mut attempt = 1;
+    loop {
+        let result = {
+            let _guard = lock(&OPENING);
+            native_pty_system().openpty(size.to_native())
+        };
+        match result {
+            Ok(pair) => return Ok(pair),
+            Err(error) if attempt == OPEN_ATTEMPTS => {
+                return Err(PtyError::Open(format!("{error:#}")));
+            }
+            Err(_) => {
+                thread::sleep(pause);
+                pause *= 2;
+                attempt += 1;
+            }
+        }
     }
 }
 
