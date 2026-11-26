@@ -26,9 +26,11 @@ one session per window for now. There are no releases yet; see
 - **Shift+Enter** sends the same sequence as Option+Enter (`ESC` followed by
   Enter), which Claude Code reads as "new line" without any setup. Do not run
   `/terminal-setup` for it.
-- On macOS, **Option is the Meta key**, as Claude Code and shells expect for
-  shortcuts such as Option+B or Option+Enter. It therefore does not type the
-  alternate characters of your keyboard layout.
+- On macOS, the **left Option key is the Meta key**, as Claude Code and
+  shells expect for shortcuts such as Option+B. The **right Option key types
+  characters** as usual: á, ñ, ¿ and, on keyboards that need Option for them,
+  @ # [ ] { } \ | ~. Option+Enter inserts a new line in Claude Code with
+  either key.
 - Programs may copy to your clipboard (the OSC 52 escape sequence, used by
   Claude Code's `/copy` and by tmux). They can never read it.
 - The scrollback keeps 10,000 lines.
