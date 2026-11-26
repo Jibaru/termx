@@ -8,6 +8,8 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Third-party actions are pinned to a commit. GitHub's own `actions/*` use
+# major version tags, as in CI.
 permissions: {}
 
 jobs:
@@ -18,7 +20,7 @@ jobs:
       pull-requests: read
     steps:
       - name: Check the pull request title
-        uses: amannn/action-semantic-pull-request@v6
+        uses: amannn/action-semantic-pull-request@66e72920af32222769c386d81f89656ebcb6d6d5 # v6.1.4
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -36,7 +38,7 @@ jobs:
 
       # Rules come from commitlint.config.mjs.
       - name: Check the commit messages
-        uses: wagoid/commitlint-github-action@v6
+        uses: wagoid/commitlint-github-action@b948419dd99f3fd78a6548d48f94e3df7f6bf3ed # v6.2.1
 
   change-file:
     name: Change file
@@ -59,10 +61,8 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: .github/scripts/check-change-file.sh
 
-      # knope-dev/action publishes no major version tag, so it is pinned to an
-      # exact release.
       - name: Install Knope
-        uses: knope-dev/action@v2.1.2
+        uses: knope-dev/action@19617851f9f13ab2f27a05989c55efb18aca3675 # v2.1.2
         with:
           version: 0.24.0
 
