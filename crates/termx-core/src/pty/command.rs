@@ -39,22 +39,47 @@ pub const DEFAULT_LOCALE: &str = if cfg!(target_os = "macos") {
 /// - **Terminal multiplexers** (`TMUX`, `TMUX_PANE`, `STY`): programs would
 ///   believe they run inside tmux or screen, and `tmux` would refuse to
 ///   start "nested" sessions.
-/// - **Claude Code session markers** (`CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`,
-///   ...): a Claude Code started in the terminal would believe it is a child
-///   of the session termx was launched from. User settings such as
-///   `CLAUDE_CODE_USE_BEDROCK` are not on the list and are inherited.
+/// - **Claude Code session state** (`CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`,
+///   `CLAUDE_CODE_SESSION_ID`, `CLAUDE_EFFORT`, `CLAUDE_PROJECT_DIR`, ...):
+///   set by a running Claude Code for its own children. A Claude Code
+///   started in the terminal would believe it is a child of the session
+///   termx was launched from.
 /// - **npm and pnpm scripts** (`npm_*`, `INIT_CWD`, `PNPM_SCRIPT_SRC_DIR`):
 ///   set when the application is started through a package script, as
 ///   during development; they change how package managers behave.
-/// - **Other terminal emulators** (`TERM_SESSION_ID`, `ITERM_SESSION_ID`,
-///   `KITTY_WINDOW_ID`, `WT_SESSION`, ...): programs use them to detect
-///   features of a terminal that is not the one they are running in.
+/// - **Other terminal emulators and editors** (`TERM_SESSION_ID`, `ITERM_*`,
+///   `KITTY_*`, `GHOSTTY_*`, `WEZTERM_*`, `ALACRITTY_*`, `KONSOLE_*`,
+///   `WT_SESSION`, the shell integration variables of VS Code, ...):
+///   programs use them to detect features of a terminal that is not the one
+///   they are running in, or to talk to it through a socket.
+/// - **Launch context** (`__CFBundleIdentifier`, which macOS sets to the
+///   bundle of the launching application, and `GPG_TTY`, which names the
+///   terminal device of the launching shell and would send passphrase
+///   prompts there).
+///
+/// # What is deliberately kept
+///
+/// The list contains state, never configuration. In particular these are
+/// inherited, because removing them would silently change how the user's
+/// tools behave:
+///
+/// - `ANTHROPIC_*` and `CLAUDE_CODE_OAUTH_TOKEN`: credentials and API
+///   endpoints.
+/// - `CLAUDE_CONFIG_DIR`: where the user keeps the Claude Code configuration.
+/// - `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`,
+///   `CLAUDE_CODE_MAX_OUTPUT_TOKENS` and the other `CLAUDE_CODE_*` settings.
+///   This is why Claude Code variables are listed one by one instead of
+///   with a `CLAUDE_*` pattern.
+/// - `NPM_TOKEN`, `NPM_CONFIG_*` and `NODE_*`: user configuration, unlike
+///   the lower-case `npm_*` variables npm sets while running a script.
+/// - `GIT_ASKPASS`, `EDITOR`, `SSH_AUTH_SOCK`, `TERMINFO`: possibly set by
+///   an editor or a terminal, but just as possibly by the user.
 pub const DEFAULT_ENV_DENYLIST: &[&str] = &[
     // Terminal multiplexers.
     "TMUX",
     "TMUX_PANE",
     "STY",
-    // Claude Code session markers.
+    // Claude Code session state.
     "CLAUDECODE",
     "CLAUDE_CODE_ENTRYPOINT",
     "CLAUDE_CODE_SESSION_ID",
@@ -64,27 +89,41 @@ pub const DEFAULT_ENV_DENYLIST: &[&str] = &[
     "CLAUDE_CODE_MESSAGING_SOCKET",
     "CLAUDE_CODE_MESSAGING_TOKEN",
     "CLAUDE_CODE_SSE_PORT",
+    "CLAUDE_CODE_REMOTE",
+    "CLAUDE_AGENT_SDK_VERSION",
     "CLAUDE_PID",
+    "CLAUDE_EFFORT",
+    "CLAUDE_PROJECT_DIR",
+    "CLAUDE_ENV_FILE",
+    "CLAUDE_PLUGIN_ROOT",
     // npm and pnpm scripts.
     "npm_*",
     "INIT_CWD",
     "PNPM_SCRIPT_SRC_DIR",
     // Other terminal emulators.
     "TERM_SESSION_ID",
-    "ITERM_SESSION_ID",
-    "ITERM_PROFILE",
+    "ITERM_*",
     "LC_TERMINAL",
     "LC_TERMINAL_VERSION",
-    "KITTY_WINDOW_ID",
-    "KITTY_PID",
-    "ALACRITTY_WINDOW_ID",
-    "ALACRITTY_SOCKET",
-    "WEZTERM_PANE",
-    "WEZTERM_UNIX_SOCKET",
+    "KITTY_*",
+    "GHOSTTY_*",
+    "ALACRITTY_*",
+    "WEZTERM_*",
+    "KONSOLE_*",
     "WT_SESSION",
     "WT_PROFILE_ID",
     "VTE_VERSION",
     "WINDOWID",
+    // The integrated terminal of VS Code and its forks.
+    "VSCODE_INJECTION",
+    "VSCODE_SHELL_INTEGRATION",
+    "VSCODE_NONCE",
+    "VSCODE_STABLE",
+    "VSCODE_IPC_HOOK_CLI",
+    "VSCODE_GIT_*",
+    // Launch context.
+    "__CFBundleIdentifier",
+    "GPG_TTY",
 ];
 
 /// A program to run inside a PTY: what to execute, where, and with which
@@ -447,12 +486,36 @@ mod tests {
             ("ITERM_SESSION_ID", "w0t0p0"),
             ("WT_SESSION", "guid"),
             ("KITTY_WINDOW_ID", "1"),
+            ("CLAUDE_EFFORT", "high"),
+            ("CLAUDE_PROJECT_DIR", "/repo"),
+            ("__CFBundleIdentifier", "com.apple.Terminal"),
+            ("GPG_TTY", "/dev/ttys003"),
+            ("VSCODE_INJECTION", "1"),
+            ("VSCODE_GIT_IPC_HANDLE", "/tmp/vscode-git.sock"),
+            ("GHOSTTY_RESOURCES_DIR", "/Applications/Ghostty.app"),
+            ("ITERM_PROFILE", "Default"),
+            ("WEZTERM_PANE", "0"),
+            ("ALACRITTY_SOCKET", "/tmp/alacritty.sock"),
         ];
         let mut builder = builder_with_env(&inherited);
         builder.env("PATH", "/usr/bin");
         builder.env("HOME", "/home/me");
-        builder.env("CLAUDE_CODE_USE_BEDROCK", "1");
-        builder.env("NPM_TOKEN", "secret");
+        // Configuration and credentials that merely look similar.
+        let kept = [
+            ("CLAUDE_CODE_USE_BEDROCK", "1"),
+            ("CLAUDE_CONFIG_DIR", "/home/me/.claude"),
+            ("CLAUDE_CODE_OAUTH_TOKEN", "token"),
+            ("ANTHROPIC_API_KEY", "key"),
+            ("ANTHROPIC_BASE_URL", "https://example.invalid"),
+            ("NPM_TOKEN", "secret"),
+            ("NPM_CONFIG_REGISTRY", "https://example.invalid"),
+            ("GIT_ASKPASS", "/usr/bin/askpass"),
+            ("VSCODE_CUSTOM_SETTING", "user"),
+            ("SSH_AUTH_SOCK", "/tmp/agent"),
+        ];
+        for (name, value) in kept {
+            builder.env(name, value);
+        }
 
         PtyCommand::new("prog").apply_environment(&mut builder);
 
@@ -462,8 +525,9 @@ mod tests {
         // Ordinary variables and user settings are untouched.
         assert_eq!(env_of(&builder, "PATH"), Some("/usr/bin"));
         assert_eq!(env_of(&builder, "HOME"), Some("/home/me"));
-        assert_eq!(env_of(&builder, "CLAUDE_CODE_USE_BEDROCK"), Some("1"));
-        assert_eq!(env_of(&builder, "NPM_TOKEN"), Some("secret"));
+        for (name, value) in kept {
+            assert_eq!(env_of(&builder, name), Some(value), "{name} was dropped");
+        }
     }
 
     #[test]
