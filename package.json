@@ -19,7 +19,9 @@
     "tauri": "pnpm --filter @termx/desktop tauri",
     "lint": "pnpm --filter @termx/desktop lint && prettier --check .",
     "format": "prettier --write .",
-    "test": "pnpm --filter @termx/desktop test"
+    "test": "pnpm --filter @termx/desktop test",
+    "change": "knope document-change",
+    "release:dry-run": "knope prepare-release --dry-run"
   },
   "devDependencies": {
     "prettier": "^3.10.1"

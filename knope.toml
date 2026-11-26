@@ -1,0 +1,61 @@
+# Release tooling configuration for Knope (https://knope.tech).
+#
+# termx ships as one product with one version. Every file listed below holds
+# that version, and Knope bumps all of them together.
+
+[package]
+versioned_files = [
+  # `[workspace.package] version`, inherited by every crate. The Tauri shell
+  # takes the application version from here too.
+  "Cargo.toml",
+  # The `termx-core` entry in `[workspace.dependencies]`.
+  { path = "Cargo.toml", dependency = "termx-core" },
+  # The workspace members recorded in the lockfile. Add an entry for every new
+  # crate, otherwise `cargo --locked` fails after a release.
+  { path = "Cargo.lock", dependency = "termx-core" },
+  { path = "Cargo.lock", dependency = "termx-desktop" },
+  # A regex is used for the package.json files instead of Knope's built-in
+  # support so that only the version changes and Prettier formatting is kept.
+  { path = "package.json", regex = '(?m)^  "version": "(?<version>[^"]+)"' },
+  { path = "apps/desktop/package.json", regex = '(?m)^  "version": "(?<version>[^"]+)"' },
+]
+changelog = "CHANGELOG.md"
+# Later milestone: set `assets` here to attach the installers built by the
+# release workflow to the GitHub Release.
+
+# The changelog and the version bump come from the change files in
+# `.changeset/` only. Commit messages are linted but never end up in the
+# changelog.
+[changes]
+ignore_conventional_commits = true
+
+# `knope document-change`: create a change file interactively.
+[[workflows]]
+name = "document-change"
+
+[[workflows.steps]]
+type = "CreateChangeFile"
+
+# `knope prepare-release`: compile the change files into CHANGELOG.md, bump
+# every versioned file and commit the result. It does not push or tag.
+[[workflows]]
+name = "prepare-release"
+
+[[workflows.steps]]
+type = "PrepareRelease"
+
+[[workflows.steps]]
+type = "Command"
+command = "git commit -m \"chore: release $version\""
+
+# `knope release`: tag the current commit and create the GitHub Release, using
+# the matching CHANGELOG.md section as the release notes.
+[[workflows]]
+name = "release"
+
+[[workflows.steps]]
+type = "Release"
+
+[github]
+owner = "Jibaru"
+repo = "termx"
