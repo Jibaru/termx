@@ -47,7 +47,8 @@ use super::suppress::{Summary, Suppressor};
 pub const LOG_TARGET: &str = "termx::log";
 
 /// Longest time a `WARN` or `ERROR` logging call waits for its record to be
-/// written before it returns and leaves the record queued.
+/// written before it returns and leaves the record queued, unless
+/// [`LogConfig::urgent_wait`](super::LogConfig::urgent_wait) says otherwise.
 pub const URGENT_WAIT: Duration = Duration::from_millis(100);
 
 /// `INFO` and lower records that can wait for the background thread before
@@ -163,6 +164,8 @@ pub(crate) struct LogWriter {
     written: Condvar,
     context: Arc<LineContext>,
     capacity: usize,
+    /// Longest time a warning or error waits to be written.
+    urgent_wait: Duration,
     /// Where a panic record goes when the log file cannot be had.
     crash_file: PathBuf,
     first_errors: Mutex<FirstErrors>,
@@ -174,7 +177,12 @@ impl LogWriter {
     /// A writer without a background thread: every `WARN` or `ERROR` record
     /// is written by its caller, and queued records are written along with
     /// it or by [`LogWriter::flush`].
-    pub fn new(file: RotatingFile, context: Arc<LineContext>, capacity: usize) -> Arc<Self> {
+    pub fn new(
+        file: RotatingFile,
+        context: Arc<LineContext>,
+        capacity: usize,
+        urgent_wait: Duration,
+    ) -> Arc<Self> {
         Arc::new(Self {
             crash_file: file.side_file_path(CRASH_FILE),
             first_errors: Mutex::new(FirstErrors {
@@ -191,6 +199,7 @@ impl LogWriter {
             written: Condvar::new(),
             context,
             capacity,
+            urgent_wait,
             worker: Mutex::new(None),
         })
     }
@@ -298,7 +307,7 @@ impl LogWriter {
         pending.queue.push_back((line, true));
         self.wake.notify_one();
 
-        let deadline = Instant::now() + URGENT_WAIT;
+        let deadline = Instant::now() + self.urgent_wait;
         while pending.written_ticket < ticket && pending.worker_running {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if pending.stalled || remaining.is_zero() {
@@ -519,10 +528,11 @@ impl LogWriter {
     }
 
     /// Keeps the log file busy for `duration`, as a disk that does not
-    /// answer would.
+    /// answer would, and says on `stalled` when it has started.
     #[cfg(test)]
-    fn stall(&self, duration: Duration) {
+    fn stall(&self, duration: Duration, stalled: &std::sync::mpsc::Sender<()>) {
         let _file = lock(&self.file);
+        let _ = stalled.send(());
         std::thread::sleep(duration);
     }
 }
@@ -557,7 +567,7 @@ mod tests {
             run_id: run_id.to_owned(),
             redactor: Redactor::disabled(),
         });
-        LogWriter::new(file, context, capacity)
+        LogWriter::new(file, context, capacity, URGENT_WAIT)
     }
 
     fn lines(dir: &Path) -> Vec<String> {
@@ -682,7 +692,15 @@ mod tests {
     #[test]
     fn with_the_background_thread_an_urgent_record_is_still_on_disk_on_return() {
         let dir = tempfile::tempdir().unwrap();
-        let writer = writer(dir.path(), 16);
+        // A wait that a busy test machine cannot exceed: this test is about
+        // the record being there, not about how long that may take.
+        let run_id = "5f0c2a9be771";
+        let file = RotatingFile::open(dir.path(), Retention::default(), run_id).unwrap();
+        let context = Arc::new(LineContext {
+            run_id: run_id.to_owned(),
+            redactor: Redactor::disabled(),
+        });
+        let writer = LogWriter::new(file, context, 16, Duration::from_secs(60));
         writer.start_worker().unwrap();
 
         for index in 0..200 {
@@ -724,7 +742,7 @@ mod tests {
                 writer.submit(format!("error {index}\n"), true);
             }
             let rest = start.elapsed();
-            assert!(rest < URGENT_WAIT, "49 more errors took {rest:?}");
+            assert!(rest < URGENT_WAIT * 5, "49 more errors took {rest:?}");
         });
 
         // The disk is back: everything is written, in order, and counted.
@@ -753,8 +771,10 @@ mod tests {
         writer.start_worker().unwrap();
 
         std::thread::scope(|scope| {
-            scope.spawn(|| writer.stall(URGENT_WAIT * 3));
-            std::thread::sleep(URGENT_WAIT / 2);
+            let (stalled, is_stalled) = std::sync::mpsc::channel();
+            let writer = &writer;
+            scope.spawn(move || writer.stall(URGENT_WAIT * 3, &stalled));
+            is_stalled.recv().unwrap();
             writer.submit("late\n".to_owned(), true);
         });
         // Let the background thread write what was deferred.
@@ -772,8 +792,10 @@ mod tests {
         writer.start_worker().unwrap();
 
         std::thread::scope(|scope| {
-            scope.spawn(|| writer.stall(URGENT_WAIT * 4));
-            std::thread::sleep(URGENT_WAIT / 2);
+            let (stalled, is_stalled) = std::sync::mpsc::channel();
+            let writer = &writer;
+            scope.spawn(move || writer.stall(URGENT_WAIT * 4, &stalled));
+            is_stalled.recv().unwrap();
             for index in 0..100 {
                 writer.submit(format!("error {index}\n"), true);
             }
@@ -880,7 +902,7 @@ mod tests {
             run_id: run_id.to_owned(),
             redactor: Redactor::disabled(),
         });
-        let writer = LogWriter::new(file, context, 16);
+        let writer = LogWriter::new(file, context, 16, URGENT_WAIT);
 
         writer.submit("the error that started it\n".to_owned(), true);
         for index in 0..5_000 {

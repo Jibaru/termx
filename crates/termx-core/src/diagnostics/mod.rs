@@ -71,6 +71,7 @@ use std::hash::{BuildHasher, Hasher};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use tracing_subscriber::layer::SubscriberExt;
 
@@ -132,6 +133,11 @@ pub struct LogConfig {
     pub webview_version: Option<String>,
     /// Hides the home directory. Defaults to the one of the current user.
     pub redactor: Redactor,
+    /// Longest time a `WARN` or `ERROR` logging call waits for its record to
+    /// be written. Defaults to [`URGENT_WAIT`]. Longer means a stalled disk
+    /// holds up the caller for longer; shorter means a busy machine is more
+    /// likely to write a record after the call returned.
+    pub urgent_wait: Duration,
 }
 
 impl LogConfig {
@@ -146,6 +152,7 @@ impl LogConfig {
             app_version: app_version.into(),
             webview_version: None,
             redactor: redact::redactor().clone(),
+            urgent_wait: URGENT_WAIT,
         }
     }
 }
@@ -256,7 +263,12 @@ impl Diagnostics {
             run_id,
             redactor: config.redactor,
         });
-        let writer = LogWriter::new(file, Arc::clone(&context), QUEUE_CAPACITY);
+        let writer = LogWriter::new(
+            file,
+            Arc::clone(&context),
+            QUEUE_CAPACITY,
+            config.urgent_wait,
+        );
         writer
             .start_worker()
             .map_err(|source| DiagnosticsError::io(&config.dir, source))?;
