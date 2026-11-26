@@ -27,7 +27,7 @@ describe("describeForLog", () => {
   it("logs only the type and the top-level keys of an object", () => {
     const described = describeForLog({ token: SECRET, env: { HOME: SECRET, API_KEY: SECRET } });
 
-    expect(described).toEqual({ message: "non-Error value (object with keys [token, env])" });
+    expect(described).toEqual({ message: "non-Error value (object with 2 keys [token, env])" });
     expect(JSON.stringify(described)).not.toContain(SECRET);
     expect(JSON.stringify(described)).not.toContain("API_KEY");
   });
@@ -43,12 +43,34 @@ describe("describeForLog", () => {
     expect(describeForLog(() => SECRET).message).toBe("non-Error value (function)");
   });
 
-  it("caps the number and the length of the keys", () => {
-    const wide = Object.fromEntries(
-      Array.from({ length: 30 }, (_, index) => [`key${String(index)}`, 1]),
+  it("names only keys that are plainly field names, and counts the rest", () => {
+    const token = "ghp_16C7e42F292c6912E7710c838347Ae178B4a";
+    const described = describeForLog({
+      [token]: 1,
+      "ana@example.org": 2,
+      "/home/ana/notes.txt": 3,
+      a1b2c3d4e5f6: 4,
+      [SECRET]: 5,
+      status: 6,
+      retry_count: 7,
+      utf8: 8,
+    });
+
+    expect(described.message).toBe(
+      "non-Error value (object with 8 keys [status, retry_count, utf8, +5 not shown])",
     );
-    expect(describeShape(wide)).toContain("key19, and 10 more]");
-    expect(describeShape({ ["k".repeat(100)]: 1 })).toBe(`object with keys [${"k".repeat(40)}]`);
+  });
+
+  it("caps the number of keys it names", () => {
+    const wide = Object.fromEntries(
+      Array.from({ length: 30 }, (_, index) => [
+        `key_${"abcdefghij"[index % 10] ?? ""}${String(index)}`,
+        1,
+      ]),
+    );
+    expect(describeShape(wide)).toMatch(/^object with 30 keys \[.*, \+10 not shown\]$/);
+    expect(describeShape({ ["k".repeat(100)]: 1 })).toBe("object with 1 key [+1 not shown]");
+    expect(describeShape({})).toBe("object with 0 keys []");
   });
 });
 
@@ -71,7 +93,7 @@ describe("describeIpcFailure", () => {
   it("treats errors and other values like describeForLog", () => {
     expect(describeIpcFailure(new Error("boom")).message).toBe("Error: boom");
     expect(describeIpcFailure({ token: SECRET }).message).toBe(
-      "non-Error value (object with keys [token])",
+      "non-Error value (object with 1 key [token])",
     );
   });
 });

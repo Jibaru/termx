@@ -89,8 +89,8 @@ describe("installGlobalErrorHandlers", () => {
       expect(ipc.logged()).toHaveLength(2);
     });
     expect(ipc.logged().map((event) => event.message)).toEqual([
-      "non-Error value (object with keys [token, env])",
-      "non-Error value (object with keys [token, env])",
+      "non-Error value (object with 2 keys [token, env])",
+      "non-Error value (object with 2 keys [token, env])",
     ]);
     expect(JSON.stringify(ipc.logged())).not.toMatch(/hunter2|someone/);
   });
