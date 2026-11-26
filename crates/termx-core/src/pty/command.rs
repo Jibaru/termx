@@ -19,11 +19,82 @@ pub const COLORTERM: &str = "truecolor";
 /// they are running inside termx.
 pub const TERM_PROGRAM: &str = "termx";
 
+/// Locale given to a process when the environment does not select one (Unix
+/// only). See [`PtyCommand`].
+pub const DEFAULT_LOCALE: &str = if cfg!(target_os = "macos") {
+    "en_US.UTF-8"
+} else {
+    // Present on every current Linux distribution without generating locales.
+    "C.UTF-8"
+};
+
+/// Environment variables that are not passed on to the processes spawned in
+/// a PTY, even when the application itself was started with them.
+///
+/// They describe the *session the application was launched from*, not the
+/// new terminal, and would mislead the programs running in it. A name ending
+/// in `*` matches every variable starting with what precedes it. Extend the
+/// list for one command with [`PtyCommand::env_remove`].
+///
+/// - **Terminal multiplexers** (`TMUX`, `TMUX_PANE`, `STY`): programs would
+///   believe they run inside tmux or screen, and `tmux` would refuse to
+///   start "nested" sessions.
+/// - **Claude Code session markers** (`CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`,
+///   ...): a Claude Code started in the terminal would believe it is a child
+///   of the session termx was launched from. User settings such as
+///   `CLAUDE_CODE_USE_BEDROCK` are not on the list and are inherited.
+/// - **npm and pnpm scripts** (`npm_*`, `INIT_CWD`, `PNPM_SCRIPT_SRC_DIR`):
+///   set when the application is started through a package script, as
+///   during development; they change how package managers behave.
+/// - **Other terminal emulators** (`TERM_SESSION_ID`, `ITERM_SESSION_ID`,
+///   `KITTY_WINDOW_ID`, `WT_SESSION`, ...): programs use them to detect
+///   features of a terminal that is not the one they are running in.
+pub const DEFAULT_ENV_DENYLIST: &[&str] = &[
+    // Terminal multiplexers.
+    "TMUX",
+    "TMUX_PANE",
+    "STY",
+    // Claude Code session markers.
+    "CLAUDECODE",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_SSE_PORT",
+    "CLAUDE_PID",
+    // npm and pnpm scripts.
+    "npm_*",
+    "INIT_CWD",
+    "PNPM_SCRIPT_SRC_DIR",
+    // Other terminal emulators.
+    "TERM_SESSION_ID",
+    "ITERM_SESSION_ID",
+    "ITERM_PROFILE",
+    "LC_TERMINAL",
+    "LC_TERMINAL_VERSION",
+    "KITTY_WINDOW_ID",
+    "KITTY_PID",
+    "ALACRITTY_WINDOW_ID",
+    "ALACRITTY_SOCKET",
+    "WEZTERM_PANE",
+    "WEZTERM_UNIX_SOCKET",
+    "WT_SESSION",
+    "WT_PROFILE_ID",
+    "VTE_VERSION",
+    "WINDOWID",
+];
+
 /// A program to run inside a PTY: what to execute, where, and with which
 /// environment.
 ///
-/// The process inherits the environment of the current process, with these
-/// variables set on top of it:
+/// # Environment
+///
+/// The process inherits the environment of the current process, minus the
+/// variables of [`DEFAULT_ENV_DENYLIST`] and of
+/// [`env_remove`](Self::env_remove), with these variables set on top of it:
 ///
 /// | Variable               | Value                                     |
 /// | ---------------------- | ----------------------------------------- |
@@ -33,7 +104,12 @@ pub const TERM_PROGRAM: &str = "termx";
 /// | `TERM_PROGRAM_VERSION` | [`termx_core::version()`](crate::version) |
 ///
 /// Variables added with [`env`](Self::env) are applied last and therefore
-/// override both the inherited environment and the defaults above.
+/// override the inherited environment, the defaults above and the denylist.
+///
+/// On macOS and Linux, if neither `LC_ALL`, `LC_CTYPE` nor `LANG` ends up
+/// set, `LANG` is set to [`DEFAULT_LOCALE`]. An application started from the
+/// Finder or a desktop launcher has no locale at all, and shells would
+/// otherwise start in the `C` locale and garble anything that is not ASCII.
 ///
 /// # Examples
 ///
@@ -56,6 +132,7 @@ pub struct PtyCommand {
     args: Vec<OsString>,
     cwd: Option<PathBuf>,
     env: Vec<(OsString, OsString)>,
+    env_remove: Vec<String>,
     login_shell: bool,
 }
 
@@ -70,6 +147,7 @@ impl PtyCommand {
             args: Vec::new(),
             cwd: None,
             env: Vec::new(),
+            env_remove: Vec::new(),
             login_shell: false,
         }
     }
@@ -153,6 +231,22 @@ impl PtyCommand {
         self
     }
 
+    /// Stops an inherited environment variable from being passed on to the
+    /// process, in addition to those of [`DEFAULT_ENV_DENYLIST`].
+    ///
+    /// `pattern` is the name of a variable, or a prefix followed by `*` to
+    /// match every variable starting with it (`"npm_*"`). Prefixes are
+    /// case-sensitive; full names are too, except on Windows where the
+    /// system treats them as case-insensitive.
+    ///
+    /// This only filters what is inherited: a variable given to
+    /// [`env`](Self::env) is always set.
+    #[must_use]
+    pub fn env_remove(mut self, pattern: impl Into<String>) -> Self {
+        self.env_remove.push(pattern.into());
+        self
+    }
+
     /// The program this command runs.
     #[must_use]
     pub fn program(&self) -> &OsStr {
@@ -186,6 +280,32 @@ impl PtyCommand {
             builder
         };
 
+        self.apply_environment(&mut builder);
+        if let Some(cwd) = &self.cwd {
+            builder.cwd(cwd);
+        }
+        Ok(builder)
+    }
+
+    /// Turns the inherited environment held by `builder` into the one the
+    /// process gets.
+    fn apply_environment(&self, builder: &mut CommandBuilder) {
+        let denied: Vec<String> = builder
+            .iter_full_env_as_str()
+            .map(|(name, _)| name)
+            .filter(|name| {
+                DEFAULT_ENV_DENYLIST
+                    .iter()
+                    .copied()
+                    .chain(self.env_remove.iter().map(String::as_str))
+                    .any(|pattern| matches_pattern(name, pattern))
+            })
+            .map(str::to_owned)
+            .collect();
+        for name in denied {
+            builder.env_remove(name);
+        }
+
         builder.env("TERM", TERM);
         builder.env("COLORTERM", COLORTERM);
         builder.env("TERM_PROGRAM", TERM_PROGRAM);
@@ -193,10 +313,15 @@ impl PtyCommand {
         for (key, value) in &self.env {
             builder.env(key, value);
         }
-        if let Some(cwd) = &self.cwd {
-            builder.cwd(cwd);
+
+        if cfg!(unix) {
+            let has_locale = ["LC_ALL", "LC_CTYPE", "LANG"]
+                .iter()
+                .any(|name| builder.get_env(name).is_some_and(|value| !value.is_empty()));
+            if !has_locale {
+                builder.env("LANG", DEFAULT_LOCALE);
+            }
         }
-        Ok(builder)
     }
 
     /// Builds the command for a login shell.
@@ -218,6 +343,19 @@ impl PtyCommand {
         let mut builder = CommandBuilder::new_default_prog();
         builder.env("SHELL", &self.program);
         Ok(builder)
+    }
+}
+
+/// Whether the variable `name` matches `pattern`: a name, or a prefix
+/// followed by `*`.
+fn matches_pattern(name: &str, pattern: &str) -> bool {
+    match pattern.strip_suffix('*') {
+        // Prefixes are compared exactly even on Windows, where names are
+        // otherwise case-insensitive: `npm_*` must drop what npm sets
+        // (`npm_config_...`) but keep the user's `NPM_TOKEN`.
+        Some(prefix) => name.starts_with(prefix),
+        None if cfg!(windows) => name.eq_ignore_ascii_case(pattern),
+        None => name == pattern,
     }
 }
 
@@ -279,6 +417,169 @@ mod tests {
         assert_eq!(env_of(&builder, "TERMX_TEST"), Some("second"));
         assert_eq!(env_of(&builder, "TERMX_OTHER"), Some("x"));
         assert_eq!(env_of(&builder, "COLORTERM"), Some("truecolor"));
+    }
+
+    /// A builder whose environment is exactly `vars`, whatever the
+    /// environment of the test run is.
+    fn builder_with_env(vars: &[(&str, &str)]) -> CommandBuilder {
+        let mut builder = CommandBuilder::new("prog");
+        builder.env_clear();
+        for (name, value) in vars {
+            builder.env(name, value);
+        }
+        builder
+    }
+
+    #[test]
+    fn session_markers_of_the_parent_are_not_inherited() {
+        let inherited = [
+            ("TMUX", "/tmp/tmux-501/default,1,0"),
+            ("TMUX_PANE", "%1"),
+            ("STY", "1234.pts-0.host"),
+            ("CLAUDECODE", "1"),
+            ("CLAUDE_CODE_ENTRYPOINT", "cli"),
+            ("CLAUDE_CODE_SESSION_ID", "abc"),
+            ("CLAUDE_CODE_SSE_PORT", "1234"),
+            ("npm_config_user_agent", "pnpm/11"),
+            ("npm_package_name", "termx"),
+            ("INIT_CWD", "/repo"),
+            ("TERM_SESSION_ID", "w0t0p0"),
+            ("ITERM_SESSION_ID", "w0t0p0"),
+            ("WT_SESSION", "guid"),
+            ("KITTY_WINDOW_ID", "1"),
+        ];
+        let mut builder = builder_with_env(&inherited);
+        builder.env("PATH", "/usr/bin");
+        builder.env("HOME", "/home/me");
+        builder.env("CLAUDE_CODE_USE_BEDROCK", "1");
+        builder.env("NPM_TOKEN", "secret");
+
+        PtyCommand::new("prog").apply_environment(&mut builder);
+
+        for (name, _) in inherited {
+            assert_eq!(env_of(&builder, name), None, "{name} was inherited");
+        }
+        // Ordinary variables and user settings are untouched.
+        assert_eq!(env_of(&builder, "PATH"), Some("/usr/bin"));
+        assert_eq!(env_of(&builder, "HOME"), Some("/home/me"));
+        assert_eq!(env_of(&builder, "CLAUDE_CODE_USE_BEDROCK"), Some("1"));
+        assert_eq!(env_of(&builder, "NPM_TOKEN"), Some("secret"));
+    }
+
+    #[test]
+    fn every_default_denylist_entry_is_enforced() {
+        for pattern in DEFAULT_ENV_DENYLIST {
+            let name = pattern.replace('*', "example");
+            let mut builder = builder_with_env(&[(&name, "value")]);
+
+            PtyCommand::new("prog").apply_environment(&mut builder);
+
+            assert_eq!(env_of(&builder, &name), None, "{name} was inherited");
+        }
+    }
+
+    #[test]
+    fn the_denylist_can_be_extended_per_command() {
+        let mut builder = builder_with_env(&[
+            ("SECRET_TOKEN", "x"),
+            ("MYAPP_ONE", "1"),
+            ("MYAPP_TWO", "2"),
+            ("MYAPPLICATION", "kept"),
+            ("OTHER", "kept"),
+        ]);
+
+        PtyCommand::new("prog")
+            .env_remove("SECRET_TOKEN")
+            .env_remove("MYAPP_*")
+            .apply_environment(&mut builder);
+
+        assert_eq!(env_of(&builder, "SECRET_TOKEN"), None);
+        assert_eq!(env_of(&builder, "MYAPP_ONE"), None);
+        assert_eq!(env_of(&builder, "MYAPP_TWO"), None);
+        assert_eq!(env_of(&builder, "MYAPPLICATION"), Some("kept"));
+        assert_eq!(env_of(&builder, "OTHER"), Some("kept"));
+    }
+
+    #[test]
+    fn explicitly_set_variables_win_over_the_denylist() {
+        let mut builder = builder_with_env(&[("TMUX", "inherited"), ("DROPPED", "inherited")]);
+
+        PtyCommand::new("prog")
+            .env_remove("DROPPED")
+            .env("TMUX", "explicit")
+            .env("DROPPED", "explicit")
+            .apply_environment(&mut builder);
+
+        assert_eq!(env_of(&builder, "TMUX"), Some("explicit"));
+        assert_eq!(env_of(&builder, "DROPPED"), Some("explicit"));
+    }
+
+    #[test]
+    fn patterns_match_names_and_prefixes() {
+        assert!(matches_pattern("TMUX", "TMUX"));
+        assert!(!matches_pattern("TMUX_PANE", "TMUX"));
+        assert!(!matches_pattern("TMU", "TMUX"));
+        assert!(matches_pattern("npm_config_registry", "npm_*"));
+        assert!(matches_pattern("npm_", "npm_*"));
+        assert!(!matches_pattern("npm", "npm_*"));
+        assert!(!matches_pattern("xnpm_config", "npm_*"));
+        // A multi-byte name shorter than the prefix must not panic.
+        assert!(!matches_pattern("\u{e9}", "npm_*"));
+        assert_eq!(matches_pattern("tmux", "TMUX"), cfg!(windows));
+        assert!(!matches_pattern("NPM_TOKEN", "npm_*"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_utf8_locale_is_set_when_the_environment_has_none() {
+        // What an application started from the Finder gets: no locale.
+        let mut builder = builder_with_env(&[("PATH", "/usr/bin")]);
+        PtyCommand::new("prog").apply_environment(&mut builder);
+        assert_eq!(env_of(&builder, "LANG"), Some(DEFAULT_LOCALE));
+        assert!(DEFAULT_LOCALE.ends_with(".UTF-8"));
+
+        // An empty value selects no locale either.
+        let mut builder = builder_with_env(&[("LANG", ""), ("LC_ALL", "")]);
+        PtyCommand::new("prog").apply_environment(&mut builder);
+        assert_eq!(env_of(&builder, "LANG"), Some(DEFAULT_LOCALE));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_existing_locale_is_respected() {
+        for (name, value) in [
+            ("LANG", "es_PE.UTF-8"),
+            ("LANG", "C"),
+            ("LC_ALL", "de_DE.UTF-8"),
+            ("LC_CTYPE", "UTF-8"),
+        ] {
+            let mut builder = builder_with_env(&[(name, value)]);
+            PtyCommand::new("prog").apply_environment(&mut builder);
+
+            assert_eq!(env_of(&builder, name), Some(value));
+            if name != "LANG" {
+                assert_eq!(
+                    env_of(&builder, "LANG"),
+                    None,
+                    "LANG was added next to {name}"
+                );
+            }
+        }
+
+        // A locale chosen for the command counts as well.
+        let mut builder = builder_with_env(&[]);
+        PtyCommand::new("prog")
+            .env("LC_ALL", "ja_JP.UTF-8")
+            .apply_environment(&mut builder);
+        assert_eq!(env_of(&builder, "LANG"), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn no_locale_is_set_on_windows() {
+        let mut builder = builder_with_env(&[]);
+        PtyCommand::new("prog").apply_environment(&mut builder);
+        assert_eq!(env_of(&builder, "LANG"), None);
     }
 
     #[test]

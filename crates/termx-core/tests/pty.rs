@@ -738,6 +738,66 @@ fn environment_is_inherited_and_defaults_can_be_overridden() {
     });
 }
 
+#[test]
+fn denied_variables_are_not_inherited() {
+    guarded(|| {
+        // Cargo sets these two for the test run, so they are inherited
+        // unless denied. The session markers are only set when the suite
+        // itself runs under tmux, Claude Code or a package script, but must
+        // be absent either way.
+        let command = helper(&[
+            "report",
+            "CARGO_PKG_NAME",
+            "CARGO_PKG_VERSION",
+            "CARGO_MANIFEST_DIR",
+            "TMUX",
+            "CLAUDECODE",
+            "npm_config_user_agent",
+        ])
+        .env_remove("CARGO_PKG_*")
+        .env("CARGO_PKG_VERSION", "set-explicitly");
+        let mut session = Session::spawn_sized(&command, PtySize::new(500, 24));
+        session.wait_for("done");
+        let text = session.text();
+
+        for expected in [
+            "CARGO_PKG_NAME is unset",
+            "CARGO_PKG_VERSION=set-explicitly",
+            "CARGO_MANIFEST_DIR=",
+            "TMUX is unset",
+            "CLAUDECODE is unset",
+            "npm_config_user_agent is unset",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?} in {text:?}");
+        }
+
+        // Without the extra pattern the variable is inherited.
+        let mut session = Session::spawn_sized(
+            &helper(&["report", "CARGO_PKG_NAME"]),
+            PtySize::new(500, 24),
+        );
+        session.wait_for("done");
+        assert!(session.text().contains("CARGO_PKG_NAME=termx-core"));
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn process_gets_a_utf8_locale_when_none_is_inherited() {
+    guarded(|| {
+        let command = helper(&["report", "LANG", "LC_ALL", "LC_CTYPE"])
+            .env_remove("LANG")
+            .env_remove("LC_*");
+        let mut session = Session::spawn(&command);
+        session.wait_for("done");
+        let text = session.text();
+
+        let expected = format!("LANG={}", termx_core::pty::DEFAULT_LOCALE);
+        assert!(text.contains(&expected), "missing {expected:?} in {text:?}");
+        assert!(text.contains("LC_ALL is unset"), "got: {text:?}");
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Kill and drop
 // ---------------------------------------------------------------------------
