@@ -7,17 +7,20 @@ import { type ITerminalOptions, Terminal } from "@xterm/xterm";
 import { reportError } from "../lib/errorReporting";
 import {
   ackSession,
-  closeSession,
-  type CreatedSession,
-  type CreateSessionOptions,
-  createSession,
   describeError,
+  type LaunchMode,
   logFrontendEvent,
   openExternalUrl,
   readClipboardText,
+  reportSessionCwd,
+  reportSessionTitle,
   resizeSession,
   type SessionExit,
   type SessionHandlers,
+  type SessionId,
+  type StartedSession,
+  startSession,
+  type StartSessionOptions,
   writeClipboardText,
   writeSession,
 } from "../lib/ipc";
@@ -27,8 +30,13 @@ import { isComposing, mapKey, OptionKeys, sanitizePaste } from "./keymap";
 import { clipboardTextFromOsc52 } from "./osc52";
 
 /**
- * One terminal: an xterm.js instance, the session behind it, and everything
+ * One terminal: an xterm.js instance, the session it shows, and everything
  * that connects the two.
+ *
+ * The session is one of the workspace (`Session` in `lib/ipc.ts`) and
+ * outlives the controller: the controller starts it in a terminal, shows
+ * its output and sends it input, but never closes it. Closing a session is
+ * `closeSession`; `dispose` only lets go of the screen.
  *
  * ```text
  * session channel --bytes--> terminal.write(bytes, done) --done--> ackSession
@@ -58,6 +66,13 @@ export const MIN_FIT_HEIGHT_PX = 24;
 export const MAX_WEBGL_RESTARTS = 3;
 
 /**
+ * How often, at most, the title of the terminal is reported. Claude Code
+ * animates a mark in its title several times per second for as long as it
+ * works; the sidebar needs the latest title now and then, not every frame.
+ */
+export const TITLE_REPORT_INTERVAL_MS = 250;
+
+/**
  * Used until the session says how to batch acknowledgements. Must not be
  * larger than the low-water mark of the flow control in termx-core.
  */
@@ -81,7 +96,7 @@ export type TerminalStatus =
   /** No session was started yet: the terminal was never shown. */
   | { kind: "idle" }
   | { kind: "starting" }
-  | { kind: "running"; sessionId: number }
+  | { kind: "running"; terminal: number }
   /** The process ended. Enter starts a new one. */
   | { kind: "exited"; exit: SessionExit }
   /** The session could not be started. Enter tries again. */
@@ -89,36 +104,45 @@ export type TerminalStatus =
 
 /** What a controller needs from the outside. Tests replace it. */
 export interface TerminalBackend {
-  createSession: (
-    options: CreateSessionOptions,
+  startSession: (
+    id: SessionId,
+    options: StartSessionOptions,
     handlers: SessionHandlers,
-  ) => Promise<CreatedSession>;
-  writeSession: (id: number, data: string, binary?: boolean) => Promise<void>;
-  resizeSession: (id: number, cols: number, rows: number) => Promise<void>;
-  ackSession: (id: number, bytes: number) => Promise<void>;
-  closeSession: (id: number) => Promise<void>;
+  ) => Promise<StartedSession>;
+  writeSession: (terminal: number, data: string, binary?: boolean) => Promise<void>;
+  resizeSession: (terminal: number, cols: number, rows: number) => Promise<void>;
+  ackSession: (terminal: number, bytes: number) => Promise<void>;
+  reportSessionTitle: (id: SessionId, title: string) => Promise<void>;
+  reportSessionCwd: (id: SessionId, cwd: string) => Promise<void>;
   openExternalUrl: (url: string) => Promise<void>;
   readClipboardText: () => Promise<string>;
   writeClipboardText: (text: string) => Promise<void>;
 }
 
 const TAURI_BACKEND: TerminalBackend = {
-  createSession,
+  startSession,
   writeSession,
   resizeSession,
   ackSession,
-  closeSession,
+  reportSessionTitle,
+  reportSessionCwd,
   openExternalUrl,
   readClipboardText,
   writeClipboardText,
 };
 
 export interface TerminalControllerOptions {
+  /** The session of the workspace this terminal shows. */
+  sessionId: SessionId;
+  /**
+   * How the session is started when the terminal is first shown: from
+   * scratch by default, `resume` for a session restored from the previous
+   * run, or `false` to wait for `start` to be called.
+   */
+  autoStart?: LaunchMode | false;
   config?: TerminalConfig;
   platform?: Platform;
   backend?: TerminalBackend;
-  /** What the session runs. The login shell in the home directory by default. */
-  session?: Omit<CreateSessionOptions, "cols" | "rows">;
 }
 
 interface PendingInput {
@@ -129,6 +153,10 @@ interface PendingInput {
 /** The message shown in the terminal when its process has ended. */
 export function exitNotice(exit: SessionExit): string {
   let what: string;
+  if (exit.failure) {
+    // termx knows what went wrong, and says it in words for the user.
+    return notice(`${exit.failure.message} Press Enter to try again.`);
+  }
   if (exit.signal !== null) {
     what = `The process was terminated (${exit.signal}).`;
   } else if (exit.code !== null) {
@@ -176,7 +204,9 @@ export class TerminalController {
   private readonly config: TerminalConfig;
   private readonly platform: Platform;
   private readonly backend: TerminalBackend;
-  private readonly sessionOptions: Omit<CreateSessionOptions, "cols" | "rows">;
+  /** The session of the workspace this terminal shows. */
+  readonly sessionId: SessionId;
+  private readonly autoStart: LaunchMode | false;
 
   private readonly fitAddon = new FitAddon();
   private webglAddon: WebglAddon | null = null;
@@ -193,7 +223,8 @@ export class TerminalController {
    * is recognised by its number and ignored.
    */
   private generation = 0;
-  private sessionId: number | null = null;
+  /** The terminal the session runs in, while it does. */
+  private terminalId: number | null = null;
   private ackBatchBytes = DEFAULT_ACK_BATCH_BYTES;
   /** Bytes processed by xterm.js and not acknowledged yet. */
   private unacknowledged = 0;
@@ -208,12 +239,17 @@ export class TerminalController {
   private disposed = false;
   private resizeObserver: ResizeObserver | null = null;
   private resizeTimer: ReturnType<typeof setTimeout> | null = null;
+  /** How the session was last started, to try again the same way. */
+  private lastMode: LaunchMode = "fresh";
+  private titleTimer: ReturnType<typeof setTimeout> | null = null;
+  private pendingTitle: string | null = null;
 
-  constructor(options: TerminalControllerOptions = {}) {
+  constructor(options: TerminalControllerOptions) {
     this.config = options.config ?? DEFAULT_TERMINAL_CONFIG;
     this.platform = options.platform ?? detectPlatform();
     this.backend = options.backend ?? TAURI_BACKEND;
-    this.sessionOptions = options.session ?? {};
+    this.sessionId = options.sessionId;
+    this.autoStart = options.autoStart ?? "fresh";
 
     this.terminal = new Terminal({
       ...xtermOptions(this.config),
@@ -251,6 +287,18 @@ export class TerminalController {
     });
     this.terminal.parser.registerOscHandler(52, (payload) => {
       this.handleClipboardRequest(payload);
+      return true;
+    });
+    // OSC 0 and 2: the title of the session, unless the user named it.
+    this.terminal.onTitleChange((title) => {
+      this.scheduleTitleReport(title);
+    });
+    // OSC 7: the folder the program is in, which the project and the
+    // branch shown for the session follow.
+    this.terminal.parser.registerOscHandler(7, (payload) => {
+      if (!this.disposed) {
+        void this.backend.reportSessionCwd(this.sessionId, payload).catch(ignore);
+      }
       return true;
     });
   }
@@ -296,7 +344,7 @@ export class TerminalController {
     window.addEventListener("blur", this.handleWindowBlur);
     this.terminal.focus();
 
-    if (this.status.kind === "idle") this.start();
+    if (this.status.kind === "idle" && this.autoStart !== false) this.start(this.autoStart);
   }
 
   /** Takes the terminal off the screen. Its session keeps running. */
@@ -321,24 +369,36 @@ export class TerminalController {
     this.terminal.focus();
   }
 
-  /** Closes the session and releases the terminal. It cannot be used again. */
+  /**
+   * Releases the terminal. It cannot be used again.
+   *
+   * The session is not closed: it belongs to the workspace. Whoever wants
+   * it gone calls `closeSession`, before or after.
+   */
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
     this.generation += 1;
     this.detach();
-    const id = this.sessionId;
-    this.sessionId = null;
-    if (id !== null) void this.backend.closeSession(id).catch(ignore);
+    if (this.titleTimer !== null) clearTimeout(this.titleTimer);
+    this.titleTimer = null;
+    this.terminalId = null;
     this.listeners.clear();
     this.terminal.dispose();
   }
 
   // --- Session -------------------------------------------------------------
 
-  private start(): void {
+  /**
+   * Starts the session in a new terminal of the size of the pane: from
+   * scratch, or resuming where it was. A session that is running is
+   * restarted. Does nothing before the terminal was first shown.
+   */
+  start(mode: LaunchMode = "fresh"): void {
+    if (this.disposed || !this.opened) return;
     const generation = ++this.generation;
-    this.sessionId = null;
+    this.lastMode = mode;
+    this.terminalId = null;
     this.unacknowledged = 0;
     this.pendingInput.length = 0;
     const size = { cols: this.terminal.cols, rows: this.terminal.rows };
@@ -346,8 +406,9 @@ export class TerminalController {
     this.setStatus({ kind: "starting" });
 
     this.backend
-      .createSession(
-        { ...this.sessionOptions, ...size },
+      .startSession(
+        this.sessionId,
+        { mode, ...size },
         {
           onOutput: (bytes) => {
             this.handleOutput(generation, bytes);
@@ -357,25 +418,22 @@ export class TerminalController {
           },
         },
       )
-      .then((created) => {
-        if (generation !== this.generation) {
-          // The terminal was disposed of while its session was starting.
-          void this.backend.closeSession(created.id).catch(ignore);
-          return;
-        }
-        if (created.windowsBuildNumber !== null) {
+      .then((started) => {
+        // The terminal was disposed of, or started again, in the meantime.
+        if (generation !== this.generation) return;
+        if (started.windowsBuildNumber !== null) {
           this.terminal.options.windowsPty = {
             backend: "conpty",
-            buildNumber: created.windowsBuildNumber,
+            buildNumber: started.windowsBuildNumber,
           };
         }
-        this.ackBatchBytes = created.ackBatchBytes;
+        this.ackBatchBytes = started.ackBatchBytes;
         // A process that ended at once has reported its exit already: there
         // is no session left to talk to.
         if (this.status.kind !== "starting") return;
 
-        this.sessionId = created.id;
-        this.setStatus({ kind: "running", sessionId: created.id });
+        this.terminalId = started.terminal;
+        this.setStatus({ kind: "running", terminal: started.terminal });
         // Whatever happened while the session was starting.
         this.acknowledge();
         this.syncSessionSize();
@@ -402,15 +460,15 @@ export class TerminalController {
   }
 
   private acknowledge(): void {
-    if (this.sessionId === null || this.unacknowledged < this.ackBatchBytes) return;
+    if (this.terminalId === null || this.unacknowledged < this.ackBatchBytes) return;
     const bytes = this.unacknowledged;
     this.unacknowledged = 0;
-    void this.backend.ackSession(this.sessionId, bytes).catch(ignore);
+    void this.backend.ackSession(this.terminalId, bytes).catch(ignore);
   }
 
   private handleExit(generation: number, exit: SessionExit): void {
     if (generation !== this.generation) return;
-    this.sessionId = null;
+    this.terminalId = null;
     this.pendingInput.length = 0;
     this.setStatus({ kind: "exited", exit });
     // Written like any output, so it appears after everything the process
@@ -423,13 +481,35 @@ export class TerminalController {
     for (const listener of this.listeners) listener();
   }
 
+  /**
+   * Reports the latest title, at most once per `TITLE_REPORT_INTERVAL_MS`.
+   * The timer is not started over by a new title: a title that never stops
+   * changing, as while Claude Code works, is still reported.
+   */
+  private scheduleTitleReport(title: string): void {
+    if (this.disposed) return;
+    this.pendingTitle = title;
+    if (this.titleTimer !== null) return;
+    this.titleTimer = setTimeout(() => {
+      this.titleTimer = null;
+      const settled = this.pendingTitle;
+      this.pendingTitle = null;
+      if (settled === null || this.disposed) return;
+      void this.backend.reportSessionTitle(this.sessionId, settled).catch(ignore);
+    }, TITLE_REPORT_INTERVAL_MS);
+  }
+
   // --- Input ---------------------------------------------------------------
 
   private handleInput(data: string, binary: boolean): void {
     if (this.disposed) return;
     if (this.status.kind === "exited" || this.status.kind === "failed") {
-      // Only Enter does something in a terminal without a process.
-      if (data.includes("\r")) this.start();
+      // Only Enter does something in a terminal without a process: a
+      // start that failed is tried again as it was asked, and a session
+      // that ended is started from scratch.
+      if (data.includes("\r")) {
+        this.start(this.status.kind === "failed" ? this.lastMode : "fresh");
+      }
       return;
     }
     if (this.status.kind === "idle") return;
@@ -451,13 +531,13 @@ export class TerminalController {
    * in the meantime, or while the session is starting, waits in the queue.
    */
   private flushInput(): void {
-    if (this.writing || this.sessionId === null) return;
+    if (this.writing || this.terminalId === null) return;
     const input = this.pendingInput.shift();
     if (!input) return;
 
     this.writing = true;
     this.backend
-      .writeSession(this.sessionId, input.data, input.binary)
+      .writeSession(this.terminalId, input.data, input.binary)
       // A failed write is logged where it failed. The input is lost; the
       // rest must still go through.
       .catch(ignore)
@@ -618,11 +698,11 @@ export class TerminalController {
 
   /** Tells the session the size of the terminal, if it does not know it. */
   private syncSessionSize(): void {
-    if (this.sessionId === null) return;
+    if (this.terminalId === null) return;
     const { cols, rows } = this.terminal;
     if (this.sessionSize?.cols === cols && this.sessionSize.rows === rows) return;
     this.sessionSize = { cols, rows };
-    void this.backend.resizeSession(this.sessionId, cols, rows).catch(ignore);
+    void this.backend.resizeSession(this.terminalId, cols, rows).catch(ignore);
   }
 
   // --- Renderer ------------------------------------------------------------

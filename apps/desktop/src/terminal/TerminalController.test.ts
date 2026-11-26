@@ -2,7 +2,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Platform } from "../lib/platform";
 import { recordIPC } from "../test/ipcRecorder";
-import { ACK_BATCH, bytes, fakeBackend, pane, resizePane, settle } from "../test/terminalHarness";
+import {
+  ACK_BATCH,
+  bytes,
+  fakeBackend,
+  pane,
+  resizePane,
+  SESSION,
+  settle,
+} from "../test/terminalHarness";
 import {
   FakeFitAddon,
   FakeResizeObserver,
@@ -15,11 +23,12 @@ import {
 import { DEFAULT_TERMINAL_CONFIG, type TerminalConfig } from "./config";
 import { OSC52_MAX_BYTES } from "./osc52";
 import {
+  MAX_WEBGL_RESTARTS,
   MIN_FIT_HEIGHT_PX,
   MIN_FIT_WIDTH_PX,
-  MAX_WEBGL_RESTARTS,
   RESIZE_DEBOUNCE_MS,
   TerminalController,
+  TITLE_REPORT_INTERVAL_MS,
 } from "./TerminalController";
 
 vi.mock("@xterm/xterm", async () => {
@@ -54,6 +63,7 @@ interface Setup {
 async function attached({ platform = "macos", config, leaveStarting = false }: Setup = {}) {
   const fake = fakeBackend();
   const controller = new TerminalController({
+    sessionId: SESSION,
     backend: fake.backend,
     platform,
     config: { ...DEFAULT_TERMINAL_CONFIG, ...config },
@@ -86,9 +96,10 @@ describe("starting", () => {
 
     expect(container.contains(terminal.element ?? null)).toBe(true);
     expect(terminal.resizes).toEqual([{ cols: 132, rows: 43 }]);
-    // No program and no directory: the login shell, in the home directory.
-    expect(creates.map((call) => call.options)).toEqual([{ cols: 132, rows: 43 }]);
-    expect(controller.getStatus()).toEqual({ kind: "running", sessionId: 1 });
+    // Its session, from scratch: what it runs is the business of the session.
+    expect(creates.map((call) => call.session)).toEqual([SESSION]);
+    expect(creates.map((call) => call.options)).toEqual([{ mode: "fresh", cols: 132, rows: 43 }]);
+    expect(controller.getStatus()).toEqual({ kind: "running", terminal: 1 });
     expect(terminal.focusCount).toBe(1);
   });
 
@@ -125,32 +136,58 @@ describe("starting", () => {
 
   it("starts at the default size when the pane cannot be measured yet", () => {
     const fake = fakeBackend();
-    const controller = new TerminalController({ backend: fake.backend, platform: "linux" });
+    const controller = new TerminalController({
+      sessionId: SESSION,
+      backend: fake.backend,
+      platform: "linux",
+    });
     FakeFitAddon.proposed = undefined;
 
     controller.attach(pane(0, 0));
 
-    expect(fake.creates[0]?.options).toEqual({ cols: 80, rows: 24 });
+    expect(fake.creates[0]?.options).toEqual({ mode: "fresh", cols: 80, rows: 24 });
     expect(FakeTerminal.last.resizes).toEqual([]);
   });
 
-  it("passes on what the session should run", () => {
+  it("resumes a session that was restored instead of starting it from scratch", () => {
     const fake = fakeBackend();
     const controller = new TerminalController({
+      sessionId: "s-restored",
+      autoStart: "resume",
       backend: fake.backend,
       platform: "linux",
-      session: { program: "claude", args: ["--resume"], cwd: "/work" },
     });
 
     controller.attach(pane());
 
-    expect(fake.creates[0]?.options).toEqual({
-      program: "claude",
-      args: ["--resume"],
-      cwd: "/work",
-      cols: 80,
-      rows: 24,
+    expect(fake.creates[0]?.session).toBe("s-restored");
+    expect(fake.creates[0]?.options).toEqual({ mode: "resume", cols: 80, rows: 24 });
+  });
+
+  it("waits to be told when it must not start on its own", async () => {
+    const fake = fakeBackend();
+    const controller = new TerminalController({
+      sessionId: SESSION,
+      autoStart: false,
+      backend: fake.backend,
+      platform: "linux",
     });
+
+    // Nothing can start before the terminal has a size.
+    controller.start("resume");
+    expect(fake.creates).toHaveLength(0);
+
+    controller.attach(pane());
+    expect(fake.creates).toHaveLength(0);
+    expect(controller.getStatus()).toEqual({ kind: "idle" });
+    // Nothing is typed into a session that does not run.
+    FakeTerminal.last.type("x\r");
+    expect(fake.creates).toHaveLength(0);
+
+    controller.start("resume");
+    expect(fake.creates[0]?.options).toEqual({ mode: "resume", cols: 80, rows: 24 });
+    await fake.creates[0]?.started();
+    expect(controller.getStatus()).toEqual({ kind: "running", terminal: 1 });
   });
 
   it("tells xterm.js which pseudo-console it talks to on Windows", async () => {
@@ -269,7 +306,11 @@ describe("input", () => {
       sent.push(data);
       return Promise.resolve();
     };
-    const controller = new TerminalController({ backend: fake.backend, platform: "linux" });
+    const controller = new TerminalController({
+      sessionId: SESSION,
+      backend: fake.backend,
+      platform: "linux",
+    });
     controller.attach(pane());
     await fake.creates[0]?.started();
 
@@ -741,12 +782,12 @@ describe("when the process exits", () => {
 
     terminal.type("\r");
     expect(creates).toHaveLength(2);
-    expect(creates[1]?.options).toEqual({ cols: 100, rows: 30 });
+    expect(creates[1]?.options).toEqual({ mode: "fresh", cols: 100, rows: 30 });
     expect(controller.getStatus()).toEqual({ kind: "starting" });
     // The Enter that restarted is not typed into the new shell.
     await creates[1]?.started();
     expect(writes).toEqual([]);
-    expect(controller.getStatus()).toEqual({ kind: "running", sessionId: 2 });
+    expect(controller.getStatus()).toEqual({ kind: "running", terminal: 2 });
     expect(FakeTerminal.instances).toHaveLength(1);
 
     terminal.type("echo again\r");
@@ -867,6 +908,7 @@ describe("the renderer", () => {
   it("can be configured to never use WebGL", () => {
     const fake = fakeBackend();
     const controller = new TerminalController({
+      sessionId: SESSION,
       backend: fake.backend,
       platform: "linux",
       config: { ...DEFAULT_TERMINAL_CONFIG, renderer: "dom" },
@@ -965,7 +1007,7 @@ describe("links", () => {
 
 describe("moving between panes", () => {
   it("keeps the terminal and its session when it is taken off the screen", async () => {
-    const { controller, container, terminal, creates, create, closed } = await attached();
+    const { controller, container, terminal, creates, create } = await attached();
 
     controller.detach();
     expect(container.children).toHaveLength(0);
@@ -980,30 +1022,121 @@ describe("moving between panes", () => {
     expect(other.contains(terminal.element ?? null)).toBe(true);
     expect(FakeTerminal.instances).toHaveLength(1);
     expect(creates).toHaveLength(1);
-    expect(closed).toEqual([]);
     expect(terminal.focusCount).toBe(2);
   });
 
-  it("closes the session when the terminal is disposed of", async () => {
-    const { controller, terminal, create, closed } = await attached();
+  it("stops listening to its session when the terminal is disposed of", async () => {
+    const { controller, terminal, create, acks, writes } = await attached();
 
     controller.dispose();
 
-    expect(closed).toEqual([1]);
     expect(terminal.disposed).toBe(true);
-    // Nothing reaches a terminal that is gone.
+    // Nothing reaches a terminal that is gone, and it says nothing more.
     const written = terminal.writes.length;
     create.handlers.onOutput(bytes("late"));
     create.handlers.onExit({ code: 0, signal: null });
+    terminal.type("x");
     expect(terminal.writes).toHaveLength(written);
+    expect(acks).toEqual([]);
+    expect(writes).toEqual([]);
+    // It cannot be started again either.
+    controller.start();
+    expect(controller.getStatus()).toEqual({ kind: "running", terminal: 1 });
   });
 
-  it("closes a session that only finishes starting after the terminal is gone", async () => {
-    const { controller, create, closed } = await attached({ leaveStarting: true });
+  it("ignores a session that only finishes starting after the terminal is gone", async () => {
+    const { controller, create, acks } = await attached({ leaveStarting: true });
+    create.handlers.onOutput(new Uint8Array(ACK_BATCH));
 
     controller.dispose();
     await create.started();
 
-    expect(closed).toEqual([1]);
+    expect(controller.getStatus()).toEqual({ kind: "starting" });
+    expect(acks).toEqual([]);
+  });
+});
+
+describe("reporting to the workspace", () => {
+  it("reports the latest title of the terminal, now and then", async () => {
+    vi.useFakeTimers();
+    const { terminal, titles } = await attached();
+
+    // Claude Code animates a mark in front of its title for as long as it
+    // works: the title never settles, and is reported all the same.
+    terminal.setTitle("\u2802 Fix the login");
+    vi.advanceTimersByTime(TITLE_REPORT_INTERVAL_MS - 1);
+    terminal.setTitle("\u2810 Fix the login");
+    expect(titles).toEqual([]);
+    vi.advanceTimersByTime(1);
+    expect(titles).toEqual([{ id: SESSION, title: "\u2810 Fix the login" }]);
+
+    // Not every frame: one report per interval, with the title of the moment.
+    for (let frame = 0; frame < 10; frame += 1) {
+      terminal.setTitle(`${String(frame)} Fix the login`);
+      vi.advanceTimersByTime(TITLE_REPORT_INTERVAL_MS / 5);
+    }
+    expect(titles.map((report) => report.title)).toEqual([
+      "\u2810 Fix the login",
+      "4 Fix the login",
+      "9 Fix the login",
+    ]);
+
+    terminal.setTitle("");
+    vi.advanceTimersByTime(TITLE_REPORT_INTERVAL_MS);
+    expect(titles.at(-1)).toEqual({ id: SESSION, title: "" });
+  });
+
+  it("does not report a title after the terminal is gone", async () => {
+    vi.useFakeTimers();
+    const { controller, terminal, titles } = await attached();
+
+    terminal.setTitle("late");
+    controller.dispose();
+    vi.advanceTimersByTime(TITLE_REPORT_INTERVAL_MS * 2);
+
+    expect(titles).toEqual([]);
+  });
+
+  it("reports the folder a program says it is in", async () => {
+    const { terminal, folders } = await attached();
+    const report = terminal.oscHandlers.get(7);
+    if (!report) throw new Error("no OSC 7 handler was registered");
+
+    // The payload is passed on as it is: the Rust side knows how to read it.
+    expect(report("file://host/Users/me/My%20Code")).toBe(true);
+
+    expect(folders).toEqual([{ id: SESSION, cwd: "file://host/Users/me/My%20Code" }]);
+  });
+});
+
+describe("a session that could not do its job", () => {
+  it("says why in the words of the failure instead of an exit code", async () => {
+    const { terminal, create } = await attached();
+
+    create.handlers.onExit({
+      code: 113,
+      signal: null,
+      failure: { kind: "claudeNotFound", message: "Claude Code is not installed." },
+    });
+
+    expect(terminal.text).toContain("Claude Code is not installed. Press Enter to try again.");
+    expect(terminal.text).not.toContain("exited with code");
+  });
+
+  it("tries a failed start again the way it was asked", async () => {
+    const fake = fakeBackend();
+    const controller = new TerminalController({
+      sessionId: SESSION,
+      autoStart: "resume",
+      backend: fake.backend,
+      platform: "linux",
+    });
+    controller.attach(pane());
+    await fake.creates[0]?.failed({ command: "session_start", message: "the folder is gone" });
+    expect(controller.getStatus()).toEqual({ kind: "failed", message: "the folder is gone" });
+
+    FakeTerminal.last.type("\r");
+
+    expect(fake.creates[1]?.options).toEqual({ mode: "resume", cols: 80, rows: 24 });
   });
 });

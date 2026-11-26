@@ -105,24 +105,396 @@ export function exportDiagnostics(): Promise<ExportedBundle> {
   return call<ExportedBundle>("export_diagnostics");
 }
 
-/** What a new terminal session runs. Mirrors `CreateSessionRequest` in Rust. */
-export interface CreateSessionOptions {
-  /** The program to run. The user's login shell when omitted. */
-  program?: string;
-  /** Arguments of `program`. */
-  args?: string[];
-  /** The working directory. The home directory when omitted. */
+// --- The workspace ---------------------------------------------------------
+//
+// The types below mirror what the Rust side sends
+// (`termx_core::workspace`): change both sides together.
+
+/**
+ * Identifies a session for its whole life, including across restarts of
+ * its process and of termx. Not to be confused with the number of its
+ * terminal, which changes every time the session is started.
+ */
+export type SessionId = string;
+
+/** What a session runs. */
+export type SessionKind = "claude" | "shell" | "background";
+
+export const SESSION_KINDS = [
+  "claude",
+  "shell",
+  "background",
+] as const satisfies readonly SessionKind[];
+
+/**
+ * How a session is started: `fresh` from scratch (which is also how it is
+ * restarted), `resume` to carry on. Resuming makes Claude Code continue its
+ * conversation; a shell or a background command starts anew in the same
+ * folder either way.
+ */
+export type LaunchMode = "fresh" | "resume";
+
+/**
+ * Why a session could not do its job. `message` is written for the user
+ * and can be shown as it is.
+ */
+export interface LaunchFailure {
+  kind: "claudeNotFound" | "folderMissing" | "invalidCommand" | "spawnFailed";
+  message: string;
+}
+
+export const LAUNCH_FAILURE_KINDS = [
+  "claudeNotFound",
+  "folderMissing",
+  "invalidCommand",
+  "spawnFailed",
+] as const satisfies readonly LaunchFailure["kind"][];
+
+/**
+ * Where the process of a session is in its life.
+ *
+ * - `dormant`: restored from the previous run; nothing runs. Offer to
+ *   resume it.
+ * - `starting`: created, or asked to start; no process yet.
+ * - `running`: the process runs.
+ * - `exited`: the process ended, or could not be started (`failure`).
+ *
+ * Later versions add statuses for what an agent is doing (working,
+ * waiting, done). Treat a status you do not know as `running`.
+ */
+export type SessionState =
+  | { status: "dormant" }
+  | { status: "starting" }
+  | { status: "running" }
+  | {
+      status: "exited";
+      /** The exit code; `null` after a signal or when nothing ran. */
+      code: number | null;
+      /** Description of the signal that ended the process, if any. */
+      signal: string | null;
+      /** Set when termx knows why the session failed. */
+      failure: LaunchFailure | null;
+    };
+
+export const SESSION_STATUSES = [
+  "dormant",
+  "starting",
+  "running",
+  "exited",
+] as const satisfies readonly SessionState["status"][];
+
+/** What groups sessions in the sidebar. */
+export interface Project {
+  /** Sessions with the same key belong together. */
+  key: string;
+  /** The name to show: the name of the root folder. */
+  name: string;
+  /** The root of the Git repository, or the folder itself. */
+  root: string;
+  kind: "git" | "folder";
+}
+
+/** What Git says about the folder of a session. */
+export interface GitInfo {
+  /** The branch checked out; `null` when HEAD is detached or unreadable. */
+  branch: string | null;
+  /** The abbreviated commit, when HEAD is detached. */
+  commit: string | null;
+  /** The folder name of the linked worktree; `null` in the main one. */
+  worktree: string | null;
+}
+
+/** One session: a row of the sidebar. Times are milliseconds since 1970. */
+export interface Session {
+  id: SessionId;
+  kind: SessionKind;
+  /** The folder it was created in, where it is started and restarted. */
+  cwd: string;
+  /** The folder the program last reported (OSC 7) while running, if any. */
+  liveCwd: string | null;
+  /** The command line of a background session; `null` otherwise. */
+  command: string | null;
+  /** What to show: `name`, else `autoTitle`, else a default for the kind. */
+  title: string;
+  /** The name the user gave. It always wins over the automatic title. */
+  name: string | null;
+  /** The title the program set for its terminal. */
+  autoTitle: string | null;
+  /** The project of `liveCwd` when known, else of `cwd`. */
+  project: Project;
+  /** `null` outside a Git repository. */
+  git: GitInfo | null;
+  state: SessionState;
+  /** The number of its terminal while a process runs; `null` otherwise. */
+  terminalId: number | null;
+  createdAt: number;
+  /** When it last printed something, or was last started. */
+  lastActivityAt: number;
+  /** Since when its agent waits for the user. Always `null` for now. */
+  waitingSince: number | null;
+  /** The conversation Claude Code resumes, once known. */
+  claudeSessionId: string | null;
+}
+
+/** How a split arranges its children: side by side, or stacked. */
+export type SplitDirection = "row" | "column";
+
+/** A node of the layout tree: a pane, or a split of two nodes. */
+export type LayoutNode =
+  | {
+      type: "pane";
+      id: number;
+      /** The session shown, if any. */
+      session: SessionId | null;
+    }
+  | {
+      type: "split";
+      id: number;
+      direction: SplitDirection;
+      /** The share of `first`, between 0.1 and 0.9. */
+      ratio: number;
+      /** The left or top child. */
+      first: LayoutNode;
+      /** The right or bottom child. */
+      second: LayoutNode;
+    };
+
+/** The layout of the main area. There is always at least one pane. */
+export interface Layout {
+  root: LayoutNode;
+  /** The pane that has the focus. It always exists. */
+  focused: number;
+  /** Internal: the next identifier the Rust side hands out. */
+  nextId: number;
+}
+
+/**
+ * Whether the workspace is saved between runs.
+ *
+ * - `primary`: yes.
+ * - `secondary`: no, because another termx is running and owns the state.
+ * - `disabled`: no, because the state file could not be used (`reason`).
+ * - `memory`: no, because there is nowhere to save it.
+ */
+export type PersistenceMode =
+  | { mode: "primary" }
+  | { mode: "secondary" }
+  | { mode: "disabled"; reason: string }
+  | { mode: "memory" };
+
+/** Everything needed to draw the workspace. */
+export interface WorkspaceSnapshot {
+  /** Counts the changes of the workspace. */
+  revision: number;
+  /** The sessions, in the order the user gave them. */
+  sessions: Session[];
+  /** The projects of the sessions, in the order the user gave them. */
+  projects: Project[];
+  layout: Layout;
+  /** Folders sessions were created in, most recent first. */
+  recentFolders: string[];
+  persistence: PersistenceMode;
+}
+
+/**
+ * What changed in the workspace, with the current values. Parts that did
+ * not change are `null`. Apply it with `applyWorkspaceDelta`.
+ */
+export interface WorkspaceDelta {
+  revision: number;
+  /** Sessions that were added or changed, as they are now. */
+  sessions: Session[];
+  /** Sessions that were removed. */
+  removed: SessionId[];
+  /** All the session ids in order, when sessions were added, removed or reordered. */
+  sessionOrder: SessionId[] | null;
+  projects: Project[] | null;
+  layout: Layout | null;
+  recentFolders: string[] | null;
+}
+
+/**
+ * The workspace after `delta`. Returns a new snapshot and leaves the one
+ * given untouched; sessions that did not change keep their identity, so a
+ * component that depends on one of them does not render again.
+ *
+ * Deltas can be applied as they arrive, in order, without looking at their
+ * revisions: each carries current values, and applying one twice changes
+ * nothing.
+ */
+export function applyWorkspaceDelta(
+  snapshot: WorkspaceSnapshot,
+  delta: WorkspaceDelta,
+): WorkspaceSnapshot {
+  const byId = new Map(snapshot.sessions.map((session) => [session.id, session]));
+  for (const session of delta.sessions) byId.set(session.id, session);
+  for (const id of delta.removed) byId.delete(id);
+
+  // The order sent wins. Without one, sessions keep their place and new
+  // ones go last, which is where the Rust side puts them.
+  const order = delta.sessionOrder ?? [
+    ...snapshot.sessions.map((session) => session.id),
+    ...delta.sessions.map((session) => session.id),
+  ];
+  const sessions: Session[] = [];
+  for (const id of order) {
+    const session = byId.get(id);
+    if (session) {
+      sessions.push(session);
+      byId.delete(id);
+    }
+  }
+
+  return {
+    revision: Math.max(snapshot.revision, delta.revision),
+    sessions,
+    projects: delta.projects ?? snapshot.projects,
+    layout: delta.layout ?? snapshot.layout,
+    recentFolders: delta.recentFolders ?? snapshot.recentFolders,
+    persistence: snapshot.persistence,
+  };
+}
+
+/**
+ * Subscribes this window to the workspace: resolves with its current
+ * state, and calls `onDelta` for every change from then on. Changes that
+ * come close together arrive as one delta. There is nothing to poll.
+ *
+ * `onDelta` can be called before the promise resolves; such a delta is
+ * already part of the snapshot, and applying it again is harmless. Keep
+ * the deltas that arrive early and apply them once the snapshot is there.
+ *
+ * A window has one subscription: subscribing again ends the previous one.
+ */
+export function subscribeWorkspace(
+  onDelta: (delta: WorkspaceDelta) => void,
+): Promise<WorkspaceSnapshot> {
+  const onEvent = new Channel<WorkspaceDelta>();
+  onEvent.onmessage = onDelta;
+  return call<WorkspaceSnapshot>("workspace_subscribe", { onEvent });
+}
+
+/** The workspace as it is now, without subscribing. */
+export function getWorkspaceSnapshot(): Promise<WorkspaceSnapshot> {
+  return call<WorkspaceSnapshot>("workspace_snapshot");
+}
+
+/**
+ * Asks for the Git branch of every session to be read again now, for
+ * instance when the window gets the focus back. What changed arrives as a
+ * delta. termx also does this on its own, every few seconds.
+ */
+export function refreshGit(): Promise<void> {
+  return call("workspace_refresh_git");
+}
+
+/**
+ * Shows the folder picker of the system. Resolves with the folder chosen,
+ * or `null` when the dialog was dismissed.
+ */
+export function pickFolder(): Promise<string | null> {
+  return call<string | null>("folder_pick");
+}
+
+/** Removes a folder from the recent folders. Resolves with whether it was one. */
+export function forgetRecentFolder(folder: string): Promise<boolean> {
+  return call<boolean>("recent_folder_forget", { folder });
+}
+
+/** What a new session is. Mirrors `CreateSessionRequest` in Rust. */
+export interface NewSession {
+  kind: SessionKind;
+  /** The folder it runs in. The home directory when omitted. */
   cwd?: string;
+  /** The command line; required for `background`, ignored otherwise. */
+  command?: string;
+  /** A name, as if the user had renamed the session. */
+  name?: string;
+  /** Whether to show it in the focused pane. Yes when omitted. */
+  show?: boolean;
+}
+
+/**
+ * Creates a session and resolves with it, in the `starting` state. Nothing
+ * runs yet: start it with `startSession` once its pane knows its size. Its
+ * folder becomes the most recent of the recent folders.
+ */
+export function createSession(session: NewSession): Promise<Session> {
+  return call<Session>("session_create", { request: session });
+}
+
+/**
+ * Creates another Claude Code session in the folder of the session `id`,
+ * without asking anything: "one more in the same project".
+ */
+export function createSiblingSession(id: SessionId): Promise<Session> {
+  return call<Session>("session_create_sibling", { id });
+}
+
+/**
+ * Gives a session a name, which wins over any automatic title from then
+ * on. `null` or an empty name removes it: the automatic title shows again.
+ */
+export function renameSession(id: SessionId, name: string | null): Promise<void> {
+  return call("session_rename", { id, name });
+}
+
+/**
+ * Moves a session just before the session `before` in the order of the
+ * sessions, or to the end when `before` is `null`.
+ */
+export function reorderSession(id: SessionId, before: SessionId | null): Promise<void> {
+  return call("session_reorder", { id, before });
+}
+
+/**
+ * Moves a project just before the project `before` in the order of the
+ * projects, or to the end when `before` is `null`.
+ */
+export function reorderProject(key: string, before: string | null): Promise<void> {
+  return call("project_reorder", { key, before });
+}
+
+/**
+ * Closes a session for good: its process is killed, and it leaves the
+ * sidebar and its pane. Closing a session that is gone does nothing.
+ */
+export function closeSession(id: SessionId): Promise<void> {
+  return call("session_close", { id });
+}
+
+/**
+ * Tells the Rust side the title a program set for its terminal, as
+ * xterm.js reports it (`onTitleChange`). It becomes the title of the
+ * session unless the user named it.
+ */
+export function reportSessionTitle(id: SessionId, title: string): Promise<void> {
+  return call("session_report_title", { id, title });
+}
+
+/**
+ * Tells the Rust side the folder a program says it is in: the payload of
+ * an OSC 7 sequence (a `file://` URL) or a path. The project and the
+ * branch of the session follow it.
+ */
+export function reportSessionCwd(id: SessionId, cwd: string): Promise<void> {
+  return call("session_report_cwd", { id, cwd });
+}
+
+/** How to start a session. Mirrors `StartSessionRequest` in Rust. */
+export interface StartSessionOptions {
+  /** From scratch when omitted. */
+  mode?: LaunchMode;
   /** Width of the terminal, in columns. */
   cols: number;
   /** Height of the terminal, in rows. */
   rows: number;
 }
 
-/** A session that was started. Mirrors `CreatedSession` in Rust. */
-export interface CreatedSession {
-  /** Identifier to pass to the other session functions. */
-  id: number;
+/** The terminal a session was started in. Mirrors `StartedSession` in Rust. */
+export interface StartedSession {
+  /** The number of the terminal, for `writeSession`, `resizeSession` and `ackSession`. */
+  terminal: number;
   /**
    * How many processed bytes to accumulate before acknowledging them with
    * `ackSession`.
@@ -138,6 +510,8 @@ export interface SessionExit {
   code: number | null;
   /** Description of the signal that ended the process, if any. */
   signal: string | null;
+  /** Set when termx knows why the session failed, with a message to show. */
+  failure?: LaunchFailure | null;
 }
 
 /** Receives what a session produces. */
@@ -168,59 +542,129 @@ function isSessionEvent(message: SessionMessage): message is SessionEvent {
 }
 
 /**
- * Starts a terminal session and resolves with its identifier.
+ * Starts the session `id` in a new terminal and resolves with that
+ * terminal. A session that is running is restarted.
  *
  * Output can reach `handlers.onOutput`, and even the exit `handlers.onExit`,
  * before the promise resolves: a process may print, or end, at once. The
  * handlers are called in the order things happened.
+ *
+ * The state of the session follows on its own (`starting`, `running`,
+ * `exited`) and arrives through `subscribeWorkspace`. If the session cannot
+ * be started the promise rejects, and its state says why (`failure`).
  */
-export function createSession(
-  options: CreateSessionOptions,
+export function startSession(
+  id: SessionId,
+  options: StartSessionOptions,
   handlers: SessionHandlers,
-): Promise<CreatedSession> {
+): Promise<StartedSession> {
   const onEvent = new Channel<SessionMessage>();
   onEvent.onmessage = (message) => {
     if (isSessionEvent(message)) {
-      handlers.onExit({ code: message.code, signal: message.signal });
+      handlers.onExit({
+        code: message.code,
+        signal: message.signal,
+        failure: message.failure ?? null,
+      });
     } else {
       handlers.onOutput(
         Array.isArray(message) ? Uint8Array.from(message) : new Uint8Array(message),
       );
     }
   };
-  return call<CreatedSession>("session_create", { request: options, onEvent });
+  return call<StartedSession>("session_start", { id, request: options, onEvent });
 }
 
 /**
- * Sends input to a session, as if it had been typed.
+ * Sends input to the terminal of a session, as if it had been typed.
  *
  * `data` is text. With `binary`, each of its characters stands for one byte
  * instead, which is how xterm.js reports input that is not text (`onBinary`).
  *
- * Wait for the promise before sending the next input of the same session:
+ * Wait for the promise before sending the next input of the same terminal:
  * that is what keeps input in order.
  */
-export function writeSession(id: number, data: string, binary = false): Promise<void> {
-  return call("session_write", { id, data, binary });
+export function writeSession(terminal: number, data: string, binary = false): Promise<void> {
+  return call("session_write", { id: terminal, data, binary });
 }
 
 /** Changes the size of the terminal of a session. */
-export function resizeSession(id: number, cols: number, rows: number): Promise<void> {
-  return call("session_resize", { id, cols, rows });
+export function resizeSession(terminal: number, cols: number, rows: number): Promise<void> {
+  return call("session_resize", { id: terminal, cols, rows });
 }
 
 /**
- * Tells the session that `bytes` of its output were processed. A session
- * whose output is not acknowledged is held back, so that a program printing
- * faster than the terminal can draw does not fill the memory.
+ * Tells the terminal of a session that `bytes` of its output were
+ * processed. A terminal whose output is not acknowledged is held back, so
+ * that a program printing faster than the terminal can draw does not fill
+ * the memory.
  */
-export function ackSession(id: number, bytes: number): Promise<void> {
-  return call("session_ack", { id, bytes });
+export function ackSession(terminal: number, bytes: number): Promise<void> {
+  return call("session_ack", { id: terminal, bytes });
 }
 
-/** Closes a session, killing its process. */
-export function closeSession(id: number): Promise<void> {
-  return call("session_close", { id });
+// --- The layout ------------------------------------------------------------
+//
+// Every operation is validated by the Rust side: one that would break the
+// layout rejects and changes nothing. The new layout arrives as a delta.
+
+/** Where a new pane goes: before (left or above) or after (right or below). */
+export type SplitPlacement = "before" | "after";
+
+/** Where a moved pane lands on its target. `center` swaps what the two show. */
+export type PaneEdge = "left" | "right" | "top" | "bottom" | "center";
+
+/**
+ * Splits a pane in two, side by side (`row`) or stacked (`column`), and
+ * resolves with the id of the new pane, which takes the focus. The new pane
+ * shows `session`, or nothing; it goes after the pane unless `placement`
+ * says otherwise.
+ */
+export function splitPane(
+  pane: number,
+  direction: SplitDirection,
+  options: { placement?: SplitPlacement; session?: SessionId | null } = {},
+): Promise<number> {
+  return call<number>("layout_split", {
+    pane,
+    direction,
+    placement: options.placement ?? null,
+    session: options.session ?? null,
+  });
+}
+
+/**
+ * Closes a pane: its neighbour takes its place. The last pane is emptied
+ * instead. The session it showed keeps running.
+ */
+export function closePane(pane: number): Promise<void> {
+  return call("layout_close_pane", { pane });
+}
+
+/** Moves a pane to an edge of another, or swaps what the two show. */
+export function movePane(pane: number, target: number, edge: PaneEdge): Promise<void> {
+  return call("layout_move_pane", { pane, target, edge });
+}
+
+/**
+ * Sets the share of a split given to its first child. Resolves with the
+ * ratio that was set: it is kept between 0.1 and 0.9.
+ */
+export function resizeSplit(split: number, ratio: number): Promise<number> {
+  return call<number>("layout_resize_split", { split, ratio });
+}
+
+/** Gives the focus to a pane. */
+export function focusPane(pane: number): Promise<void> {
+  return call("layout_focus_pane", { pane });
+}
+
+/**
+ * Shows a session in a pane, or empties the pane (`null`). A session that
+ * was shown in another pane moves there.
+ */
+export function showSession(pane: number, session: SessionId | null): Promise<void> {
+  return call("layout_show_session", { pane, session });
 }
 
 /**
