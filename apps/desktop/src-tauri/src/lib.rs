@@ -8,6 +8,12 @@ use tauri::webview::PageLoadEvent;
 use tauri::{Manager, WindowEvent};
 use termx_core::diagnostics::tracing;
 
+// The hooks of the end-to-end suite must never ship: see the `e2e` module.
+#[cfg(all(feature = "e2e", not(debug_assertions)))]
+compile_error!(
+    "the `e2e` feature adds test-only automation and cannot be enabled in a release build"
+);
+
 /// The commands exposed to the frontend. Register every command here.
 ///
 /// A macro, so that the tests which call the commands as the webview does
@@ -51,6 +57,8 @@ macro_rules! command_handlers {
 pub mod commands;
 #[cfg(test)]
 mod contract;
+#[cfg(feature = "e2e")]
+mod e2e;
 #[cfg(test)]
 mod ipc_tests;
 pub mod logging;
@@ -72,7 +80,7 @@ pub fn run() {
 
     raise_open_file_limit();
 
-    let built = tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
         // Only used from Rust, for the folder picker: the webview is given
         // no permission to open dialogs itself.
@@ -108,8 +116,10 @@ pub fn run() {
                 }
             }
             _ => {}
-        })
-        .build(tauri::generate_context!());
+        });
+    #[cfg(feature = "e2e")]
+    let builder = e2e::install(builder);
+    let built = builder.build(tauri::generate_context!());
 
     let app = match built {
         Ok(app) => app,
