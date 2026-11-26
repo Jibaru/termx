@@ -1,36 +1,34 @@
 //! The `tracing` layer that turns events into log lines.
 
 use std::fmt;
-use std::io::Write;
 use std::sync::Arc;
 
 use serde_json::{Map, Value};
 use time::OffsetDateTime;
 use tracing::field::{Field, Visit};
-use tracing::{Event, Subscriber};
+use tracing::{Event, Level, Subscriber};
 use tracing_log::NormalizeEvent;
-use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::registry::LookupSpan;
 
 use super::record::{LineContext, Record};
+use super::writer::LogWriter;
 
-/// Writes every event as one JSON line to `writer`.
-pub(crate) struct JsonLinesLayer<W> {
-    writer: W,
+/// Turns every event into one JSON line and hands it to the writer.
+pub(crate) struct JsonLinesLayer {
+    writer: Arc<LogWriter>,
     context: Arc<LineContext>,
 }
 
-impl<W> JsonLinesLayer<W> {
-    pub fn new(writer: W, context: Arc<LineContext>) -> Self {
+impl JsonLinesLayer {
+    pub fn new(writer: Arc<LogWriter>, context: Arc<LineContext>) -> Self {
         Self { writer, context }
     }
 }
 
-impl<S, W> Layer<S> for JsonLinesLayer<W>
+impl<S> Layer<S> for JsonLinesLayer
 where
     S: Subscriber + for<'span> LookupSpan<'span>,
-    W: for<'writer> MakeWriter<'writer> + 'static,
 {
     fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
         // Records that come from the `log` crate carry their real target in
@@ -58,9 +56,10 @@ where
             fields: visitor.fields,
         });
 
-        // A logger has nowhere to report its own failures: the record is
-        // dropped.
-        let _ = self.writer.make_writer().write_all(line.as_bytes());
+        // Warnings and errors go to the disk before this returns; see the
+        // `writer` module.
+        let urgent = *metadata.level() <= Level::WARN;
+        self.writer.submit(line, urgent);
     }
 }
 

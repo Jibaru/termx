@@ -10,7 +10,8 @@ use std::process::Command;
 use serde_json::Value;
 use termx_core::diagnostics::tracing::{self, debug, error, info, info_span, warn};
 use termx_core::diagnostics::{
-    Diagnostics, LogConfig, LogLevel, PANIC_TARGET, Redactor, Retention, STARTUP_TARGET, log_files,
+    Diagnostics, LOG_TARGET, LogConfig, LogLevel, PANIC_TARGET, Redactor, Retention,
+    STARTUP_TARGET, log_files,
 };
 
 /// Set for the child process of the panic test: the directory to log into.
@@ -331,4 +332,108 @@ fn a_panic_on_any_thread_is_recorded_and_the_default_behaviour_is_kept() {
     let main = &panics[1];
     assert_eq!(main["fields"]["message"], "main failed with code 42");
     assert_eq!(main["run"], worker["run"]);
+}
+
+/// Set for the child process of the abort tests: the directory to log into.
+const ABORT_CHILD_DIR: &str = "TERMX_TEST_ABORT_LOG_DIR";
+/// How the child of the abort tests ends: `abort` or `exit`.
+const ABORT_CHILD_MODE: &str = "TERMX_TEST_ABORT_MODE";
+/// Errors the child logs right before it dies.
+const ERRORS_BEFORE_DEATH: usize = 5_000;
+
+/// Runs `test` again in a child process that logs errors and then dies
+/// without any cleanup, and returns the error records found on disk.
+fn errors_surviving(test: &str, mode: &str) -> Vec<Value> {
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test, "--nocapture", "--test-threads=1"])
+        .env(ABORT_CHILD_DIR, dir.path())
+        .env(ABORT_CHILD_MODE, mode)
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "the child should not exit cleanly"
+    );
+
+    read_records(dir.path())
+        .into_iter()
+        .filter(|record| record["level"] == "ERROR")
+        .collect()
+}
+
+/// The child half of the abort tests. Never returns when it is the child.
+fn die_after_logging_if_child() {
+    let Some(dir) = std::env::var_os(ABORT_CHILD_DIR) else {
+        return;
+    };
+    let _diagnostics = Diagnostics::init(config(Path::new(&dir))).unwrap();
+    for index in 0..ERRORS_BEFORE_DEATH {
+        info!(index, "working");
+        error!(index, "something is going wrong");
+    }
+    error!("the cause of the crash");
+    if std::env::var(ABORT_CHILD_MODE).as_deref() == Ok("abort") {
+        std::process::abort();
+    }
+    std::process::exit(3);
+}
+
+#[test]
+fn errors_logged_right_before_an_abort_are_on_disk() {
+    die_after_logging_if_child();
+
+    let errors = errors_surviving("errors_logged_right_before_an_abort_are_on_disk", "abort");
+
+    assert_eq!(errors.len(), ERRORS_BEFORE_DEATH + 1);
+    assert_eq!(errors.last().unwrap()["msg"], "the cause of the crash");
+}
+
+#[test]
+fn errors_logged_right_before_exit_are_on_disk() {
+    die_after_logging_if_child();
+
+    let errors = errors_surviving("errors_logged_right_before_exit_are_on_disk", "exit");
+
+    assert_eq!(errors.len(), ERRORS_BEFORE_DEATH + 1);
+    assert_eq!(errors.last().unwrap()["msg"], "the cause of the crash");
+}
+
+#[test]
+fn a_flood_of_low_level_records_cannot_push_out_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = config(dir.path());
+    config.level = LogLevel::Debug;
+    // Room for everything, so that what is missing was dropped, not pruned.
+    config.retention.max_total_bytes = 1 << 30;
+    config.retention.max_files = usize::MAX;
+
+    let records = logged(config, |_| {
+        for index in 0..200_000u32 {
+            debug!(index, "noise");
+            if index % 1_000 == 0 {
+                error!(index, "a real error");
+            }
+        }
+        error!("the last error");
+    });
+
+    let errors: Vec<&Value> = records
+        .iter()
+        .filter(|record| record["level"] == "ERROR")
+        .collect();
+    assert_eq!(errors.len(), 201);
+    assert_eq!(errors.last().unwrap()["msg"], "the last error");
+
+    // Whatever noise did not fit in the queue is accounted for.
+    let written = records
+        .iter()
+        .filter(|record| record["msg"] == "noise")
+        .count() as u64;
+    let dropped: u64 = records
+        .iter()
+        .filter(|record| record["target"] == LOG_TARGET)
+        .map(|record| record["fields"]["dropped"].as_u64().unwrap())
+        .sum();
+    assert_eq!(written + dropped, 200_000);
 }
