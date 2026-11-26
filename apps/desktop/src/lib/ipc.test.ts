@@ -1,15 +1,25 @@
+import { Channel } from "@tauri-apps/api/core";
 import { describe, expect, it, vi } from "vitest";
 
 import { recordIPC } from "../test/ipcRecorder";
 import {
+  ackSession,
+  closeSession,
   type CommandError,
+  createSession,
   describeError,
   exportDiagnostics,
   getCoreVersion,
   isCommandError,
   logFrontendEvent,
+  openExternalUrl,
   openLogFolder,
+  readClipboardText,
   resetFrontendLogLimit,
+  resizeSession,
+  type SessionExit,
+  writeClipboardText,
+  writeSession,
 } from "./ipc";
 import { DEFAULT_LOG_LIMITS } from "./logLimiter";
 
@@ -31,6 +41,130 @@ describe("command wrappers", () => {
     expect(ipc.calls).toHaveLength(1);
     expect(ipc.calls[0]?.command).toBe("export_diagnostics");
     expect(JSON.stringify(ipc.calls[0]?.args ?? {})).toBe("{}");
+  });
+});
+
+describe("session commands", () => {
+  /** Creates a session and returns what its handlers received. */
+  async function create(respond: (command: string, args: unknown) => unknown = () => undefined) {
+    const ipc = recordIPC((command, args) =>
+      command === "session_create"
+        ? { id: 7, ackBatchBytes: 8192, windowsBuildNumber: null }
+        : respond(command, args),
+    );
+    const output: Uint8Array[] = [];
+    const exits: SessionExit[] = [];
+    const created = await createSession(
+      { cols: 120, rows: 40 },
+      { onOutput: (bytes) => output.push(bytes), onExit: (exit) => exits.push(exit) },
+    );
+    const args = ipc.calls[0]?.args as {
+      request: unknown;
+      onEvent: { onmessage: (message: unknown) => void };
+    };
+    return { ipc, created, output, exits, request: args.request, channel: args.onEvent };
+  }
+
+  it("creates a session with a channel for its output", async () => {
+    const { ipc, created, request, channel } = await create();
+
+    expect(created).toEqual({ id: 7, ackBatchBytes: 8192, windowsBuildNumber: null });
+    expect(ipc.calls[0]?.command).toBe("session_create");
+    expect(request).toEqual({ cols: 120, rows: 40 });
+    expect(channel).toBeInstanceOf(Channel);
+  });
+
+  it("hands the raw bytes of the channel to the output handler", async () => {
+    const { channel, output, exits } = await create();
+    const bytes = Uint8Array.from([0x1b, 0x5b, 0x31, 0x6d, 0xe2, 0x9c, 0x93, 0xff]);
+
+    channel.onmessage(bytes.buffer);
+
+    expect(output).toHaveLength(1);
+    expect(output[0]).toBeInstanceOf(Uint8Array);
+    expect(Array.from(output[0] ?? [])).toEqual(Array.from(bytes));
+    expect(exits).toEqual([]);
+  });
+
+  it("accepts the bytes as an array of numbers, as the fallback transport sends them", async () => {
+    const { channel, output } = await create();
+
+    channel.onmessage([104, 105, 255]);
+
+    expect(Array.from(output[0] ?? [])).toEqual([104, 105, 255]);
+  });
+
+  it("hands the exit message of the channel to the exit handler", async () => {
+    const { channel, output, exits } = await create();
+
+    channel.onmessage({ event: "exit", code: 3, signal: null });
+    channel.onmessage({ event: "exit", code: null, signal: "Hangup" });
+
+    expect(exits).toEqual([
+      { code: 3, signal: null },
+      { code: null, signal: "Hangup" },
+    ]);
+    expect(output).toEqual([]);
+  });
+
+  it("writes, resizes, acknowledges and closes by session id", async () => {
+    const ipc = recordIPC();
+
+    await writeSession(7, "ls\r");
+    await writeSession(7, "\xa0\xff", true);
+    await resizeSession(7, 132, 43);
+    await ackSession(7, 8192);
+    await closeSession(7);
+
+    expect(ipc.calls).toEqual([
+      { command: "session_write", args: { id: 7, data: "ls\r", binary: false } },
+      { command: "session_write", args: { id: 7, data: "\xa0\xff", binary: true } },
+      { command: "session_resize", args: { id: 7, cols: 132, rows: 43 } },
+      { command: "session_ack", args: { id: 7, bytes: 8192 } },
+      { command: "session_close", args: { id: 7 } },
+    ]);
+  });
+
+  it("never logs what was typed when a write fails", async () => {
+    const ipc = recordIPC((command) => {
+      if (command === "session_write") throw new Error("the connection was lost");
+      return undefined;
+    });
+
+    await expect(writeSession(7, "my-secret-password\r")).rejects.toThrow();
+
+    await vi.waitFor(() => {
+      expect(ipc.logged()).toHaveLength(1);
+    });
+    expect(JSON.stringify(ipc.logged())).not.toContain("my-secret-password");
+  });
+});
+
+describe("system integration", () => {
+  it("opens links through the opener plugin", async () => {
+    const ipc = recordIPC();
+
+    await openExternalUrl("https://example.com/docs");
+
+    expect(ipc.calls).toHaveLength(1);
+    expect(ipc.calls[0]?.command).toBe("plugin:opener|open_url");
+    expect(ipc.calls[0]?.args).toMatchObject({ url: "https://example.com/docs" });
+  });
+
+  it("reads and writes the clipboard through the clipboard plugin", async () => {
+    const ipc = recordIPC((command) =>
+      command === "plugin:clipboard-manager|read_text" ? "from the clipboard" : undefined,
+    );
+
+    await writeClipboardText("to the clipboard");
+    const text = await readClipboardText();
+
+    expect(text).toBe("from the clipboard");
+    expect(ipc.calls.map((call) => call.command)).toEqual([
+      "plugin:clipboard-manager|write_text",
+      "plugin:clipboard-manager|read_text",
+    ]);
+    expect(ipc.calls[0]?.args).toMatchObject({ text: "to the clipboard" });
   });
 });
 
