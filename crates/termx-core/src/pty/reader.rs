@@ -31,11 +31,12 @@ pub(super) use unix::pump_until_stopped;
 
 #[cfg(unix)]
 mod unix {
+    use std::fs::File;
     use std::io::{ErrorKind, PipeReader, Read};
     use std::os::fd::AsRawFd;
     use std::time::Duration;
 
-    use filedescriptor::{FileDescriptor, POLLIN, poll, pollfd};
+    use filedescriptor::{POLLIN, poll, pollfd};
 
     use super::{OutputSink, READ_BUFFER_SIZE, pump_blocking};
 
@@ -59,7 +60,7 @@ mod unix {
     ///   [`DRAIN_IDLE_TIMEOUT`], so that everything the process wrote before
     ///   exiting is delivered.
     pub(in crate::pty) fn pump_until_stopped(
-        mut master: FileDescriptor,
+        mut master: &File,
         stop: &PipeReader,
         sink: &OutputSink,
     ) {

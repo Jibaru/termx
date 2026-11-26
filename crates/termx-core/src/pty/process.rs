@@ -182,7 +182,7 @@ impl Pty {
                 let (sink, poke) = (sink.clone(), poke.clone());
                 let (master, stop) = (streams.master, streams.stop_reader);
                 move || {
-                    reader::pump_until_stopped(master, &stop, &sink);
+                    reader::pump_until_stopped(&master, &stop, &sink);
                     sink.finish();
                     // End of file usually means the process is gone.
                     let _ = poke.send(());
@@ -473,8 +473,9 @@ impl Shared {
 /// a failure can be handled in one place.
 struct Streams {
     writer: Writer,
+    /// The descriptor the reader thread reads from, shared with `writer`.
     #[cfg(unix)]
-    master: filedescriptor::FileDescriptor,
+    master: Arc<std::fs::File>,
     #[cfg(unix)]
     stop_reader: std::io::PipeReader,
     #[cfg(unix)]
@@ -487,21 +488,22 @@ impl Streams {
     fn open(master: &(dyn MasterPty + Send)) -> Result<Self, PtyError> {
         let setup = |error: &dyn std::fmt::Display| PtyError::Setup(error.to_string());
 
-        let writer = master
-            .take_writer()
-            .map_err(|error| setup(&format!("{error:#}")))?;
-
         #[cfg(unix)]
         {
             let fd = master
                 .as_raw_fd()
                 .ok_or_else(|| setup(&"the pseudo-terminal has no file descriptor"))?;
-            // An owned duplicate, so that the reader thread never depends on
-            // the lifetime of the master.
-            let master = filedescriptor::FileDescriptor::dup(&fd).map_err(|error| setup(&error))?;
+            // One owned duplicate of the master serves both directions: a
+            // `&File` can be read and written from different threads. This
+            // keeps a PTY down to four descriptors (see `limits`), and the
+            // reader thread never depends on the lifetime of the master.
+            let master = filedescriptor::FileDescriptor::dup(&fd)
+                .and_then(|duplicate| duplicate.as_file())
+                .map(Arc::new)
+                .map_err(|error| setup(&error))?;
             let (stop_reader, stop_writer) = std::io::pipe().map_err(|error| setup(&error))?;
             Ok(Self {
-                writer,
+                writer: Box::new(SharedFile(Arc::clone(&master))),
                 master,
                 stop_reader,
                 stop_writer,
@@ -509,11 +511,29 @@ impl Streams {
         }
         #[cfg(windows)]
         {
+            let writer = master
+                .take_writer()
+                .map_err(|error| setup(&format!("{error:#}")))?;
             let reader = master
                 .try_clone_reader()
                 .map_err(|error| setup(&format!("{error:#}")))?;
             Ok(Self { writer, reader })
         }
+    }
+}
+
+/// Write half of the duplicated master descriptor.
+#[cfg(unix)]
+struct SharedFile(Arc<std::fs::File>);
+
+#[cfg(unix)]
+impl Write for SharedFile {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        (&*self.0).write(buffer)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 

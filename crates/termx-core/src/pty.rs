@@ -74,9 +74,9 @@
 //! threads, so no thread, zombie process or file descriptor outlives the
 //! handle. Dropping the [`PtyOutput`] only discards the output.
 //!
-//! On Unix each PTY uses five file descriptors. An application expecting
-//! hundreds of sessions should raise its `RLIMIT_NOFILE` soft limit, which
-//! defaults to 256 on macOS.
+//! On Unix each PTY uses four file descriptors, and macOS only allows 256 by
+//! default. Call [`raise_open_file_limit`] when the application starts; its
+//! documentation gives the resulting capacity.
 //!
 //! # Platform notes
 //!
@@ -95,6 +95,7 @@
 
 mod command;
 mod error;
+mod limits;
 mod manager;
 mod output;
 mod process;
@@ -104,6 +105,7 @@ mod types;
 
 pub use command::{COLORTERM, PtyCommand, TERM, TERM_PROGRAM};
 pub use error::PtyError;
+pub use limits::{OPEN_FILE_LIMIT_TARGET, raise_open_file_limit};
 pub use manager::{PtyManager, SessionId};
 pub use output::{OUTPUT_BUFFER_CAPACITY, PtyOutput, RecvTimeoutError};
 pub use process::Pty;
