@@ -69,6 +69,10 @@ pub enum PtyError {
     #[error("the process has already exited")]
     Exited,
 
+    /// The manager has been shut down and no longer accepts new sessions.
+    #[error("the terminal manager has been shut down")]
+    ManagerShutDown,
+
     /// No session with this identifier is registered in the manager.
     #[error("no terminal session with id {0}")]
     UnknownSession(SessionId),

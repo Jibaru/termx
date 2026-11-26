@@ -63,7 +63,15 @@ impl std::fmt::Display for SessionId {
 #[derive(Debug, Default)]
 pub struct PtyManager {
     next_id: AtomicU64,
-    sessions: Mutex<HashMap<SessionId, Arc<Pty>>>,
+    registry: Mutex<Registry>,
+}
+
+#[derive(Debug, Default)]
+struct Registry {
+    sessions: HashMap<SessionId, Arc<Pty>>,
+    /// Set by `shutdown`, under the same lock as the sessions, so that no
+    /// spawn can register a session once the others have been collected.
+    shut_down: bool,
 }
 
 impl PtyManager {
@@ -77,15 +85,31 @@ impl PtyManager {
     ///
     /// # Errors
     ///
-    /// The same as [`Pty::spawn`]. Nothing is registered on error.
+    /// The same as [`Pty::spawn`], and [`PtyError::ManagerShutDown`] once
+    /// [`shutdown`](Self::shutdown) has been called. Nothing is registered
+    /// on error.
     pub fn spawn(
         &self,
         command: &PtyCommand,
         size: PtySize,
     ) -> Result<(SessionId, PtyOutput), PtyError> {
+        if lock(&self.registry).shut_down {
+            return Err(PtyError::ManagerShutDown);
+        }
         let (pty, output) = Pty::spawn(command, size)?;
+
+        // The manager may have been shut down while the process was being
+        // started. Registering now would leave a session behind that
+        // nothing would ever stop.
+        let mut registry = lock(&self.registry);
+        if registry.shut_down {
+            drop(registry);
+            // Dropping the handle kills the process that was just started.
+            drop(pty);
+            return Err(PtyError::ManagerShutDown);
+        }
         let id = SessionId(self.next_id.fetch_add(1, Ordering::Relaxed) + 1);
-        lock(&self.sessions).insert(id, Arc::new(pty));
+        registry.sessions.insert(id, Arc::new(pty));
         Ok((id, output))
     }
 
@@ -93,7 +117,7 @@ impl PtyManager {
     /// shortcut on the manager (such as waiting for the exit status).
     #[must_use]
     pub fn get(&self, id: SessionId) -> Option<Arc<Pty>> {
-        lock(&self.sessions).get(&id).cloned()
+        lock(&self.registry).sessions.get(&id).cloned()
     }
 
     /// Sends input to a PTY. See [`Pty::write`].
@@ -131,17 +155,24 @@ impl PtyManager {
     ///
     /// Dropping the returned handle kills the process if it is still running.
     pub fn remove(&self, id: SessionId) -> Option<Arc<Pty>> {
-        lock(&self.sessions).remove(&id)
+        lock(&self.registry).sessions.remove(&id)
     }
 
-    /// Kills every registered PTY and unregisters them all.
+    /// Kills every registered PTY, unregisters them all and closes the
+    /// manager for good: from then on [`spawn`](Self::spawn) fails with
+    /// [`PtyError::ManagerShutDown`], including a spawn that was already in
+    /// progress on another thread, whose process is killed.
     ///
     /// Every process is asked to terminate before any of them is waited for,
     /// so closing many terminals takes about as long as closing the slowest
     /// one, not the sum of them all. Called automatically when the manager
     /// is dropped.
     pub fn shutdown(&self) {
-        let sessions = std::mem::take(&mut *lock(&self.sessions));
+        let sessions = {
+            let mut registry = lock(&self.registry);
+            registry.shut_down = true;
+            std::mem::take(&mut registry.sessions)
+        };
         for pty in sessions.values() {
             let _ = pty.kill();
         }
@@ -152,7 +183,7 @@ impl PtyManager {
     /// The identifiers of the registered PTYs, in creation order.
     #[must_use]
     pub fn ids(&self) -> Vec<SessionId> {
-        let mut ids: Vec<SessionId> = lock(&self.sessions).keys().copied().collect();
+        let mut ids: Vec<SessionId> = lock(&self.registry).sessions.keys().copied().collect();
         ids.sort_unstable();
         ids
     }
@@ -160,7 +191,7 @@ impl PtyManager {
     /// The number of registered PTYs.
     #[must_use]
     pub fn len(&self) -> usize {
-        lock(&self.sessions).len()
+        lock(&self.registry).sessions.len()
     }
 
     /// Whether no PTY is registered.
@@ -215,6 +246,22 @@ mod tests {
             );
             assert_eq!(error.to_string(), "no terminal session with id 7");
         }
+    }
+
+    #[test]
+    fn spawning_after_shutdown_fails_without_starting_anything() {
+        let manager = PtyManager::new();
+        manager.shutdown();
+
+        // The command is not even validated: nothing is started.
+        for command in [PtyCommand::new(""), PtyCommand::default_shell()] {
+            let error = manager.spawn(&command, PtySize::default()).unwrap_err();
+            assert!(matches!(error, PtyError::ManagerShutDown), "{error}");
+        }
+        assert!(manager.is_empty());
+
+        // Shutting down again is harmless.
+        manager.shutdown();
     }
 
     #[test]

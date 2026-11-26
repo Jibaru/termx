@@ -1444,6 +1444,68 @@ fn manager_drives_independent_sessions() {
 }
 
 #[test]
+fn spawns_racing_a_shutdown_leave_nothing_behind() {
+    guarded(|| {
+        termx_core::pty::raise_open_file_limit().expect("cannot raise the open file limit");
+        let dir = scratch_dir("shutdown-race");
+        let manager = Arc::new(PtyManager::new());
+
+        // Several threads keep spawning while the manager is shut down.
+        let spawners: Vec<_> = (0..8)
+            .map(|thread_index| {
+                let manager = Arc::clone(&manager);
+                let dir = dir.clone();
+                thread::spawn(move || {
+                    let mut heartbeats = Vec::new();
+                    for spawn_index in 0..200 {
+                        let file = dir.join(format!("beat-{thread_index}-{spawn_index}"));
+                        let command = helper(&["heartbeat", &file.to_string_lossy()]);
+                        match manager.spawn(&command, PtySize::default()) {
+                            Ok(_) => heartbeats.push(file),
+                            Err(PtyError::ManagerShutDown) => {
+                                heartbeats.push(file);
+                                return Ok(heartbeats);
+                            }
+                            Err(error) => return Err(error.to_string()),
+                        }
+                    }
+                    Err("the manager was never shut down".to_owned())
+                })
+            })
+            .collect();
+
+        thread::sleep(Duration::from_millis(150));
+        manager.shutdown();
+
+        let mut heartbeats = Vec::new();
+        for spawner in spawners {
+            heartbeats.extend(spawner.join().expect("a spawner panicked").unwrap());
+        }
+
+        // Nothing was registered behind the shutdown's back...
+        assert!(
+            manager.is_empty(),
+            "{} sessions were left registered",
+            manager.len()
+        );
+        // ...and every process that was started is dead: no heartbeat moves.
+        let read_all = |files: &[PathBuf]| -> Vec<Option<String>> {
+            files
+                .iter()
+                .map(|file| std::fs::read_to_string(file).ok())
+                .collect()
+        };
+        let before = read_all(&heartbeats);
+        thread::sleep(Duration::from_millis(500));
+        assert_eq!(
+            read_all(&heartbeats),
+            before,
+            "a process outlived the shutdown"
+        );
+    });
+}
+
+#[test]
 fn dropping_the_manager_kills_its_sessions() {
     guarded(|| {
         let file = scratch_dir("manager-heartbeat").join("beat");
