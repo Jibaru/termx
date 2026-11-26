@@ -18,6 +18,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use same_file::Handle;
 use time::OffsetDateTime;
 
 use super::record::compact_timestamp;
@@ -235,11 +236,16 @@ pub(crate) struct RotatingFile {
     dir: PathBuf,
     retention: Retention,
     run_id: String,
+    /// Time the launch started logging, shared by the names of all its files.
+    stamp: String,
     /// Sequence number of the next file to create.
     next_sequence: u32,
     /// The file being written to.
     path: PathBuf,
     file: Option<File>,
+    /// What the open file is on disk (device and inode, or the Windows
+    /// equivalent), to notice when the path stops referring to it.
+    identity: Option<Handle>,
     /// Size of the current file.
     written: u64,
     written_since_prune: u64,
@@ -256,9 +262,11 @@ impl RotatingFile {
             dir: dir.to_owned(),
             retention,
             run_id: run_id.to_owned(),
+            stamp: compact_timestamp(OffsetDateTime::now_utc()),
             next_sequence: 0,
             path: PathBuf::new(),
             file: None,
+            identity: None,
             written: 0,
             written_since_prune: 0,
             #[cfg(test)]
@@ -281,28 +289,54 @@ impl RotatingFile {
     /// Appends one complete record, starting a new file first if it would
     /// not fit.
     pub fn write_record(&mut self, record: &[u8]) -> io::Result<()> {
-        let length = record.len() as u64;
+        self.write_batch(std::iter::once(record))
+    }
 
+    /// Appends several complete records.
+    ///
+    /// Whether the file is still the one on disk is checked once per batch:
+    /// the check opens the path, which is cheap but not free.
+    pub fn write_batch<'a>(
+        &mut self,
+        records: impl IntoIterator<Item = &'a [u8]>,
+    ) -> io::Result<()> {
         // If the file was deleted or replaced while the application runs,
         // writing on would go into a file nobody can see.
-        let intact =
-            fs::symlink_metadata(&self.path).is_ok_and(|metadata| metadata.file_type().is_file());
-        if self.file.is_none() || !intact {
+        if self.file.is_none() || !self.is_intact() {
             self.file = None;
             self.start_new_file()?;
-        } else if self.written > 0 && self.written + length > self.retention.max_file_bytes {
-            self.rotate(length);
         }
 
-        if let Some(file) = self.file.as_mut() {
-            file.write_all(record)?;
-            self.written += length;
-            self.written_since_prune += length;
+        let mut result = Ok(());
+        for record in records {
+            let length = record.len() as u64;
+            if self.written > 0 && self.written + length > self.retention.max_file_bytes {
+                self.rotate(length);
+            }
+            if let Some(file) = self.file.as_mut() {
+                // Keep going after a failed record: the next one may fit.
+                match file.write_all(record) {
+                    Ok(()) => {
+                        self.written += length;
+                        self.written_since_prune += length;
+                    }
+                    Err(error) => result = Err(error),
+                }
+            }
         }
         if self.written_since_prune >= self.retention.prune_interval() {
             self.prune();
         }
-        Ok(())
+        result
+    }
+
+    /// Whether the path of the current file still leads to the file that is
+    /// open: a regular file with the same identity. It does not after the
+    /// file was deleted, or replaced by a link or by another file.
+    fn is_intact(&self) -> bool {
+        let regular =
+            fs::symlink_metadata(&self.path).is_ok_and(|metadata| metadata.file_type().is_file());
+        regular && self.identity.is_some() && Handle::from_path(&self.path).ok() == self.identity
     }
 
     /// Asks the operating system to write the file to the disk.
@@ -360,17 +394,17 @@ impl RotatingFile {
         }
 
         fs::create_dir_all(&self.dir)?;
-        let stamp = compact_timestamp(OffsetDateTime::now_utc());
         let mut last_error = None;
         for _ in 0..NAME_ATTEMPTS {
             let path = self
                 .dir
-                .join(file_name(&stamp, &self.run_id, self.next_sequence));
+                .join(file_name(&self.stamp, &self.run_id, self.next_sequence));
             self.next_sequence += 1;
             // `create_new` never opens something that already exists, which
             // includes a symbolic link planted under the expected name.
             match OpenOptions::new().append(true).create_new(true).open(&path) {
                 Ok(file) => {
+                    self.identity = file.try_clone().and_then(Handle::from_file).ok();
                     self.file = Some(file);
                     self.path = path;
                     self.written = 0;
@@ -601,6 +635,45 @@ mod tests {
 
         assert_eq!(contents(dir.path()), "after\n");
         assert!(file.path().is_file());
+    }
+
+    #[test]
+    fn a_file_renamed_over_the_log_is_noticed_and_no_record_is_lost() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut file = RotatingFile::open(dir.path(), Retention::default(), RUN).unwrap();
+        file.write_record(b"one\n").unwrap();
+        let original = file.path().to_owned();
+
+        // Another regular file takes the place of the log file. The open
+        // handle now refers to a file that no longer has a name.
+        let intruder = dir.path().join("intruder.tmp");
+        fs::write(&intruder, "").unwrap();
+        fs::rename(&intruder, &original).unwrap();
+        file.write_record(b"two\n").unwrap();
+        file.write_record(b"three\n").unwrap();
+
+        assert_ne!(file.path(), original, "a new file should have been started");
+        assert_eq!(fs::read_to_string(file.path()).unwrap(), "two\nthree\n");
+        assert_eq!(fs::read_to_string(&original).unwrap(), "");
+    }
+
+    #[test]
+    fn a_file_planted_under_the_next_name_is_never_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut file = RotatingFile::open(dir.path(), retention(100, 10_000), RUN).unwrap();
+        // All files of a launch share its timestamp, so the next name is
+        // known in advance, to an attacker too.
+        let current = file.path().to_string_lossy().into_owned();
+        assert!(current.ends_with("-000.log"));
+        let next = current.replace("-000.log", "-001.log");
+        fs::write(&next, "planted\n").unwrap();
+
+        for _ in 0..5 {
+            file.write_record(&[b'a'; 40]).unwrap();
+        }
+
+        assert_eq!(fs::read_to_string(&next).unwrap(), "planted\n");
+        assert!(file.path().to_string_lossy().ends_with("-003.log"));
     }
 
     #[test]
