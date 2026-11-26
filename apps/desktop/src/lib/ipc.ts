@@ -89,11 +89,12 @@ export function openLogFolder(): Promise<void> {
 
 /**
  * Writes a diagnostics bundle (a zip with the log files and
- * `system-info.json`) and opens its folder. The bundle goes into
- * `destination`, or into the Downloads folder when omitted.
+ * `system-info.json`) to the Downloads folder, opens that folder and returns
+ * where the bundle is. The Rust side chooses the location; it cannot be set
+ * from here.
  */
-export function exportDiagnostics(destination?: string): Promise<ExportedBundle> {
-  return call<ExportedBundle>("export_diagnostics", { destination: destination ?? null });
+export function exportDiagnostics(): Promise<ExportedBundle> {
+  return call<ExportedBundle>("export_diagnostics");
 }
 
 /** Whether a rejected call carries the `CommandError` of a Rust command. */

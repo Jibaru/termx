@@ -22,17 +22,15 @@ describe("command wrappers", () => {
     expect(ipc.calls.map((call) => call.command)).toEqual(["open_log_folder"]);
   });
 
-  it("exports the diagnostics to the default location unless one is given", async () => {
+  it("exports the diagnostics without passing a destination", async () => {
     const ipc = recordIPC(() => ({ path: "/downloads/termx-diagnostics.zip" }));
 
     const bundle = await exportDiagnostics();
-    await exportDiagnostics("/tmp/out");
 
     expect(bundle).toEqual({ path: "/downloads/termx-diagnostics.zip" });
-    expect(ipc.calls).toEqual([
-      { command: "export_diagnostics", args: { destination: null } },
-      { command: "export_diagnostics", args: { destination: "/tmp/out" } },
-    ]);
+    expect(ipc.calls).toHaveLength(1);
+    expect(ipc.calls[0]?.command).toBe("export_diagnostics");
+    expect(JSON.stringify(ipc.calls[0]?.args ?? {})).toBe("{}");
   });
 });
 
