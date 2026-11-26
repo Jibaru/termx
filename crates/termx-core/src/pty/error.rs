@@ -3,6 +3,8 @@
 use std::io;
 use std::path::PathBuf;
 
+use super::SessionId;
+
 /// Everything that can go wrong while spawning or driving a PTY.
 ///
 /// The enum is `#[non_exhaustive]`: new variants may be added without a
@@ -66,4 +68,8 @@ pub enum PtyError {
     /// The operation needs a running process, but it has already exited.
     #[error("the process has already exited")]
     Exited,
+
+    /// No session with this identifier is registered in the manager.
+    #[error("no terminal session with id {0}")]
+    UnknownSession(SessionId),
 }
