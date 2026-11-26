@@ -54,11 +54,10 @@
 use std::error::Error;
 use std::fmt;
 use std::hash::{BuildHasher, Hasher};
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 
-use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::layer::SubscriberExt;
 
 pub mod bundle;
@@ -70,6 +69,7 @@ mod record;
 pub mod redact;
 mod rotate;
 mod system;
+mod writer;
 
 pub use tracing;
 
@@ -80,16 +80,15 @@ pub use self::record::{MAX_VALUE_BYTES, TRUNCATION_MARKER};
 pub use self::redact::Redactor;
 pub use self::rotate::{LogFile, Retention, is_log_file_name, log_files, prune};
 pub use self::system::SystemInfo;
+pub use self::writer::LOG_TARGET;
 
 use self::layer::JsonLinesLayer;
 use self::record::LineContext;
 use self::rotate::RotatingFile;
+use self::writer::{LogWriter, QUEUE_CAPACITY};
 
 /// Target of the record written at startup.
 pub const STARTUP_TARGET: &str = "termx::startup";
-
-/// The log file, shared by the background writer and the panic hook.
-pub(crate) type SharedFile = Arc<Mutex<RotatingFile>>;
 
 /// Settings for [`Diagnostics::init`].
 ///
@@ -192,9 +191,7 @@ struct Inner {
     level: LogLevel,
     system: SystemInfo,
     context: Arc<LineContext>,
-    file: SharedFile,
-    /// Flushes and stops the background writer when dropped.
-    guard: Mutex<Option<WorkerGuard>>,
+    writer: Arc<LogWriter>,
 }
 
 impl Diagnostics {
@@ -234,23 +231,24 @@ impl Diagnostics {
         let run_id = new_run_id();
         let file = RotatingFile::open(&config.dir, config.retention, &run_id)
             .map_err(|source| DiagnosticsError::io(&config.dir, source))?;
-        let file: SharedFile = Arc::new(Mutex::new(file));
         let context = Arc::new(LineContext {
             run_id,
             redactor: config.redactor,
         });
-
-        // The writer thread owns the file; logging threads only hand over
-        // finished lines. When the queue is full, records are dropped rather
-        // than blocking the caller.
-        let (writer, guard) = tracing_appender::non_blocking(FileWriter(Arc::clone(&file)));
+        let writer = LogWriter::new(file, Arc::clone(&context), QUEUE_CAPACITY);
+        writer
+            .start_worker()
+            .map_err(|source| DiagnosticsError::io(&config.dir, source))?;
 
         let stderr = config
             .stderr
             .then(|| tracing_subscriber::fmt::layer().with_writer(io::stderr));
         let subscriber = tracing_subscriber::registry()
             .with(config.level.filter())
-            .with(JsonLinesLayer::new(writer, Arc::clone(&context)))
+            .with(JsonLinesLayer::new(
+                Arc::clone(&writer),
+                Arc::clone(&context),
+            ))
             .with(stderr);
 
         let diagnostics = Self {
@@ -259,8 +257,7 @@ impl Diagnostics {
                 level: config.level,
                 system: SystemInfo::collect(&config.app_version, config.webview_version),
                 context,
-                file,
-                guard: Mutex::new(Some(guard)),
+                writer,
             }),
         };
         Ok((diagnostics, tracing::Dispatch::new(subscriber)))
@@ -274,7 +271,7 @@ impl Diagnostics {
     /// level is [`LogLevel::Off`].
     pub fn install_panic_hook(&self) {
         panic::install(
-            Arc::clone(&self.inner.file),
+            Arc::clone(&self.inner.writer),
             Arc::clone(&self.inner.context),
         );
     }
@@ -330,6 +327,8 @@ impl Diagnostics {
     ///
     /// Fails when the logs cannot be read or the bundle cannot be written.
     pub fn export_bundle(&self, dest_dir: &Path) -> Result<PathBuf, DiagnosticsError> {
+        // So that the bundle has everything logged up to now.
+        self.flush();
         bundle::export(
             &self.inner.dir,
             dest_dir,
@@ -341,36 +340,22 @@ impl Diagnostics {
         )
     }
 
-    /// Writes everything that is still queued and stops the background
-    /// writer. Call it once, right before the process exits.
+    /// Writes everything that is still queued and asks the operating system
+    /// to flush the log file to the disk.
     ///
-    /// Records logged afterwards are dropped, except panics.
+    /// Warnings and errors never wait in the queue, so this is only needed
+    /// to be sure about `INFO` and lower records, for example before reading
+    /// the log.
+    pub fn flush(&self) {
+        self.inner.writer.flush();
+    }
+
+    /// Flushes the log and stops the background writer. Call it once, right
+    /// before the process exits.
+    ///
+    /// Records logged afterwards are still written, synchronously.
     pub fn shutdown(&self) {
-        let guard = self
-            .inner
-            .guard
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take();
-        drop(guard);
-    }
-}
-
-/// Adapter that lets the background writer append to the shared file. It
-/// receives exactly one record per call.
-struct FileWriter(SharedFile);
-
-impl Write for FileWriter {
-    fn write(&mut self, record: &[u8]) -> io::Result<usize> {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .write_record(record)?;
-        Ok(record.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
+        self.inner.writer.shutdown();
     }
 }
 
