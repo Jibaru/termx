@@ -18,18 +18,17 @@
 //! acceptable: in a synchronous command it unwinds into the platform's event
 //! loop and can abort the whole application, and in an asynchronous one it
 //! leaves the promise in the frontend pending forever. Inside the wrappers a
-//! panic is recorded by the panic hook and the command fails with an ordinary
-//! error instead. Only commands whose body cannot fail or panic, such as one
+//! panic is recorded once, by the panic hook, in a record that also names the
+//! command, and the command fails with an ordinary error instead. Only commands whose body cannot fail or panic, such as one
 //! that returns a constant, may skip the wrapper.
 
-use std::any::Any;
 use std::fmt::Display;
 use std::future::Future;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::task::Poll;
 
 use serde::Serialize;
-use termx_core::diagnostics::{redact, tracing};
+use termx_core::diagnostics::{redact, tracing, with_panic_context};
 
 /// Target of the records written for failed commands.
 pub const COMMAND_TARGET: &str = "termx::command";
@@ -54,6 +53,16 @@ impl CommandError {
         let message = redact::text(&error.to_string()).into_owned();
         tracing::error!(target: COMMAND_TARGET, command, error = %message, "command failed");
         Self { command, message }
+    }
+
+    /// The error for a command that panicked. Nothing is logged here: the
+    /// panic hook already wrote the one record, with the message, the
+    /// backtrace and the name of the command.
+    fn panicked(command: &'static str) -> Self {
+        Self {
+            command,
+            message: PANIC_MESSAGE.to_owned(),
+        }
     }
 }
 
@@ -81,9 +90,12 @@ pub fn logged<T, E: Display>(
 ) -> CommandResult<T> {
     // The body is not used again after a panic, so observing state it may
     // have left half-updated is not a concern here.
-    match catch_unwind(AssertUnwindSafe(body)) {
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        with_panic_context("command", command, body)
+    }));
+    match outcome {
         Ok(result) => result.map_err(|error| CommandError::log(command, error)),
-        Err(payload) => Err(panicked(command, payload.as_ref())),
+        Err(_) => Err(CommandError::panicked(command)),
     }
 }
 
@@ -100,32 +112,20 @@ pub async fn logged_async<T, E: Display>(
 ) -> CommandResult<T> {
     let mut body = Box::pin(body);
     let outcome = std::future::poll_fn(|context| {
-        match catch_unwind(AssertUnwindSafe(|| body.as_mut().poll(context))) {
+        let polled = catch_unwind(AssertUnwindSafe(|| {
+            with_panic_context("command", command, || body.as_mut().poll(context))
+        }));
+        match polled {
             Ok(Poll::Pending) => Poll::Pending,
-            Ok(Poll::Ready(result)) => Poll::Ready(Ok(result)),
-            Err(payload) => Poll::Ready(Err(payload)),
+            Ok(Poll::Ready(result)) => Poll::Ready(Some(result)),
+            Err(_) => Poll::Ready(None),
         }
     })
     .await;
 
     match outcome {
-        Ok(result) => result.map_err(|error| CommandError::log(command, error)),
-        Err(payload) => Err(panicked(command, payload.as_ref())),
-    }
-}
-
-/// Logs that `command` panicked and returns the error for the frontend. The
-/// panic itself was already recorded, with its backtrace, by the panic hook.
-fn panicked(command: &'static str, payload: &(dyn Any + Send)) -> CommandError {
-    let panic = payload
-        .downcast_ref::<&str>()
-        .copied()
-        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
-        .unwrap_or("panic with a non-string payload");
-    tracing::error!(target: COMMAND_TARGET, command, panic, "command panicked");
-    CommandError {
-        command,
-        message: PANIC_MESSAGE.to_owned(),
+        Some(result) => result.map_err(|error| CommandError::log(command, error)),
+        None => Err(CommandError::panicked(command)),
     }
 }
 
@@ -205,12 +205,29 @@ mod tests {
                 message: PANIC_MESSAGE.to_owned(),
             })
         );
-        let records = log.finish();
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0]["level"], "ERROR");
-        assert_eq!(records[0]["msg"], "command panicked");
-        assert_eq!(records[0]["fields"]["command"], "resize");
-        assert_eq!(records[0]["fields"]["panic"], "index out of bounds");
+        // The panic hook writes the one record of a panic, and it is not
+        // installed here: nothing else is logged.
+        assert!(log.finish().is_empty());
+    }
+
+    #[test]
+    fn the_panic_record_of_a_command_names_the_command() {
+        use termx_core::diagnostics::panic_context;
+
+        // What the panic hook would add to its record while the body runs.
+        let during = logged("resize", || Ok::<_, String>(panic_context())).unwrap();
+        let during_async = tauri::async_runtime::block_on(logged_async("spawn_session", async {
+            std::future::ready(()).await;
+            Ok::<_, String>(panic_context())
+        }))
+        .unwrap();
+
+        assert_eq!(during, [("command", "resize".to_owned())]);
+        assert_eq!(during_async, [("command", "spawn_session".to_owned())]);
+        assert!(
+            panic_context().is_empty(),
+            "the context ends with the command"
+        );
     }
 
     #[test]
@@ -241,9 +258,6 @@ mod tests {
         }));
 
         assert_eq!(result.unwrap_err().message, PANIC_MESSAGE);
-        let records = log.finish();
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0]["msg"], "command panicked");
-        assert_eq!(records[0]["fields"]["panic"], "shell vanished");
+        assert!(log.finish().is_empty());
     }
 }
