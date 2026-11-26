@@ -13,9 +13,10 @@ interface AppProps {
 export function App({ store = sessionStore }: AppProps) {
   const { activeKey } = useSyncExternalStore(store.subscribe, store.getSnapshot);
 
-  // A window always has a terminal: the first one opens with it.
+  // A window always has a terminal: the first one opens with it, for the
+  // session termx last had on screen or for a new shell.
   useEffect(() => {
-    store.ensureOne();
+    void store.ensureOne();
   }, [store]);
 
   return (

@@ -1,4 +1,4 @@
-import type { CreatedSession, CreateSessionOptions, SessionHandlers } from "../lib/ipc";
+import type { SessionHandlers, SessionId, StartedSession, StartSessionOptions } from "../lib/ipc";
 import type { TerminalBackend } from "../terminal/TerminalController";
 
 /**
@@ -8,6 +8,9 @@ import type { TerminalBackend } from "../terminal/TerminalController";
  */
 
 export const ACK_BATCH = 1000;
+
+/** The session the terminals of the tests show. */
+export const SESSION = "s-test";
 
 /** A promise settled by the test. */
 export function deferred<T>() {
@@ -20,12 +23,14 @@ export function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-/** One call to `createSession`, which the test answers when it wants to. */
+/** One call to `startSession`, which the test answers when it wants to. */
 export interface CreateCall {
-  options: CreateSessionOptions;
+  /** The session that was started. */
+  session: SessionId;
+  options: StartSessionOptions;
   handlers: SessionHandlers;
-  /** Resolves the call: the session exists. */
-  started: (overrides?: Partial<CreatedSession>) => Promise<void>;
+  /** Resolves the call: the session runs in a terminal. */
+  started: (overrides?: Partial<StartedSession>) => Promise<void>;
   /** Rejects the call. */
   failed: (reason: unknown) => Promise<void>;
 }
@@ -36,20 +41,27 @@ export function fakeBackend() {
   const writes: { id: number; data: string; binary: boolean; done: () => Promise<void> }[] = [];
   const resizes: { id: number; cols: number; rows: number }[] = [];
   const acks: { id: number; bytes: number }[] = [];
-  const closed: number[] = [];
+  const titles: { id: SessionId; title: string }[] = [];
+  const folders: { id: SessionId; cwd: string }[] = [];
   const opened: string[] = [];
   const clipboard = { text: "", writes: [] as string[], reads: 0 };
   let nextId = 1;
 
   const backend: TerminalBackend = {
-    createSession: (options, handlers) => {
-      const call = deferred<CreatedSession>();
-      const id = nextId++;
+    startSession: (session, options, handlers) => {
+      const call = deferred<StartedSession>();
+      const terminal = nextId++;
       creates.push({
+        session,
         options,
         handlers,
         started: async (overrides = {}) => {
-          call.resolve({ id, ackBatchBytes: ACK_BATCH, windowsBuildNumber: null, ...overrides });
+          call.resolve({
+            terminal,
+            ackBatchBytes: ACK_BATCH,
+            windowsBuildNumber: null,
+            ...overrides,
+          });
           await settle();
         },
         failed: async (reason) => {
@@ -80,8 +92,12 @@ export function fakeBackend() {
       acks.push({ id, bytes });
       return Promise.resolve();
     },
-    closeSession: (id) => {
-      closed.push(id);
+    reportSessionTitle: (id, title) => {
+      titles.push({ id, title });
+      return Promise.resolve();
+    },
+    reportSessionCwd: (id, cwd) => {
+      folders.push({ id, cwd });
       return Promise.resolve();
     },
     openExternalUrl: (url) => {
@@ -97,7 +113,7 @@ export function fakeBackend() {
       return Promise.resolve();
     },
   };
-  return { backend, creates, writes, resizes, acks, closed, opened, clipboard };
+  return { backend, creates, writes, resizes, acks, titles, folders, opened, clipboard };
 }
 
 /** Lets the promise callbacks that are ready run. */

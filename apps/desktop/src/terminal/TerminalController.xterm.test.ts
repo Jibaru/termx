@@ -1,6 +1,6 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
-import { fakeBackend, pane, settle } from "../test/terminalHarness";
+import { fakeBackend, pane, SESSION, settle } from "../test/terminalHarness";
 import { FakeResizeObserver } from "../test/xtermMock";
 import { DEFAULT_TERMINAL_CONFIG, type TerminalConfig } from "./config";
 import type { TerminalController as Controller } from "./TerminalController";
@@ -53,6 +53,7 @@ async function terminalOnMac(config: Partial<TerminalConfig> = {}) {
     return Promise.resolve();
   };
   const controller = new TerminalController({
+    sessionId: SESSION,
     backend: fake.backend,
     platform: "macos",
     // happy-dom has no WebGL, and the renderer is not what is tested here.

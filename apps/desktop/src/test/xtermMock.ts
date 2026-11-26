@@ -89,9 +89,11 @@ export class FakeTerminal {
   private readonly data = new Emitter<string>();
   private readonly binary = new Emitter<string>();
   private readonly resized = new Emitter<{ cols: number; rows: number }>();
+  private readonly title = new Emitter<string>();
   readonly onData = this.data.event;
   readonly onBinary = this.binary.event;
   readonly onResize = this.resized.event;
+  readonly onTitleChange = this.title.event;
 
   constructor(options: Record<string, unknown> = {}) {
     this.options = { ...options };
@@ -172,6 +174,11 @@ export class FakeTerminal {
   /** xterm.js reports input that is not text. */
   typeBinary(data: string): void {
     this.binary.fire(data);
+  }
+
+  /** A program set the title of the terminal (OSC 0 or 2). */
+  setTitle(title: string): void {
+    this.title.fire(title);
   }
 
   /** Sends a key event through the custom key handler. */

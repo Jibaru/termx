@@ -13,6 +13,7 @@ pub mod logging;
 pub mod terminal;
 #[cfg(test)]
 mod test_support;
+pub mod workspace;
 
 /// Builds and runs the Tauri application. Blocks until the app exits.
 ///
@@ -29,33 +30,69 @@ pub fn run() {
 
     let built = tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
+        // Only used from Rust, for the folder picker: the webview is given
+        // no permission to open dialogs itself.
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(state)
         .manage(terminal::TerminalState::start())
+        .manage(workspace::WorkspaceState::start())
         // Register every command exposed to the frontend here.
         .invoke_handler(tauri::generate_handler![
             commands::app::core_version,
             commands::diagnostics::log_frontend_event,
             commands::diagnostics::open_log_folder,
             commands::diagnostics::export_diagnostics,
+            commands::workspace::workspace_subscribe,
+            commands::workspace::workspace_snapshot,
+            commands::workspace::workspace_refresh_git,
+            commands::workspace::folder_pick,
+            commands::workspace::recent_folder_forget,
             commands::session::session_create,
+            commands::session::session_create_sibling,
+            commands::session::session_rename,
+            commands::session::session_reorder,
+            commands::session::project_reorder,
+            commands::session::session_start,
+            commands::session::session_close,
+            commands::session::session_report_title,
+            commands::session::session_report_cwd,
             commands::session::session_write,
             commands::session::session_resize,
             commands::session::session_ack,
-            commands::session::session_close,
+            commands::layout::layout_split,
+            commands::layout::layout_close_pane,
+            commands::layout::layout_move_pane,
+            commands::layout::layout_resize_split,
+            commands::layout::layout_focus_pane,
+            commands::layout::layout_show_session,
         ])
-        // A page that loads has no terminal yet: sessions that are still
+        .setup(|app| {
+            // Before the window shows anything, so that it does not jump.
+            if let (Some(window), Some(state)) = (
+                app.get_webview_window(MAIN_WINDOW),
+                app.try_state::<workspace::WorkspaceState>(),
+            ) {
+                workspace::restore_window(&window, state.workspace());
+            }
+            Ok(())
+        })
+        // A page that loads has no terminal yet: terminals that are still
         // running for this window belong to a page that was reloaded, and
-        // nothing can display them any more.
+        // nothing can display them any more. Their sessions stay, dormant.
         .on_page_load(|webview, payload| {
             if payload.event() == PageLoadEvent::Started {
-                close_sessions_of(webview.app_handle(), webview.label());
+                release_window(webview.app_handle(), webview.label());
             }
         })
-        .on_window_event(|window, event| {
-            if matches!(event, WindowEvent::Destroyed) {
-                close_sessions_of(window.app_handle(), window.label());
+        .on_window_event(|window, event| match event {
+            WindowEvent::Destroyed => release_window(window.app_handle(), window.label()),
+            WindowEvent::Moved(_) | WindowEvent::Resized(_) if window.label() == MAIN_WINDOW => {
+                if let Some(state) = window.try_state::<workspace::WorkspaceState>() {
+                    workspace::remember_window(window, state.workspace());
+                }
             }
+            _ => {}
         })
         .build(tauri::generate_context!());
 
@@ -77,6 +114,10 @@ pub fn run() {
             if let Some(terminal) = app.try_state::<terminal::TerminalState>() {
                 terminal.shutdown();
             }
+            // Then the workspace, which saves what is to be restored.
+            if let Some(workspace) = app.try_state::<workspace::WorkspaceState>() {
+                workspace.shutdown();
+            }
             if let Some(state) = app.try_state::<logging::DiagnosticsState>() {
                 logging::stop(&state);
             }
@@ -97,22 +138,40 @@ fn raise_open_file_limit() {
     }
 }
 
-/// Closes the sessions of the window `label` without blocking the event
-/// loop: a process that resists being killed is waited for on another
-/// thread. If the application exits in the meantime, shutting the sessions
-/// down waits for this thread to be done with its processes, and kills the
-/// sessions it had not reached yet.
-fn close_sessions_of(app: &tauri::AppHandle, label: &str) {
+/// Label of the window of the application, as in `tauri.conf.json`.
+const MAIN_WINDOW: &str = "main";
+
+/// Ends what the window `label` was shown: its subscription to the
+/// workspace and its terminals.
+///
+/// The terminals are taken away at once, so that those a reloaded page
+/// starts next are not mistaken for the old ones, and their sessions become
+/// dormant. Their processes are then killed without blocking the event
+/// loop: one that resists is waited for on another thread. If the
+/// application exits in the meantime, shutting the sessions down waits for
+/// that thread to be done with its processes, and kills those it had not
+/// reached yet.
+fn release_window(app: &tauri::AppHandle, label: &str) {
+    if let Some(workspace) = app.try_state::<workspace::WorkspaceState>() {
+        workspace.unsubscribe(label);
+    }
+    let Some(terminal) = app.try_state::<terminal::TerminalState>() else {
+        return;
+    };
+    let terminals = terminal.detach_owned_by(label);
+    if terminals.is_empty() {
+        return;
+    }
     let app = app.clone();
-    let label = label.to_owned();
     let spawned = std::thread::Builder::new()
         .name("termx-close-sessions".to_owned())
         .spawn(move || {
             if let Some(terminal) = app.try_state::<terminal::TerminalState>() {
-                terminal.close_owned_by(&label);
+                terminal.close_detached(&terminals);
             }
         });
     if let Err(error) = spawned {
+        // They are killed when the application exits at the latest.
         tracing::warn!(error = %error, "could not start the thread that closes sessions");
     }
 }

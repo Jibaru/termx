@@ -2,22 +2,43 @@ import { Channel } from "@tauri-apps/api/core";
 import { describe, expect, it, vi } from "vitest";
 
 import { recordIPC } from "../test/ipcRecorder";
+import { session, singlePane, workspace } from "../test/workspaceFixtures";
 import {
   ackSession,
+  applyWorkspaceDelta,
+  closePane,
   closeSession,
   type CommandError,
   createSession,
+  createSiblingSession,
   describeError,
   exportDiagnostics,
+  focusPane,
+  forgetRecentFolder,
   getCoreVersion,
+  getWorkspaceSnapshot,
   isCommandError,
   logFrontendEvent,
+  movePane,
   openExternalUrl,
   openLogFolder,
+  pickFolder,
   readClipboardText,
+  refreshGit,
+  renameSession,
+  reorderProject,
+  reorderSession,
+  reportSessionCwd,
+  reportSessionTitle,
   resetFrontendLogLimit,
   resizeSession,
+  resizeSplit,
   type SessionExit,
+  showSession,
+  splitPane,
+  startSession,
+  subscribeWorkspace,
+  type WorkspaceDelta,
   writeClipboardText,
   writeSession,
 } from "./ipc";
@@ -45,37 +66,40 @@ describe("command wrappers", () => {
 });
 
 describe("session commands", () => {
-  /** Creates a session and returns what its handlers received. */
-  async function create(respond: (command: string, args: unknown) => unknown = () => undefined) {
+  /** Starts a session and returns what its handlers received. */
+  async function start(respond: (command: string, args: unknown) => unknown = () => undefined) {
     const ipc = recordIPC((command, args) =>
-      command === "session_create"
-        ? { id: 7, ackBatchBytes: 8192, windowsBuildNumber: null }
+      command === "session_start"
+        ? { terminal: 7, ackBatchBytes: 8192, windowsBuildNumber: null }
         : respond(command, args),
     );
     const output: Uint8Array[] = [];
     const exits: SessionExit[] = [];
-    const created = await createSession(
-      { cols: 120, rows: 40 },
+    const started = await startSession(
+      "s-abc",
+      { mode: "resume", cols: 120, rows: 40 },
       { onOutput: (bytes) => output.push(bytes), onExit: (exit) => exits.push(exit) },
     );
     const args = ipc.calls[0]?.args as {
+      id: unknown;
       request: unknown;
       onEvent: { onmessage: (message: unknown) => void };
     };
-    return { ipc, created, output, exits, request: args.request, channel: args.onEvent };
+    return { ipc, started, output, exits, args, channel: args.onEvent };
   }
 
-  it("creates a session with a channel for its output", async () => {
-    const { ipc, created, request, channel } = await create();
+  it("starts a session with a channel for its output", async () => {
+    const { ipc, started, args, channel } = await start();
 
-    expect(created).toEqual({ id: 7, ackBatchBytes: 8192, windowsBuildNumber: null });
-    expect(ipc.calls[0]?.command).toBe("session_create");
-    expect(request).toEqual({ cols: 120, rows: 40 });
+    expect(started).toEqual({ terminal: 7, ackBatchBytes: 8192, windowsBuildNumber: null });
+    expect(ipc.calls[0]?.command).toBe("session_start");
+    expect(args.id).toBe("s-abc");
+    expect(args.request).toEqual({ mode: "resume", cols: 120, rows: 40 });
     expect(channel).toBeInstanceOf(Channel);
   });
 
   it("hands the raw bytes of the channel to the output handler", async () => {
-    const { channel, output, exits } = await create();
+    const { channel, output, exits } = await start();
     const bytes = Uint8Array.from([0x1b, 0x5b, 0x31, 0x6d, 0xe2, 0x9c, 0x93, 0xff]);
 
     channel.onmessage(bytes.buffer);
@@ -87,7 +111,7 @@ describe("session commands", () => {
   });
 
   it("accepts the bytes as an array of numbers, as the fallback transport sends them", async () => {
-    const { channel, output } = await create();
+    const { channel, output } = await start();
 
     channel.onmessage([104, 105, 255]);
 
@@ -95,33 +119,83 @@ describe("session commands", () => {
   });
 
   it("hands the exit message of the channel to the exit handler", async () => {
-    const { channel, output, exits } = await create();
+    const { channel, output, exits } = await start();
+    const failure = { kind: "claudeNotFound", message: "Claude Code is not installed." };
 
     channel.onmessage({ event: "exit", code: 3, signal: null });
     channel.onmessage({ event: "exit", code: null, signal: "Hangup" });
+    channel.onmessage({ event: "exit", code: 113, signal: null, failure });
 
     expect(exits).toEqual([
-      { code: 3, signal: null },
-      { code: null, signal: "Hangup" },
+      { code: 3, signal: null, failure: null },
+      { code: null, signal: "Hangup", failure: null },
+      { code: 113, signal: null, failure },
     ]);
     expect(output).toEqual([]);
   });
 
-  it("writes, resizes, acknowledges and closes by session id", async () => {
+  it("writes, resizes and acknowledges by the number of the terminal", async () => {
     const ipc = recordIPC();
 
     await writeSession(7, "ls\r");
     await writeSession(7, "\xa0\xff", true);
     await resizeSession(7, 132, 43);
     await ackSession(7, 8192);
-    await closeSession(7);
 
     expect(ipc.calls).toEqual([
       { command: "session_write", args: { id: 7, data: "ls\r", binary: false } },
       { command: "session_write", args: { id: 7, data: "\xa0\xff", binary: true } },
       { command: "session_resize", args: { id: 7, cols: 132, rows: 43 } },
       { command: "session_ack", args: { id: 7, bytes: 8192 } },
-      { command: "session_close", args: { id: 7 } },
+    ]);
+  });
+
+  it("creates, names, orders and closes sessions by their id", async () => {
+    const ipc = recordIPC((command) =>
+      command.startsWith("session_create") ? session("s-new") : undefined,
+    );
+
+    expect(await createSession({ kind: "shell" })).toEqual(session("s-new"));
+    await createSession({
+      kind: "background",
+      cwd: "/work/app",
+      command: "pnpm dev",
+      name: "dev server",
+      show: false,
+    });
+    expect(await createSiblingSession("s-abc")).toEqual(session("s-new"));
+    await renameSession("s-abc", "Login work");
+    await renameSession("s-abc", null);
+    await reorderSession("s-abc", "s-def");
+    await reorderSession("s-abc", null);
+    await reorderProject("/work/app", "/work/api");
+    await reportSessionTitle("s-abc", "\u2733 Fix the login");
+    await reportSessionCwd("s-abc", "file://host/work/app");
+    await closeSession("s-abc");
+
+    expect(ipc.calls).toEqual([
+      { command: "session_create", args: { request: { kind: "shell" } } },
+      {
+        command: "session_create",
+        args: {
+          request: {
+            kind: "background",
+            cwd: "/work/app",
+            command: "pnpm dev",
+            name: "dev server",
+            show: false,
+          },
+        },
+      },
+      { command: "session_create_sibling", args: { id: "s-abc" } },
+      { command: "session_rename", args: { id: "s-abc", name: "Login work" } },
+      { command: "session_rename", args: { id: "s-abc", name: null } },
+      { command: "session_reorder", args: { id: "s-abc", before: "s-def" } },
+      { command: "session_reorder", args: { id: "s-abc", before: null } },
+      { command: "project_reorder", args: { key: "/work/app", before: "/work/api" } },
+      { command: "session_report_title", args: { id: "s-abc", title: "\u2733 Fix the login" } },
+      { command: "session_report_cwd", args: { id: "s-abc", cwd: "file://host/work/app" } },
+      { command: "session_close", args: { id: "s-abc" } },
     ]);
   });
 
@@ -302,5 +376,183 @@ describe("describeError", () => {
     expect(isCommandError(new Error("y"))).toBe(false);
     expect(isCommandError(null)).toBe(false);
     expect(isCommandError("x")).toBe(false);
+  });
+});
+
+describe("workspace commands", () => {
+  it("subscribes with a channel and hands its messages to the listener", async () => {
+    const snapshot = workspace([session("s-a")]);
+    const ipc = recordIPC(() => snapshot);
+    const deltas: WorkspaceDelta[] = [];
+
+    const received = await subscribeWorkspace((delta) => deltas.push(delta));
+
+    expect(received).toEqual(snapshot);
+    expect(ipc.calls[0]?.command).toBe("workspace_subscribe");
+    const { onEvent } = ipc.calls[0]?.args as {
+      onEvent: { onmessage: (message: unknown) => void };
+    };
+    expect(onEvent).toBeInstanceOf(Channel);
+    const delta = emptyDelta({ revision: 2, removed: ["s-a"] });
+    onEvent.onmessage(delta);
+    expect(deltas).toEqual([delta]);
+  });
+
+  it("reads the workspace, refreshes Git, picks and forgets folders", async () => {
+    const snapshot = workspace();
+    const ipc = recordIPC((command) => {
+      if (command === "workspace_snapshot") return snapshot;
+      if (command === "folder_pick") return "/work/picked";
+      if (command === "recent_folder_forget") return true;
+      return undefined;
+    });
+
+    expect(await getWorkspaceSnapshot()).toEqual(snapshot);
+    await refreshGit();
+    expect(await pickFolder()).toBe("/work/picked");
+    expect(await forgetRecentFolder("/work/old")).toBe(true);
+
+    expect(ipc.calls.map((call) => call.command)).toEqual([
+      "workspace_snapshot",
+      "workspace_refresh_git",
+      "folder_pick",
+      "recent_folder_forget",
+    ]);
+    expect(ipc.calls[3]?.args).toEqual({ folder: "/work/old" });
+  });
+
+  it("resolves with null when the folder picker is dismissed", async () => {
+    recordIPC(() => null);
+
+    expect(await pickFolder()).toBeNull();
+  });
+
+  it("changes the layout by the ids of panes and splits", async () => {
+    const ipc = recordIPC((command) => {
+      if (command === "layout_split") return 4;
+      if (command === "layout_resize_split") return 0.9;
+      return undefined;
+    });
+
+    expect(await splitPane(1, "row")).toBe(4);
+    await splitPane(1, "column", { placement: "before", session: "s-a" });
+    await closePane(4);
+    await movePane(4, 1, "top");
+    expect(await resizeSplit(3, 7)).toBe(0.9);
+    await focusPane(1);
+    await showSession(1, "s-a");
+    await showSession(1, null);
+
+    expect(ipc.calls).toEqual([
+      {
+        command: "layout_split",
+        args: { pane: 1, direction: "row", placement: null, session: null },
+      },
+      {
+        command: "layout_split",
+        args: { pane: 1, direction: "column", placement: "before", session: "s-a" },
+      },
+      { command: "layout_close_pane", args: { pane: 4 } },
+      { command: "layout_move_pane", args: { pane: 4, target: 1, edge: "top" } },
+      { command: "layout_resize_split", args: { split: 3, ratio: 7 } },
+      { command: "layout_focus_pane", args: { pane: 1 } },
+      { command: "layout_show_session", args: { pane: 1, session: "s-a" } },
+      { command: "layout_show_session", args: { pane: 1, session: null } },
+    ]);
+  });
+});
+
+/** A delta that says nothing changed, with whatever differs. */
+function emptyDelta(overrides: Partial<WorkspaceDelta> = {}): WorkspaceDelta {
+  return {
+    revision: 0,
+    sessions: [],
+    removed: [],
+    sessionOrder: null,
+    projects: null,
+    layout: null,
+    recentFolders: null,
+    ...overrides,
+  };
+}
+
+describe("applyWorkspaceDelta", () => {
+  const a = session("s-a");
+  const b = session("s-b");
+  const before = workspace([a, b], { revision: 5, recentFolders: ["/work/app"] });
+
+  it("replaces the sessions that changed and keeps the others as they are", () => {
+    const renamed = { ...b, title: "renamed", name: "renamed" };
+
+    const after = applyWorkspaceDelta(before, emptyDelta({ revision: 6, sessions: [renamed] }));
+
+    expect(after.revision).toBe(6);
+    expect(after.sessions).toEqual([a, renamed]);
+    // The session that did not change is the same object, and so is every
+    // part the delta said nothing about.
+    expect(after.sessions[0]).toBe(a);
+    expect(after.layout).toBe(before.layout);
+    expect(after.projects).toBe(before.projects);
+    expect(after.recentFolders).toBe(before.recentFolders);
+    expect(after.persistence).toBe(before.persistence);
+    // The snapshot given is not modified.
+    expect(before.sessions).toEqual([a, b]);
+    expect(before.revision).toBe(5);
+  });
+
+  it("adds, removes and reorders sessions as the order sent says", () => {
+    const c = session("s-c", { project: { key: "/x", name: "x", root: "/x", kind: "folder" } });
+
+    const added = applyWorkspaceDelta(
+      before,
+      emptyDelta({
+        revision: 6,
+        sessions: [c],
+        sessionOrder: ["s-c", "s-a", "s-b"],
+        projects: [c.project, a.project],
+        recentFolders: ["/x", "/work/app"],
+        layout: singlePane("s-c"),
+      }),
+    );
+    expect(added.sessions.map((s) => s.id)).toEqual(["s-c", "s-a", "s-b"]);
+    expect(added.projects).toEqual([c.project, a.project]);
+    expect(added.recentFolders).toEqual(["/x", "/work/app"]);
+    expect(added.layout).toEqual(singlePane("s-c"));
+
+    const removed = applyWorkspaceDelta(
+      added,
+      emptyDelta({ revision: 7, removed: ["s-a"], sessionOrder: ["s-c", "s-b"] }),
+    );
+    expect(removed.sessions.map((s) => s.id)).toEqual(["s-c", "s-b"]);
+
+    const reordered = applyWorkspaceDelta(
+      removed,
+      emptyDelta({ revision: 8, sessionOrder: ["s-b", "s-c"] }),
+    );
+    expect(reordered.sessions.map((s) => s.id)).toEqual(["s-b", "s-c"]);
+  });
+
+  it("copes with deltas that are late, repeated or incomplete", () => {
+    const c = session("s-c");
+
+    // A session that is new, without the order: it goes last.
+    const added = applyWorkspaceDelta(before, emptyDelta({ revision: 6, sessions: [c] }));
+    expect(added.sessions.map((s) => s.id)).toEqual(["s-a", "s-b", "s-c"]);
+
+    // The same delta again changes nothing.
+    expect(applyWorkspaceDelta(added, emptyDelta({ revision: 6, sessions: [c] }))).toEqual(added);
+
+    // A delta older than the snapshot does not take the revision back.
+    const late = applyWorkspaceDelta(added, emptyDelta({ revision: 2, removed: ["s-gone"] }));
+    expect(late.revision).toBe(6);
+    expect(late.sessions).toEqual(added.sessions);
+
+    // An order that names a session that is unknown, or leaves one out:
+    // what is unknown is skipped, and what was left out is dropped.
+    const odd = applyWorkspaceDelta(
+      added,
+      emptyDelta({ revision: 7, sessionOrder: ["s-c", "s-unknown", "s-a"] }),
+    );
+    expect(odd.sessions.map((s) => s.id)).toEqual(["s-c", "s-a"]);
   });
 });

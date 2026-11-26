@@ -1,32 +1,84 @@
-//! Commands driving the terminal sessions: create, write, resize,
-//! acknowledge and close.
+//! Commands about sessions: creating, naming, ordering, starting and
+//! closing them, and driving the terminal of one that runs.
 //!
-//! The output of a session and its exit do not come back through a command:
-//! they are streamed on the channel given to [`session_create`]. See
-//! [`crate::terminal`].
+//! Two identifiers are involved. A session is identified by a text that
+//! never changes (`id` in the commands that take a session). While it
+//! runs, its terminal is identified by a number, which changes every time
+//! the session is started (`terminal` in [`StartedSession`], and the `id`
+//! of [`session_write`], [`session_resize`] and [`session_ack`]).
 //!
-//! Writing, resizing or acknowledging a session that has ended is not an
+//! The output of a session and its exit do not come back through a
+//! command: they are streamed on the channel given to [`session_start`].
+//! See [`crate::terminal`]. What changes about a session (its state, its
+//! title, its branch) reaches the frontend through the subscription of
+//! [`workspace_subscribe`](super::workspace::workspace_subscribe).
+//!
+//! Writing, resizing or acknowledging a terminal that has ended is not an
 //! error: the frontend normally still does so for a moment after a process
-//! exits, before it has seen the exit.
+//! exits, before it has seen the exit. Likewise for reporting the title or
+//! the folder of a session that was just closed.
 //!
-//! Nothing here logs what is typed or printed, only identifiers and sizes.
+//! Nothing here logs what is typed or printed, nor the command of a
+//! session: only identifiers, kinds and sizes.
 
-use serde::Serialize;
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
 use tauri::ipc::{Channel, InvokeResponseBody};
-use tauri::{State, Webview};
+use tauri::{Runtime, State, Webview};
 use termx_core::diagnostics::tracing::debug;
 use termx_core::pty::{PtyError, PtySize};
 use termx_core::session::{ACK_BATCH_BYTES, SessionId};
+use termx_core::workspace::{
+    LaunchMode, NewSession, Session, SessionKey, SessionKind, WorkspaceError,
+};
 
 use super::error::{CommandResult, logged, logged_async};
-use crate::terminal::{CreateSessionRequest, TerminalState, session_is_gone, windows_build_number};
+use crate::terminal::{TerminalState, session_is_gone, windows_build_number};
+use crate::workspace::WorkspaceState;
 
-/// What the frontend learns about the session it created.
+/// What the frontend asks for when it creates a session.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateSessionRequest {
+    /// What the session runs.
+    pub kind: SessionKind,
+    /// The folder it runs in. The home directory when omitted.
+    #[serde(default)]
+    pub cwd: Option<PathBuf>,
+    /// The command line of a background session.
+    #[serde(default)]
+    pub command: Option<String>,
+    /// A name for the session, as if the user had renamed it.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Whether to show the session in the focused pane. Yes when omitted.
+    #[serde(default)]
+    pub show: Option<bool>,
+}
+
+/// How the frontend wants a session started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartSessionRequest {
+    /// `"fresh"` to start from scratch, which is also how a session is
+    /// restarted, or `"resume"` to carry on: Claude Code then resumes its
+    /// conversation. From scratch when omitted.
+    #[serde(default)]
+    pub mode: LaunchMode,
+    /// Width of the terminal, in columns.
+    pub cols: u16,
+    /// Height of the terminal, in rows.
+    pub rows: u16,
+}
+
+/// What the frontend learns about the terminal a session was started in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CreatedSession {
-    /// Identifier to pass to the other session commands.
-    pub id: u64,
+pub struct StartedSession {
+    /// Identifier of the terminal, to pass to [`session_write`],
+    /// [`session_resize`] and [`session_ack`].
+    pub terminal: u64,
     /// How many processed bytes to accumulate before acknowledging them
     /// with [`session_ack`].
     pub ack_batch_bytes: u64,
@@ -35,31 +87,215 @@ pub struct CreatedSession {
     pub windows_build_number: Option<u32>,
 }
 
-/// Starts a session and streams its output, then its exit, to `on_event`.
-///
-/// The session belongs to the window that created it and is closed with it.
+/// Creates a session and returns it, in the `starting` state: start it
+/// with [`session_start`] once its pane knows its size.
 ///
 /// # Errors
 ///
-/// Fails when the process cannot be started.
+/// Fails when the folder does not exist, or when a background session has
+/// no usable command.
 #[tauri::command(async)]
 pub fn session_create(
-    webview: Webview,
-    state: State<'_, TerminalState>,
+    state: State<'_, WorkspaceState>,
     request: CreateSessionRequest,
-    on_event: Channel<InvokeResponseBody>,
-) -> CommandResult<CreatedSession> {
+) -> CommandResult<Session> {
     logged("session_create", || {
-        let id = state.create(webview.label(), &request, on_event)?;
-        Ok::<_, String>(CreatedSession {
-            id: id.as_u64(),
+        let cwd = match request.cwd {
+            Some(cwd) => cwd,
+            None => state
+                .default_folder()
+                .ok_or("the home directory is not known: choose a folder")?
+                .to_owned(),
+        };
+        let session = state.workspace().create_session(NewSession {
+            kind: request.kind,
+            cwd,
+            command: request.command,
+            name: request.name,
+            show: request.show.unwrap_or(true),
+        });
+        session.map_err(|error| error.to_string())
+    })
+}
+
+/// Creates another Claude Code session in the folder of the session `id`,
+/// without asking anything.
+///
+/// # Errors
+///
+/// Fails when the session does not exist or its folder is gone.
+#[tauri::command(async)]
+pub fn session_create_sibling(
+    state: State<'_, WorkspaceState>,
+    id: SessionKey,
+) -> CommandResult<Session> {
+    logged("session_create_sibling", || {
+        state.workspace().create_sibling(&id)
+    })
+}
+
+/// Gives a session a name, which wins over any automatic title. `null` or
+/// an empty name removes it.
+///
+/// # Errors
+///
+/// Fails when the session does not exist.
+#[tauri::command]
+pub fn session_rename(
+    state: State<'_, WorkspaceState>,
+    id: SessionKey,
+    name: Option<String>,
+) -> CommandResult<()> {
+    logged("session_rename", || {
+        state.workspace().rename_session(&id, name.as_deref())
+    })
+}
+
+/// Moves a session just before the session `before` in the order of the
+/// sessions, or to the end when `before` is `null`.
+///
+/// # Errors
+///
+/// Fails when either session does not exist.
+#[tauri::command]
+pub fn session_reorder(
+    state: State<'_, WorkspaceState>,
+    id: SessionKey,
+    before: Option<SessionKey>,
+) -> CommandResult<()> {
+    logged("session_reorder", || {
+        state.workspace().reorder_session(&id, before.as_ref())
+    })
+}
+
+/// Moves a project just before the project `before` in the order of the
+/// projects, or to the end when `before` is `null`.
+///
+/// # Errors
+///
+/// Fails when either project has no session.
+#[tauri::command]
+pub fn project_reorder(
+    state: State<'_, WorkspaceState>,
+    key: String,
+    before: Option<String>,
+) -> CommandResult<()> {
+    logged("project_reorder", || {
+        state.workspace().reorder_project(&key, before.as_deref())
+    })
+}
+
+/// Starts the session `id` in a new terminal of the given size, and
+/// streams its output, then its exit, to `on_event`. A session that is
+/// running is restarted.
+///
+/// The terminal belongs to the window that started it and is closed with
+/// it; the session then becomes dormant.
+///
+/// # Errors
+///
+/// Fails when the session does not exist, when its folder is gone or when
+/// the process cannot be started. The session then says why in its state.
+#[tauri::command(async)]
+pub fn session_start<R: Runtime>(
+    webview: Webview<R>,
+    terminals: State<'_, TerminalState>,
+    state: State<'_, WorkspaceState>,
+    id: SessionKey,
+    request: StartSessionRequest,
+    on_event: Channel<InvokeResponseBody>,
+) -> CommandResult<StartedSession> {
+    logged("session_start", || {
+        let terminal = terminals.start_session(
+            webview.label(),
+            state.workspace(),
+            &id,
+            request.mode,
+            PtySize::new(request.cols, request.rows),
+            on_event,
+        )?;
+        Ok::<_, String>(StartedSession {
+            terminal: terminal.as_u64(),
             ack_batch_bytes: ACK_BATCH_BYTES,
             windows_build_number: windows_build_number(),
         })
     })
 }
 
-/// Sends input to a session, as if it had been typed.
+/// Closes a session for good: its process is killed and it leaves the
+/// sidebar and its pane. Closing a session that does not exist does
+/// nothing.
+///
+/// Runs on a thread that may block: a process that ignores the request to
+/// terminate is waited for until it is killed by force.
+///
+/// # Errors
+///
+/// Only fails if closing the session panicked.
+#[tauri::command(async)]
+pub fn session_close(
+    terminals: State<'_, TerminalState>,
+    state: State<'_, WorkspaceState>,
+    id: SessionKey,
+) -> CommandResult<()> {
+    logged("session_close", || {
+        match state.workspace().close_session(&id) {
+            Ok(Some(terminal)) => {
+                terminals.close(SessionId::from_raw(terminal));
+            }
+            Ok(None) | Err(WorkspaceError::UnknownSession(_)) => {}
+            Err(error) => return Err(error.to_string()),
+        }
+        Ok(())
+    })
+}
+
+/// Records the title a program set for its terminal (OSC 0 and 2), as
+/// xterm.js reports it. It becomes the title of the session unless the
+/// user named it.
+///
+/// # Errors
+///
+/// Only fails if recording the title panicked.
+#[tauri::command]
+pub fn session_report_title(
+    state: State<'_, WorkspaceState>,
+    id: SessionKey,
+    title: String,
+) -> CommandResult<()> {
+    logged("session_report_title", || {
+        ignore_closed_session(state.workspace().report_title(&id, &title))
+    })
+}
+
+/// Records the folder a program says it is in (OSC 7): a `file://` URL or
+/// a path. The project and branch of the session follow it. A folder that
+/// does not exist on this machine is ignored.
+///
+/// # Errors
+///
+/// Only fails if recording the folder panicked.
+#[tauri::command(async)]
+pub fn session_report_cwd(
+    state: State<'_, WorkspaceState>,
+    id: SessionKey,
+    cwd: String,
+) -> CommandResult<()> {
+    logged("session_report_cwd", || {
+        ignore_closed_session(state.workspace().report_cwd(&id, &cwd).map(|_| ()))
+    })
+}
+
+/// Turns the failure of a report about a session that was just closed
+/// into a success. See the module documentation.
+fn ignore_closed_session(result: Result<(), WorkspaceError>) -> Result<(), String> {
+    match result {
+        Ok(()) | Err(WorkspaceError::UnknownSession(_)) => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+/// Sends input to the terminal `id`, as if it had been typed.
 ///
 /// `data` is text, sent as UTF-8. With `binary` set, each character of
 /// `data` stands for one byte instead (its code point, 0 to 255), which is
@@ -93,7 +329,7 @@ pub async fn session_write(
     .await
 }
 
-/// Changes the size of the terminal of a session.
+/// Changes the size of the terminal `id`.
 ///
 /// # Errors
 ///
@@ -114,7 +350,7 @@ pub fn session_resize(
 }
 
 /// Records that the frontend has finished processing `bytes` of the output
-/// of a session, which lets a session that was held back resume.
+/// of the terminal `id`, which lets a terminal that was held back resume.
 ///
 /// # Errors
 ///
@@ -123,23 +359,6 @@ pub fn session_resize(
 pub fn session_ack(state: State<'_, TerminalState>, id: u64, bytes: u64) -> CommandResult<()> {
     logged("session_ack", || {
         state.manager()?.acknowledge(SessionId::from_raw(id), bytes);
-        Ok::<_, String>(())
-    })
-}
-
-/// Closes a session, killing its process. Closing a session that has
-/// already ended does nothing.
-///
-/// Runs on a thread that may block: a process that ignores the request to
-/// terminate is waited for until it is killed by force.
-///
-/// # Errors
-///
-/// Only fails if closing the session panicked.
-#[tauri::command(async)]
-pub fn session_close(state: State<'_, TerminalState>, id: u64) -> CommandResult<()> {
-    logged("session_close", || {
-        state.close(SessionId::from_raw(id));
         Ok::<_, String>(())
     })
 }
@@ -221,16 +440,84 @@ mod tests {
     }
 
     #[test]
-    fn the_created_session_is_described_in_camel_case() {
-        let created = CreatedSession {
-            id: 3,
+    fn the_started_session_is_described_in_camel_case() {
+        let started = StartedSession {
+            terminal: 3,
             ack_batch_bytes: 8192,
             windows_build_number: None,
         };
 
         assert_eq!(
-            serde_json::to_value(&created).unwrap(),
-            serde_json::json!({ "id": 3, "ackBatchBytes": 8192, "windowsBuildNumber": null })
+            serde_json::to_value(&started).unwrap(),
+            serde_json::json!({ "terminal": 3, "ackBatchBytes": 8192, "windowsBuildNumber": null })
         );
+    }
+
+    #[test]
+    fn a_request_to_create_a_session_only_needs_its_kind() {
+        let minimal: CreateSessionRequest =
+            serde_json::from_value(serde_json::json!({ "kind": "shell" })).unwrap();
+        assert_eq!(
+            minimal,
+            CreateSessionRequest {
+                kind: SessionKind::Shell,
+                cwd: None,
+                command: None,
+                name: None,
+                show: None,
+            }
+        );
+
+        let full: CreateSessionRequest = serde_json::from_value(serde_json::json!({
+            "kind": "background",
+            "cwd": "/work/app",
+            "command": "pnpm dev",
+            "name": "dev server",
+            "show": false,
+        }))
+        .unwrap();
+        assert_eq!(full.kind, SessionKind::Background);
+        assert_eq!(full.cwd, Some(PathBuf::from("/work/app")));
+        assert_eq!(full.command.as_deref(), Some("pnpm dev"));
+        assert_eq!(full.name.as_deref(), Some("dev server"));
+        assert_eq!(full.show, Some(false));
+
+        for bad in [
+            serde_json::json!({}),
+            serde_json::json!({ "kind": "teleporter" }),
+        ] {
+            assert!(serde_json::from_value::<CreateSessionRequest>(bad).is_err());
+        }
+    }
+
+    #[test]
+    fn a_request_to_start_a_session_starts_from_scratch_by_default() {
+        let request: StartSessionRequest =
+            serde_json::from_value(serde_json::json!({ "cols": 120, "rows": 40 })).unwrap();
+        assert_eq!(
+            request,
+            StartSessionRequest {
+                mode: LaunchMode::Fresh,
+                cols: 120,
+                rows: 40
+            }
+        );
+
+        let request: StartSessionRequest =
+            serde_json::from_value(serde_json::json!({ "mode": "resume", "cols": 80, "rows": 24 }))
+                .unwrap();
+        assert_eq!(request.mode, LaunchMode::Resume);
+    }
+
+    #[test]
+    fn reports_about_a_session_that_was_closed_are_not_failures() {
+        let ghost = SessionKey::from_raw("s-ghost").unwrap();
+
+        assert_eq!(
+            ignore_closed_session(Err(WorkspaceError::UnknownSession(ghost))),
+            Ok(())
+        );
+        assert_eq!(ignore_closed_session(Ok(())), Ok(()));
+        assert!(ignore_closed_session(Err(WorkspaceError::InvalidFolder)).is_err());
     }
 }

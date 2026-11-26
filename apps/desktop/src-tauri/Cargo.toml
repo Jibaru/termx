@@ -29,6 +29,7 @@ tauri = { version = "2.12.7", features = [] }
 # Copy and paste in the terminal, and clipboard writes requested by programs
 # (OSC 52), without depending on the clipboard support of each webview.
 tauri-plugin-clipboard-manager = "2.5.0"
+tauri-plugin-dialog = "2.8.4"
 # Opens the links of the terminal in the system browser.
 tauri-plugin-opener = "2.7.3"
 termx-core = { workspace = true }

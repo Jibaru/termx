@@ -12,4 +12,6 @@
 pub mod app;
 pub mod diagnostics;
 pub mod error;
+pub mod layout;
 pub mod session;
+pub mod workspace;
