@@ -65,11 +65,21 @@ pub struct ExportedBundle {
 /// Records an event reported by the frontend.
 ///
 /// This is the single entry point of the frontend into the log. It is rate
-/// limited, and it cannot fail: a logging problem must never cause another
-/// error in the interface.
+/// limited. The frontend ignores its result: a logging problem must never
+/// cause another error in the interface.
+///
+/// # Errors
+///
+/// Only fails if recording the event panicked.
 #[tauri::command]
-pub fn log_frontend_event(state: State<'_, DiagnosticsState>, event: FrontendEvent) {
-    record_frontend_event(&state, event);
+pub fn log_frontend_event(
+    state: State<'_, DiagnosticsState>,
+    event: FrontendEvent,
+) -> CommandResult<()> {
+    logged("log_frontend_event", || {
+        record_frontend_event(&state, event);
+        Ok::<_, String>(())
+    })
 }
 
 /// Opens the folder that holds the log files in the file manager.
@@ -79,10 +89,9 @@ pub fn log_frontend_event(state: State<'_, DiagnosticsState>, event: FrontendEve
 /// Fails when logging is not running or the folder cannot be opened.
 #[tauri::command]
 pub fn open_log_folder(state: State<'_, DiagnosticsState>) -> CommandResult<()> {
-    logged(
-        "open_log_folder",
-        running(&state).and_then(|diagnostics| show_in_file_manager(diagnostics.log_dir())),
-    )
+    logged("open_log_folder", || {
+        running(&state).and_then(|diagnostics| show_in_file_manager(diagnostics.log_dir()))
+    })
 }
 
 /// Writes a diagnostics bundle (a zip with the log files and
@@ -101,11 +110,10 @@ pub fn export_diagnostics(
     app: AppHandle,
     state: State<'_, DiagnosticsState>,
 ) -> CommandResult<ExportedBundle> {
-    let downloads = app.path().download_dir().ok();
-    let bundle = logged(
-        "export_diagnostics",
-        export_bundle(&state, downloads.as_deref()),
-    )?;
+    let bundle = logged("export_diagnostics", || {
+        let downloads = app.path().download_dir().ok();
+        export_bundle(&state, downloads.as_deref())
+    })?;
 
     // Showing the folder is a convenience; the path is returned either way.
     if let Some(Err(error)) = bundle.parent().map(show_in_file_manager) {
