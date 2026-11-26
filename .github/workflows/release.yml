@@ -1,0 +1,138 @@
+name: Release
+
+# Cuts a release of termx. It only ever runs when someone starts it by hand
+# from the Actions tab or with `gh workflow run release.yml`.
+#
+# 1. `prepare` compiles the change files in `.changeset/` into CHANGELOG.md,
+#    bumps the version in every versioned file, and pushes that as one commit
+#    to `main`.
+# 2. `release` tags that commit `v<version>` and creates the GitHub Release
+#    with the new CHANGELOG.md section as its notes.
+#
+# See the "Changelog and commits" section of CONTRIBUTING.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to release, for example 0.1.0. Leave empty to derive it from the change files.
+        required: false
+        type: string
+      dry-run:
+        description: Only print what the release would change, without pushing, tagging or releasing.
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  prepare:
+    name: Prepare the release
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # push the release commit to main
+    outputs:
+      sha: ${{ steps.push.outputs.sha }}
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+        with:
+          # Knope finds the previous release through the Git tags.
+          fetch-depth: 0
+
+      # knope-dev/action publishes no major version tag, so it is pinned to an
+      # exact release.
+      - name: Install Knope
+        uses: knope-dev/action@v2.1.2
+        with:
+          version: 0.24.0
+
+      - name: Dry-run the release
+        if: inputs.dry-run
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          args=(--dry-run)
+          if [[ -n "$VERSION" ]]; then args+=(--override-version "$VERSION"); fi
+          knope prepare-release "${args[@]}"
+
+      - name: Configure Git
+        if: ${{ !inputs.dry-run }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Update the changelog and the versions
+        if: ${{ !inputs.dry-run }}
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          args=(--verbose)
+          if [[ -n "$VERSION" ]]; then args+=(--override-version "$VERSION"); fi
+          knope prepare-release "${args[@]}"
+
+      # The toolchain comes from rust-toolchain.toml.
+      - name: Set up Rust
+        if: ${{ !inputs.dry-run }}
+        run: rustup toolchain install
+
+      # CI builds with `--locked`. Refuse to push a release commit whose
+      # Cargo.lock no longer matches the manifests.
+      - name: Check that Cargo.lock is in sync
+        if: ${{ !inputs.dry-run }}
+        run: cargo metadata --locked --format-version 1 > /dev/null
+
+      - name: Push the release commit
+        id: push
+        if: ${{ !inputs.dry-run }}
+        run: |
+          git push origin HEAD:main
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------------------
+  # HOOK: build the installers (later milestone, not implemented yet).
+  #
+  # Add a `build-installers` job here that `needs: prepare`, checks out
+  # `needs.prepare.outputs.sha` on Linux, macOS and Windows, builds the bundles
+  # (for example with tauri-apps/tauri-action) and uploads them with
+  # actions/upload-artifact. Then:
+  #
+  # - make the `release` job below `needs: [prepare, build-installers]` and
+  #   download the artifacts into `artifacts/` before `knope release`;
+  # - set `assets = "artifacts/*"` under `[package]` in knope.toml. Knope then
+  #   creates the release as a draft, uploads the installers, and publishes it.
+  #
+  # Keep it in this workflow: the tag is created with the default GITHUB_TOKEN,
+  # which does not trigger other workflows.
+  # ---------------------------------------------------------------------------
+
+  release:
+    name: Create the GitHub Release
+    needs: prepare
+    if: ${{ !inputs.dry-run }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the tag and the release
+    steps:
+      - name: Check out the release commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Knope
+        uses: knope-dev/action@v2.1.2
+        with:
+          version: 0.24.0
+
+      - name: Tag the commit and create the GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: knope release --verbose
