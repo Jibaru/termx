@@ -126,6 +126,14 @@ jobs:
   #
   # Keep it in this workflow: the tag is created with the default GITHUB_TOKEN,
   # which does not trigger other workflows.
+  #
+  # PRIVACY, REQUIRED: build the installers with remapped source paths, so
+  # that backtraces in users' logs do not contain the paths of the build
+  # machine. In the build step, before `tauri build`:
+  #
+  #   export CARGO_ENCODED_RUSTFLAGS="$(.github/scripts/release-rustflags.sh)"
+  #
+  # See .github/scripts/release-rustflags.sh and docs/logging.md.
   # ---------------------------------------------------------------------------
 
   release:
