@@ -13,6 +13,9 @@
 //!   shell, resolved by [`default_shell`].
 //! - [`Pty::spawn`] starts it and returns a [`Pty`] handle and a
 //!   [`PtyOutput`] stream.
+//! - [`PtyManager`] is an optional registry of PTYs keyed by an opaque
+//!   [`SessionId`], convenient for an application that receives its commands
+//!   over IPC.
 //!
 //! ```no_run
 //! use termx_core::pty::{Pty, PtyCommand, PtySize};
@@ -92,6 +95,7 @@
 
 mod command;
 mod error;
+mod manager;
 mod output;
 mod process;
 mod reader;
@@ -100,6 +104,7 @@ mod types;
 
 pub use command::{COLORTERM, PtyCommand, TERM, TERM_PROGRAM};
 pub use error::PtyError;
+pub use manager::{PtyManager, SessionId};
 pub use output::{OUTPUT_BUFFER_CAPACITY, PtyOutput, RecvTimeoutError};
 pub use process::Pty;
 pub use reader::READ_BUFFER_SIZE;
