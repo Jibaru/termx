@@ -54,6 +54,9 @@ export const RESIZE_DEBOUNCE_MS = 50;
 export const MIN_FIT_WIDTH_PX = 48;
 export const MIN_FIT_HEIGHT_PX = 24;
 
+/** How often WebGL is started again after its context was lost (`webgl`). */
+export const MAX_WEBGL_RESTARTS = 3;
+
 /**
  * Used until the session says how to batch acknowledgements. Must not be
  * larger than the low-water mark of the flow control in termx-core.
@@ -177,6 +180,8 @@ export class TerminalController {
 
   private readonly fitAddon = new FitAddon();
   private webglAddon: WebglAddon | null = null;
+  /** How often WebGL was started again after losing its context. */
+  private webglRestarts = 0;
   private readonly optionKeys = new OptionKeys();
 
   private status: TerminalStatus = { kind: "idle" };
@@ -556,6 +561,7 @@ export class TerminalController {
 
   /** A program asked to access the clipboard (OSC 52). */
   private handleClipboardRequest(payload: string): void {
+    if (!this.config.allowOsc52Write) return;
     const text = clipboardTextFromOsc52(payload);
     if (text === null) return;
     this.backend.writeClipboardText(text).catch((error: unknown) => {
@@ -622,22 +628,37 @@ export class TerminalController {
   // --- Renderer ------------------------------------------------------------
 
   /**
-   * Draws with WebGL when possible. Without it, and after its context is
-   * lost (the GPU process restarted, the machine woke up...), xterm.js
-   * draws with its DOM renderer, which is slower but works everywhere.
+   * Draws with WebGL unless the configuration says `dom`. Without WebGL,
+   * xterm.js draws with its DOM renderer, which is slower but works
+   * everywhere.
+   *
+   * When the context is lost (the GPU process restarted, the machine woke
+   * up...), `auto` stays on the DOM renderer; `webgl` starts WebGL again, a
+   * few times at most, so that a machine that keeps losing it does not
+   * loop.
    */
   private enableWebgl(): void {
-    if (this.config.renderer !== "webgl") return;
+    if (this.config.renderer === "dom") return;
     try {
       const addon = new WebglAddon();
       addon.onContextLoss(() => {
         addon.dispose();
         if (this.webglAddon === addon) this.webglAddon = null;
+        const restart =
+          this.config.renderer === "webgl" &&
+          this.webglRestarts < MAX_WEBGL_RESTARTS &&
+          !this.disposed;
         void logFrontendEvent({
           level: "warn",
           source: "terminal-renderer",
-          message: "the WebGL context was lost; the terminal now uses the DOM renderer",
+          message: restart
+            ? "the WebGL context was lost; starting WebGL again"
+            : "the WebGL context was lost; the terminal now uses the DOM renderer",
         });
+        if (restart) {
+          this.webglRestarts += 1;
+          this.enableWebgl();
+        }
       });
       this.terminal.loadAddon(addon);
       this.webglAddon = addon;
