@@ -1,0 +1,22 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/Jibaru/termx"
+
+[workspace.dependencies]
+termx-core = { path = "crates/termx-core", version = "0.0.0" }
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+unused_must_use = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "warn"
+todo = "warn"
+unwrap_used = "warn"
