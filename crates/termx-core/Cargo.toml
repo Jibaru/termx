@@ -13,12 +13,30 @@ workspace = true
 portable-pty = "0.9.0"
 thiserror = "2.0.21"
 
+# Diagnostics (crates/termx-core/src/diagnostics): structured logging and the
+# diagnostics bundle.
+os_info = { version = "3.15.0", default-features = false }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.154"
+sys-locale = "0.3.2"
+time = "0.3.55"
+tracing = "0.1.44"
+tracing-log = "0.2.0"
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "registry", "std"] }
+# Deflate through flate2's pure Rust backend (miniz_oxide), selected by the
+# flate2 default features.
+flate2 = "1.1.11"
+zip = { version = "9.8.2", default-features = false, features = ["deflate-flate2"] }
+
 # Used on Unix to wait on the PTY and a wake-up pipe at the same time, so the
 # reader thread can always be stopped. Already part of the dependency tree
 # through portable-pty.
 [target.'cfg(unix)'.dependencies]
 filedescriptor = "0.8.3"
 rlimit = "0.12"
+
+[dev-dependencies]
+tempfile = "3.27.0"
 
 # Lets a Windows test observe the raw console, to check what the PTY layer
 # does with its start-up query.

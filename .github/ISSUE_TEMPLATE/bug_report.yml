@@ -1,0 +1,73 @@
+name: Bug report
+description: Something in termx does not work as it should.
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a problem.
+
+        Issues are public. Do not paste passwords, tokens or other secrets.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the problem, and what you expected to happen instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open termx
+        2. ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: termx version
+      description: The version you installed, or the commit you built from.
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows
+        - macOS
+        - Linux
+    validations:
+      required: true
+  - type: input
+    id: os-version
+    attributes:
+      label: Operating system version
+      placeholder: Windows 11 24H2, macOS 15.2, Ubuntu 24.04 ...
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics bundle
+      description: |
+        In termx, click **Export diagnostics** and drag the `termx-diagnostics-*.zip` file it saves to your Downloads folder into this field.
+
+        **Skim the zip before attaching it: this issue is public.** It contains the termx log files and the versions of termx and of your system.
+
+        - Guaranteed by the code: your home directory is written as `~` and your user name as `<user>`, and nothing about your machine is collected beyond versions.
+        - Rules termx is written to follow, which a filter cannot verify: no terminal output, typed input, environment variable values or file contents are logged.
+        - Not filtered: error messages from the system and from libraries, and the names of your projects and directories, which appear as they are.
+
+        See [Logging and diagnostics](https://github.com/Jibaru/termx/blob/main/docs/logging.md#privacy) for the details.
+
+        If termx does not start, attach a zip of the log folder instead: `~/Library/Logs/termx` on macOS, `~/.local/state/termx/logs` on Linux, `%LOCALAPPDATA%\termx\logs` on Windows.
+      placeholder: Drag the zip file here.
+    validations:
+      required: true
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else?
+      description: Screenshots, or anything that might help.

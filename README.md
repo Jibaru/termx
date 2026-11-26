@@ -122,6 +122,16 @@ pnpm typecheck
 pnpm test
 ```
 
+## Logs and bug reports
+
+termx records errors and crashes in a log file on your machine. Nothing is
+uploaded: there is no telemetry. To report a problem, click **Export
+diagnostics** in the termx window and attach the zip file it saves to a
+[bug report](https://github.com/Jibaru/termx/issues/new?template=bug_report.yml).
+
+[Logging and diagnostics](docs/logging.md) explains where the logs are, what
+they contain and what they never contain.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).
