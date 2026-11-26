@@ -28,6 +28,13 @@ const PREFIX: &str = "termx-";
 const EXTENSION: &str = ".log";
 const LOCK_EXTENSION: &str = ".lock";
 
+/// Takes the place of the sequence number in the name of the file that gets
+/// a panic record when the log file itself cannot be written.
+pub(crate) const CRASH_FILE: &str = "crash";
+
+/// The names that can take the place of the sequence number.
+const SIDE_FILES: &[&str] = &[CRASH_FILE];
+
 /// How far in the future a file may be dated before its date is distrusted.
 const CLOCK_TOLERANCE: Duration = Duration::from_secs(60);
 
@@ -99,7 +106,8 @@ fn file_name(stamp: &str, run_id: &str, sequence: u32) -> String {
 }
 
 /// Whether `name` is exactly a name this module gives to a log file:
-/// `termx-YYYYMMDDTHHMMSSZ-<12 hex digits>-<3 or more digits>.log`.
+/// `termx-YYYYMMDDTHHMMSSZ-<12 hex digits>-<3 or more digits>.log`, or the
+/// same with one of the [side file](CRASH_FILE) names in place of the digits.
 #[must_use]
 pub fn is_log_file_name(name: &str) -> bool {
     run_id_of(name).is_some()
@@ -121,7 +129,8 @@ fn run_id_of(name: &str) -> Option<&str> {
         && stamp[8] == b'T'
         && stamp[9..15].iter().all(u8::is_ascii_digit)
         && stamp[15] == b'Z';
-    let sequence_ok = sequence.len() >= 3 && sequence.bytes().all(|byte| byte.is_ascii_digit());
+    let sequence_ok = sequence.len() >= 3 && sequence.bytes().all(|byte| byte.is_ascii_digit())
+        || SIDE_FILES.contains(&sequence);
 
     (stamp_ok && is_run_id(run_id) && sequence_ok).then_some(run_id)
 }
@@ -496,6 +505,14 @@ impl RotatingFile {
         regular && self.identity.is_some() && Handle::from_path(&self.path).ok() == self.identity
     }
 
+    /// Path of the side file `kind` of this launch, such as [`CRASH_FILE`].
+    pub fn side_file_path(&self, kind: &str) -> PathBuf {
+        self.dir.join(format!(
+            "{PREFIX}{}-{}-{kind}{EXTENSION}",
+            self.stamp, self.run_id
+        ))
+    }
+
     /// Asks the operating system to write the file to the disk.
     pub fn sync(&mut self) -> io::Result<()> {
         match self.file.as_mut() {
@@ -671,6 +688,7 @@ mod tests {
             "termx-20261126T190411Z.log",
             "termx-20261126T190411Z-5f0c2a9be771.log",
             "termx-20261126T190411Z-5f0c2a9be771-00.log",
+            "termx-20261126T190411Z-5f0c2a9be771-other.log",
             "termx-20261126T190411Z-5F0C2A9BE771-000.log",
             "termx-20261126T190411Z-5f0c2a9be771-000.log.bak",
             "termx-20261126X190411Z-5f0c2a9be771-000.log",
