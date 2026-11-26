@@ -46,6 +46,11 @@ termx log there instead.
   shell, never its arguments), the size of the terminal, the process
   identifier and, when it ends, its exit code. Never what was typed or
   printed in it.
+- The sessions of the workspace: that one was created, of which kind (Claude
+  Code, shell or background command), or removed. Never its folder, its name,
+  its title or the command line of a background command.
+- Problems with the [state file](state.md): that it was damaged, from a newer
+  termx, or could not be saved.
 - At the more verbose levels, lifecycle events that help to follow what the
   application was doing.
 
@@ -149,6 +154,8 @@ but nothing in the logger can tell such data from any other text:
 - **The values of environment variables are not logged.** Only their names
   may appear.
 - **The contents of files are not logged.**
+- **Command lines are not logged**: neither the command of a background
+  session nor the arguments of any program.
 
 ### Not filtered
 

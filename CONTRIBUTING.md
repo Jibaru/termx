@@ -30,6 +30,8 @@ crates/
     src/lib.rs             Public API and module declarations
     src/pty.rs             Pseudo-terminal handling
     src/session.rs         Terminal sessions: registry, output batching, flow control
+    src/workspace.rs       Sessions as the user sees them: model, projects and Git,
+                           launching, layout, state file, change notifications
     src/config.rs          User configuration
     src/diagnostics/       Logging, panic capture, redaction, diagnostics bundle
 apps/
@@ -37,12 +39,15 @@ apps/
     src/                   Frontend (React, TypeScript, Vite)
       components/          UI components
       terminal/            The xterm.js terminal: controller, key map, look, session store
-      lib/ipc.ts           Typed wrappers around the Tauri commands
+      lib/ipc.ts           Typed wrappers around the Tauri commands, and their types
+      lib/ipc.contract.json  Examples of what the two sides exchange (generated)
     src-tauri/             Tauri shell (Rust), depends on termx-core
       src/lib.rs           Application builder and command registration
       src/commands/        Tauri commands, one module per feature area
       src/logging.rs       Log directory per platform, logging start and stop
-      src/terminal.rs      Session state of the app: channels, window ownership, shutdown
+      src/terminal.rs      Terminals of the app: channels, window ownership, shutdown
+      src/workspace.rs     Workspace of the app: state directory, change events, window
+      src/contract.rs      Test that keeps lib/ipc.contract.json true to the Rust types
       capabilities/        Tauri permissions granted to the windows
       tauri.conf.json      Tauri configuration
 docs/                      User documentation
@@ -56,10 +61,19 @@ plugin/                    Placeholder for the future Claude Code plugin
   dependencies.
 - **A new Tauri command** goes in a module under
   `apps/desktop/src-tauri/src/commands/`. Declare new modules in
-  `commands/mod.rs`, register the command in the `generate_handler!` list in
+  `commands/mod.rs`, register the command in the `command_handlers!` list in
   `src-tauri/src/lib.rs`, and add a typed wrapper in
   `apps/desktop/src/lib/ipc.ts`. A command that can fail follows the pattern
-  in [Logging conventions](#logging-conventions).
+  in [Logging conventions](#logging-conventions). Call it in
+  `src-tauri/src/ipc_tests.rs` with the arguments the wrapper sends: that
+  test goes through Tauri's IPC without opening a window, and is what
+  catches an argument that is named differently on the two sides.
+- **A type sent to or received from the frontend** is declared on both
+  sides: in Rust, and in `lib/ipc.ts`. `lib/ipc.contract.json` holds an
+  example of each, and a test on each side checks its types against it, so
+  a change made on one side only fails. After changing such a type, update
+  `lib/ipc.ts` and `ipc.contract.test.ts`, then write the examples again
+  with `TERMX_UPDATE_CONTRACT=1 cargo test -p termx-desktop contract`.
 - **A new crate** goes in `crates/`. It is picked up by the workspace
   automatically. Inherit the shared metadata and lints with
   `version.workspace = true` (and so on) and `[lints] workspace = true`.
@@ -106,6 +120,8 @@ level, including `debug` and `trace`:
 - **No keystrokes or input**: nothing written to a PTY, no clipboard content.
 - **No environment variable values.** Names are fine.
 - **No file contents.**
+- **No command lines**: not the command of a background session, not the
+  arguments of any program. The path of the program is fine.
 - **No user or machine identifiers**: user name, host name, addresses.
 
 Log sizes, counts, identifiers, durations, exit codes and error kinds instead:
