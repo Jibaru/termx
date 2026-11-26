@@ -23,6 +23,14 @@ use crate::pty::{ExitStatus, Pty, PtyOutput, RecvTimeoutError};
 /// matters for a process that closed its terminal and kept running.
 pub(crate) const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
+/// Capacity given to the output buffer of the PTY of a session, in bytes.
+///
+/// The PTY layer buffers a megabyte by default, for a consumer that reads
+/// when it pleases. A session reads as soon as the frontend can take more,
+/// so a large buffer would only hold output that is printed long after the
+/// user pressed Ctrl+C. One batch is enough to never keep the pump waiting.
+pub const PTY_BUFFER_BYTES: usize = BATCH_MAX_BYTES;
+
 /// What a non-blocking read of the output returned.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Received {
@@ -37,8 +45,9 @@ pub(crate) enum Received {
 /// Where a pump takes its output from. Implemented by a PTY, and by scripted
 /// sources in tests.
 pub(crate) trait Source: Send {
-    /// Takes the output available now, without blocking.
-    fn try_recv(&mut self) -> Received;
+    /// Takes at most `max` bytes of the output available now, without
+    /// blocking. What is not taken stays in the source.
+    fn try_recv(&mut self, max: usize) -> Received;
 
     /// The exit status of the process, once it is known.
     fn exit_status(&mut self) -> Option<ExitStatus>;
@@ -53,14 +62,15 @@ pub(crate) struct PtySource {
 }
 
 impl PtySource {
-    pub(crate) fn new(output: PtyOutput, pty: Weak<Pty>) -> Self {
+    pub(crate) fn new(mut output: PtyOutput, pty: Weak<Pty>) -> Self {
+        output.set_capacity(PTY_BUFFER_BYTES);
         Self { output, pty }
     }
 }
 
 impl Source for PtySource {
-    fn try_recv(&mut self) -> Received {
-        match self.output.recv_timeout(Duration::ZERO) {
+    fn try_recv(&mut self, max: usize) -> Received {
+        match self.output.try_recv_up_to(max) {
             Ok(bytes) => Received::Data(bytes),
             Err(RecvTimeoutError::Timeout) => Received::Empty,
             Err(RecvTimeoutError::Closed) => Received::Closed,
@@ -120,14 +130,20 @@ impl Pump {
         loop {
             let mut progressed = false;
 
-            // Take output from the PTY, unless the frontend is behind or
-            // enough is waiting here already. What is left in the PTY's own
-            // bounded buffer is what throttles the process.
-            while !self.source_closed
-                && !self.flow.is_paused()
-                && self.batcher.len() < BATCH_MAX_BYTES
-            {
-                match self.source.try_recv() {
+            // Take output from the PTY, but never more than can be passed
+            // on: at most what fills one batch, and at most what the
+            // frontend may still be sent before the session is paused.
+            // Everything else stays in the PTY's own small buffer, where it
+            // throttles the process, and where little of it is left to
+            // print once the process is interrupted.
+            while !self.source_closed && !self.flow.is_paused() {
+                let room = BATCH_MAX_BYTES
+                    .saturating_sub(self.batcher.len())
+                    .min(self.flow.credit());
+                if room == 0 {
+                    break;
+                }
+                match self.source.try_recv(room) {
                     Received::Data(bytes) => {
                         self.batcher.push(now, bytes);
                         progressed = true;
@@ -207,6 +223,7 @@ pub(crate) mod testing {
         closed: bool,
         exit: Option<ExitStatus>,
         reads: usize,
+        largest_request: usize,
     }
 
     /// A source fed by the test. Clones share the same script.
@@ -238,6 +255,11 @@ pub(crate) mod testing {
             self.script().chunks.iter().map(Vec::len).sum()
         }
 
+        /// The most bytes a single read ever asked for.
+        pub(crate) fn largest_request(&self) -> usize {
+            self.script().largest_request
+        }
+
         /// Number of reads that returned output.
         pub(crate) fn reads(&self) -> usize {
             self.script().reads
@@ -245,11 +267,16 @@ pub(crate) mod testing {
     }
 
     impl Source for ScriptedSource {
-        fn try_recv(&mut self) -> Received {
+        fn try_recv(&mut self, max: usize) -> Received {
             let mut script = self.script();
+            script.largest_request = script.largest_request.max(max);
             match script.chunks.pop_front() {
-                Some(chunk) => {
+                Some(mut chunk) => {
                     script.reads += 1;
+                    if chunk.len() > max {
+                        let rest = chunk.split_off(max);
+                        script.chunks.push_front(rest);
+                    }
                     Received::Data(chunk)
                 }
                 None if script.closed => Received::Closed,
@@ -557,6 +584,29 @@ mod tests {
         f.poll();
         assert_eq!(f.sink.output().len(), sent);
         assert_eq!(f.source.reads(), reads);
+    }
+
+    #[test]
+    fn the_pump_never_takes_more_than_it_can_pass_on() {
+        let mut f = fixture();
+        // One huge read is available, as when a process floods the
+        // terminal: several megabytes, far above the high-water mark.
+        let flood = 4 * 1024 * 1024;
+        f.source.push(vec![b'x'; flood]);
+
+        for _ in 0..100 {
+            f.poll();
+            f.now += BOUNDARY_HOLD_MAX;
+        }
+
+        // The frontend acknowledged nothing, so the pump paused. What it
+        // took from the source is what it sent, to the byte: nothing is
+        // parked in the pump, where it would be printed after a Ctrl+C.
+        let sent = f.sink.output().len();
+        assert_eq!(flood - f.source.unread(), sent);
+        assert!(sent as u64 > HIGH_WATERMARK_BYTES);
+        assert!(sent as u64 <= HIGH_WATERMARK_BYTES + BATCH_MAX_BYTES as u64);
+        assert!(f.source.largest_request() <= BATCH_MAX_BYTES);
     }
 
     #[test]

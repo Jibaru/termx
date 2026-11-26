@@ -68,6 +68,16 @@ impl FlowControl {
         }
     }
 
+    /// How many more bytes can be handed to the frontend before the session
+    /// is paused. Zero while it is paused.
+    pub(crate) fn credit(&self) -> usize {
+        if self.paused {
+            return 0;
+        }
+        let credit = (HIGH_WATERMARK_BYTES + 1).saturating_sub(self.unacknowledged);
+        usize::try_from(credit).unwrap_or(usize::MAX)
+    }
+
     /// Whether the session must leave its output where it is for now.
     pub(crate) fn is_paused(&self) -> bool {
         self.paused
@@ -96,6 +106,24 @@ mod tests {
         flow.sent(1);
         assert!(flow.is_paused());
         assert_eq!(flow.unacknowledged(), HIGH_WATERMARK_BYTES + 1);
+    }
+
+    #[test]
+    fn credit_is_what_can_still_be_sent_before_pausing() {
+        let mut flow = FlowControl::default();
+        assert_eq!(flow.credit(), HIGH + 1);
+
+        flow.sent(HIGH - 10);
+        assert_eq!(flow.credit(), 11);
+
+        // Sending exactly the credit is what pauses the session.
+        flow.sent(11);
+        assert!(flow.is_paused());
+        assert_eq!(flow.credit(), 0);
+
+        // Still paused between the marks: no credit either.
+        flow.acknowledge(HIGH_WATERMARK_BYTES / 2);
+        assert_eq!(flow.credit(), 0);
     }
 
     #[test]

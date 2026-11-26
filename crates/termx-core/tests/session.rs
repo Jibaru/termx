@@ -425,6 +425,59 @@ fn a_frontend_that_never_acknowledges_throttles_the_process() {
     });
 }
 
+/// Interrupting a program that floods the terminal must take effect
+/// quickly: what still arrives afterwards is what was buffered between the
+/// process and the frontend, so those buffers have to be small.
+#[cfg(unix)]
+#[test]
+fn little_output_follows_the_interruption_of_a_flood() {
+    guarded(|| {
+        // A frontend that keeps up with 5 MB per second, far less than the
+        // program prints: every buffer on the way is full.
+        const FRONTEND_BYTES_PER_TICK: u64 = 50_000;
+        const TICK: Duration = Duration::from_millis(10);
+
+        let manager = Arc::new(SessionManager::new().unwrap());
+        // Would print 10 GB if nothing stopped it.
+        let (id, frontend) = start(&manager, &["repeat", "100000000", &"x".repeat(92)]);
+
+        let acknowledging = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let acker = thread::spawn({
+            let (manager, frontend) = (Arc::clone(&manager), frontend.clone());
+            let acknowledging = Arc::clone(&acknowledging);
+            move || {
+                let mut acknowledged = 0;
+                while acknowledging.load(std::sync::atomic::Ordering::SeqCst) {
+                    let processed = frontend.len() as u64;
+                    let due = (processed - acknowledged).min(FRONTEND_BYTES_PER_TICK);
+                    manager.acknowledge(id, due);
+                    acknowledged += due;
+                    thread::sleep(TICK);
+                }
+            }
+        });
+
+        // Let the flood reach its steady state, then press Ctrl+C.
+        frontend.wait("a few megabytes", |received| {
+            (received.raw.len() > 3 * 1024 * 1024).then_some(())
+        });
+        let before = frontend.len();
+        manager.write(id, b"\x03").unwrap();
+
+        let status = frontend.wait_for_exit();
+        acknowledging.store(false, std::sync::atomic::Ordering::SeqCst);
+        acker.join().unwrap();
+        assert!(status.signal().is_some(), "{status}");
+
+        let after = frontend.len() - before;
+        println!("{after} bytes were delivered after the interruption");
+        assert!(
+            after as u64 <= HIGH_WATERMARK_BYTES,
+            "{after} bytes were still delivered after Ctrl+C"
+        );
+    });
+}
+
 #[test]
 fn a_stalled_session_does_not_affect_another_one() {
     guarded(|| {
