@@ -1,11 +1,16 @@
 //! Wires the diagnostics of `termx-core` into the application: where the log
 //! files live on each platform, and when logging starts and stops.
+//!
+//! Logging starts before the Tauri builder runs, so that a failure to build
+//! the application or to create its window is recorded. That is why the
+//! directories are resolved from the environment here instead of through
+//! Tauri's path resolver, which only exists once the application is built.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 use std::time::Duration;
 
-use tauri::{AppHandle, Manager};
 use termx_core::diagnostics::tracing;
 use termx_core::diagnostics::{Diagnostics, LogConfig, RateLimiter};
 
@@ -23,18 +28,18 @@ const FRONTEND_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Application state for diagnostics, managed by Tauri.
 pub struct DiagnosticsState {
-    /// Set once logging has started. Stays empty when it could not start.
-    diagnostics: OnceLock<Diagnostics>,
+    /// The running logger. Empty when logging could not start.
+    diagnostics: Option<Diagnostics>,
     /// Keeps a frontend error loop from flooding the log.
     pub(crate) frontend_limiter: Mutex<RateLimiter>,
 }
 
 impl DiagnosticsState {
-    /// State with logging not started yet.
+    /// State for an application that runs without logging.
     #[must_use]
     pub fn new() -> Self {
         Self {
-            diagnostics: OnceLock::new(),
+            diagnostics: None,
             frontend_limiter: Mutex::new(RateLimiter::new(FRONTEND_BURST, FRONTEND_INTERVAL)),
         }
     }
@@ -42,16 +47,16 @@ impl DiagnosticsState {
     /// State for a logger that is already running.
     #[must_use]
     pub fn with_diagnostics(diagnostics: Diagnostics) -> Self {
-        let state = Self::new();
-        // The cell was created empty on the line above.
-        let _ = state.diagnostics.set(diagnostics);
-        state
+        Self {
+            diagnostics: Some(diagnostics),
+            ..Self::new()
+        }
     }
 
     /// The running logger, if logging could be started.
     #[must_use]
     pub fn diagnostics(&self) -> Option<&Diagnostics> {
-        self.diagnostics.get()
+        self.diagnostics.as_ref()
     }
 }
 
@@ -92,54 +97,65 @@ pub fn log_dir_for(
     }
 }
 
-/// Resolves the log directory of the running application.
-fn log_dir(app: &AppHandle) -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os(LOG_DIR_ENV_VAR).filter(|dir| !dir.is_empty()) {
-        return Some(PathBuf::from(dir));
+/// Resolves the log directory from the environment of the process.
+///
+/// `variable` looks up an environment variable; `home` is the home directory
+/// of the user. [`LOG_DIR_ENV_VAR`] wins over the platform location.
+#[must_use]
+pub fn log_dir_from_env(
+    os: &str,
+    variable: impl Fn(&str) -> Option<OsString>,
+    home: Option<&Path>,
+) -> Option<PathBuf> {
+    let directory = |name: &str| {
+        variable(name)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    };
+    if let Some(dir) = directory(LOG_DIR_ENV_VAR) {
+        return Some(dir);
     }
-    let paths = app.path();
-    let home = paths.home_dir().ok();
-    let local_data = paths.local_data_dir().ok();
-    let xdg_state_home = std::env::var_os("XDG_STATE_HOME").map(PathBuf::from);
-    log_dir_for(
-        std::env::consts::OS,
-        home.as_deref(),
-        local_data.as_deref(),
-        xdg_state_home.as_deref(),
-    )
+    // What `%LOCALAPPDATA%` is on a default Windows installation.
+    let local_data =
+        directory("LOCALAPPDATA").or_else(|| Some(home?.join("AppData").join("Local")));
+    let xdg_state_home = directory("XDG_STATE_HOME");
+    log_dir_for(os, home, local_data.as_deref(), xdg_state_home.as_deref())
 }
 
-/// Starts logging. Called first thing when the application is set up.
+/// Starts logging. Called first thing when the application starts, before
+/// anything that can fail.
 ///
 /// Logging is never a reason to refuse to start: if the log cannot be opened,
 /// the problem is printed to stderr and the application runs without it.
-pub fn start(app: &AppHandle) {
-    let Some(dir) = log_dir(app) else {
+#[must_use]
+pub fn start() -> DiagnosticsState {
+    let home = std::env::home_dir();
+    let dir = log_dir_from_env(
+        std::env::consts::OS,
+        |name| std::env::var_os(name),
+        home.as_deref(),
+    );
+    let Some(dir) = dir else {
         eprintln!("termx: no log directory could be determined; logging is disabled");
-        return;
+        return DiagnosticsState::new();
     };
 
-    let mut config = LogConfig::new(dir, app.package_info().version.to_string());
+    let mut config = LogConfig::new(dir, env!("CARGO_PKG_VERSION"));
     config.stderr = cfg!(debug_assertions);
     config.webview_version = tauri::webview_version().ok();
 
     match Diagnostics::init(config) {
-        Ok(diagnostics) => {
-            if let Some(state) = app.try_state::<DiagnosticsState>() {
-                let _ = state.diagnostics.set(diagnostics);
-            }
+        Ok(diagnostics) => DiagnosticsState::with_diagnostics(diagnostics),
+        Err(error) => {
+            eprintln!("termx: logging is disabled: {error}");
+            DiagnosticsState::new()
         }
-        Err(error) => eprintln!("termx: logging is disabled: {error}"),
     }
 }
 
 /// Writes out what is still queued. Called when the application exits.
-pub fn stop(app: &AppHandle) {
-    if let Some(diagnostics) = app
-        .try_state::<DiagnosticsState>()
-        .as_deref()
-        .and_then(DiagnosticsState::diagnostics)
-    {
+pub fn stop(diagnostics: Option<&Diagnostics>) {
+    if let Some(diagnostics) = diagnostics {
         tracing::info!("termx exiting");
         diagnostics.shutdown();
     }
@@ -149,7 +165,9 @@ pub fn stop(app: &AppHandle) {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::log_dir_for;
+    use std::ffi::OsString;
+
+    use super::{LOG_DIR_ENV_VAR, log_dir_for, log_dir_from_env};
 
     fn home() -> PathBuf {
         Path::new("home").join("ana")
@@ -206,5 +224,72 @@ mod tests {
         assert_eq!(log_dir_for("macos", None, None, None), None);
         assert_eq!(log_dir_for("windows", Some(&home()), None, None), None);
         assert_eq!(log_dir_for("linux", None, None, None), None);
+    }
+
+    fn env<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<OsString> + 'a {
+        move |name| {
+            pairs
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| OsString::from(value))
+        }
+    }
+
+    #[test]
+    fn the_log_directory_is_resolved_without_a_running_application() {
+        let state = std::env::temp_dir().join("state");
+        let local = std::env::temp_dir().join("Local");
+        let state_text = state.to_string_lossy();
+        let local_text = local.to_string_lossy();
+        let variables = [
+            ("XDG_STATE_HOME", &*state_text),
+            ("LOCALAPPDATA", &*local_text),
+        ];
+
+        assert_eq!(
+            log_dir_from_env("linux", env(&variables), Some(&home())).unwrap(),
+            state.join("termx").join("logs")
+        );
+        assert_eq!(
+            log_dir_from_env("windows", env(&variables), Some(&home())).unwrap(),
+            local.join("termx").join("logs")
+        );
+        assert_eq!(
+            log_dir_from_env("macos", env(&variables), Some(&home())).unwrap(),
+            home().join("Library").join("Logs").join("termx")
+        );
+    }
+
+    #[test]
+    fn windows_falls_back_to_the_default_local_app_data_directory() {
+        assert_eq!(
+            log_dir_from_env("windows", env(&[]), Some(&home())).unwrap(),
+            home()
+                .join("AppData")
+                .join("Local")
+                .join("termx")
+                .join("logs")
+        );
+        assert_eq!(log_dir_from_env("windows", env(&[]), None), None);
+    }
+
+    #[test]
+    fn the_override_variable_wins_and_an_empty_one_is_ignored() {
+        let custom = std::env::temp_dir().join("custom-logs");
+        let custom_text = custom.to_string_lossy();
+
+        assert_eq!(
+            log_dir_from_env(
+                "linux",
+                env(&[(LOG_DIR_ENV_VAR, &*custom_text)]),
+                Some(&home())
+            )
+            .unwrap(),
+            custom
+        );
+        assert_eq!(
+            log_dir_from_env("macos", env(&[(LOG_DIR_ENV_VAR, "")]), Some(&home())).unwrap(),
+            home().join("Library").join("Logs").join("termx")
+        );
     }
 }
