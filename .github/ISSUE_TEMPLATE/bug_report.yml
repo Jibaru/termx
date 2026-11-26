@@ -54,7 +54,13 @@ body:
       description: |
         In termx, click **Export diagnostics** and drag the `termx-diagnostics-*.zip` file it saves to your Downloads folder into this field.
 
-        The bundle contains the termx log files and the versions of termx and of your system. It never contains terminal output, typed input, environment variable values or file contents, and your home directory is written as `~`. You can open the zip to check. See [Logging and diagnostics](https://github.com/Jibaru/termx/blob/main/docs/logging.md).
+        **Skim the zip before attaching it: this issue is public.** It contains the termx log files and the versions of termx and of your system.
+
+        - Guaranteed by the code: your home directory is written as `~` and your user name as `<user>`, and nothing about your machine is collected beyond versions.
+        - Rules termx is written to follow, which a filter cannot verify: no terminal output, typed input, environment variable values or file contents are logged.
+        - Not filtered: error messages from the system and from libraries, and the names of your projects and directories, which appear as they are.
+
+        See [Logging and diagnostics](https://github.com/Jibaru/termx/blob/main/docs/logging.md#privacy) for the details.
 
         If termx does not start, attach a zip of the log folder instead: `~/Library/Logs/termx` on macOS, `~/.local/state/termx/logs` on Linux, `%LOCALAPPDATA%\termx\logs` on Windows.
       placeholder: Drag the zip file here.

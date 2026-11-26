@@ -23,19 +23,28 @@
 //!
 //! # Privacy rules
 //!
-//! The log is meant to be shared, so these rules are not negotiable:
+//! The log is meant to be shared, so these rules are not negotiable. Nothing
+//! in the logger can recognise such data: they are enforced by review.
 //!
 //! - **Never log terminal output**, in whole or in part.
 //! - **Never log keystrokes** or any other input sent to a session.
 //! - **Never log the values of environment variables.** Names are fine.
 //! - **Never log the contents of files.**
-//! - **Paths are logged with the home directory replaced by `~`.** Every
-//!   record goes through a [`Redactor`] that does this for the message and
-//!   for all string fields, so logging a path is safe by default. Use
-//!   [`redact::path`] for paths that end up anywhere else, such as an error
-//!   message returned to the interface.
 //!
 //! Log sizes, counts, identifiers, durations and error kinds instead.
+//!
+//! What the logger does enforce is redaction of the identity of the user:
+//! every record goes through a [`Redactor`] that replaces the home directory
+//! with `~` and the user name with `<user>` in the message and in all string
+//! fields (see [`redact`] for the exact rules), so logging a path is safe by
+//! default. Use [`redact::path`] for paths that end up anywhere else, such
+//! as an error message returned to the interface.
+//!
+//! # Delivery
+//!
+//! `WARN` and `ERROR` records are written before the logging call returns,
+//! so they survive a crash right after. Lower levels are queued for a
+//! background thread and can be dropped, with a count, under extreme load.
 //!
 //! # Format and retention
 //!
@@ -47,8 +56,8 @@
 //! {"ts":"2026-11-26T19:04:11.482Z","level":"ERROR","run":"5f0c2a9be771","target":"termx::command","msg":"command failed","fields":{"command":"export_diagnostics","error":"permission denied"}}
 //! ```
 //!
-//! Files are rotated by size and deleted by age and total size according to
-//! [`Retention`]. `docs/logging.md` in the repository is the user-facing
+//! Every process writes its own files. A new file is started by size, and
+//! files are deleted by age, count and total size according to [`Retention`]. `docs/logging.md` in the repository is the user-facing
 //! description.
 
 use std::error::Error;
