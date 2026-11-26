@@ -26,7 +26,8 @@ describe("the default terminal configuration", () => {
     );
     expect(DEFAULT_TERMINAL_CONFIG.fontSize).toBe(14);
     expect(DEFAULT_TERMINAL_CONFIG.scrollback).toBe(10_000);
-    expect(DEFAULT_TERMINAL_CONFIG.macOptionIsMeta).toBe(true);
+    // Shortcuts on the left Option key, characters on the right one.
+    expect(DEFAULT_TERMINAL_CONFIG.optionAsMeta).toBe("left");
   });
 
   it("is near-white on an opaque near-black background", () => {

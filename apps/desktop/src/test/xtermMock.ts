@@ -177,13 +177,19 @@ export class FakeTerminal {
   /** Sends a key event through the custom key handler. */
   key(
     type: "keydown" | "keypress" | "keyup",
-    init: KeyboardEventInit,
+    init: Omit<KeyboardEventInit, "keyCode" | "isComposing"> & {
+      keyCode?: number;
+      isComposing?: boolean;
+    },
   ): {
     handledByXterm: boolean;
     event: KeyboardEvent;
   } {
     if (!this.keyHandler) throw new Error("no key handler was attached");
     const event = new KeyboardEvent(type, { cancelable: true, ...init });
+    // happy-dom does not take these two from the init dictionary.
+    Object.defineProperty(event, "isComposing", { value: init.isComposing ?? false });
+    Object.defineProperty(event, "keyCode", { value: init.keyCode ?? 0 });
     return { handledByXterm: this.keyHandler(event), event };
   }
 

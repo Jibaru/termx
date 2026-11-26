@@ -23,7 +23,7 @@ import {
 } from "../lib/ipc";
 import { detectPlatform, type Platform } from "../lib/platform";
 import { DEFAULT_TERMINAL_CONFIG, type TerminalConfig } from "./config";
-import { mapKey } from "./keymap";
+import { isComposing, mapKey, OptionKeys } from "./keymap";
 import { clipboardTextFromOsc52 } from "./osc52";
 
 /**
@@ -158,7 +158,8 @@ function xtermOptions(config: TerminalConfig): ITerminalOptions {
     fontSize: config.fontSize,
     lineHeight: config.lineHeight,
     letterSpacing: config.letterSpacing,
-    macOptionIsMeta: config.macOptionIsMeta,
+    // On macOS this is switched per key: see `syncOptionKey`.
+    macOptionIsMeta: config.optionAsMeta === "both",
     macOptionClickForcesSelection: true,
     minimumContrastRatio: config.minimumContrastRatio,
     scrollback: config.scrollback,
@@ -176,6 +177,7 @@ export class TerminalController {
 
   private readonly fitAddon = new FitAddon();
   private webglAddon: WebglAddon | null = null;
+  private readonly optionKeys = new OptionKeys();
 
   private status: TerminalStatus = { kind: "idle" };
   private readonly listeners = new Set<() => void>();
@@ -284,6 +286,7 @@ export class TerminalController {
       this.scheduleFit();
     });
     this.resizeObserver.observe(container);
+    window.addEventListener("blur", this.handleWindowBlur);
     this.terminal.focus();
 
     if (this.status.kind === "idle") this.start();
@@ -301,6 +304,7 @@ export class TerminalController {
     if (this.container && element?.parentElement === this.container) {
       this.container.removeChild(element);
     }
+    window.removeEventListener("blur", this.handleWindowBlur);
     this.container = null;
   }
 
@@ -455,7 +459,35 @@ export class TerminalController {
       });
   }
 
+  /**
+   * Makes xterm.js treat Option as Meta, or not, for the key at hand.
+   *
+   * xterm.js has one switch for both Option keys. With it on, Option+key
+   * sends `ESC` and the key; with it off, the key is left to the system,
+   * which types the alternate character of the layout or starts a dead key.
+   * Setting the switch before each key lets the two Option keys differ,
+   * while xterm.js keeps doing the encoding and the composition it is good
+   * at.
+   */
+  private syncOptionKey(event: KeyboardEvent): void {
+    if (this.platform !== "macos") return;
+    this.optionKeys.track(event);
+    // The switch only matters for the key Option modifies, so it is left
+    // alone when an Option key itself moves, and during a composition.
+    if (event.key === "Alt" || isComposing(event)) return;
+    const meta = this.optionKeys.actsAsMeta(this.config.optionAsMeta);
+    if (this.terminal.options.macOptionIsMeta !== meta) {
+      this.terminal.options.macOptionIsMeta = meta;
+    }
+  }
+
+  private readonly handleWindowBlur = (): void => {
+    // A key released in another window is never reported here.
+    this.optionKeys.reset();
+  };
+
   private handleKey(event: KeyboardEvent): boolean {
+    this.syncOptionKey(event);
     const action = mapKey(event, this.platform);
     if (action.kind === "default") return true;
 
