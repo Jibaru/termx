@@ -8,7 +8,9 @@
 //! # Layout
 //!
 //! - [`pty`]: spawning and driving pseudo-terminals.
-//! - [`session`]: the model of a running terminal session.
+//! - [`session`]: running terminal sessions and the path of their output.
+//! - [`workspace`]: the sessions as the user sees them, their projects,
+//!   their layout and what is remembered of them between two runs.
 //! - [`config`]: user configuration.
 //! - [`diagnostics`]: persistent logging and the diagnostics bundle.
 
@@ -18,6 +20,7 @@ pub mod config;
 pub mod diagnostics;
 pub mod pty;
 pub mod session;
+pub mod workspace;
 
 /// Returns the version of the termx core library.
 ///
