@@ -79,7 +79,7 @@ fn write_now(file: &SharedFile, line: &[u8]) {
             }
         };
         let _ = guard.write_record(line);
-        let _ = guard.flush();
+        let _ = guard.sync();
         return;
     }
 }
