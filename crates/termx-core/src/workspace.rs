@@ -10,12 +10,15 @@
 //! - [`launch`]: what to run for each kind of session, through the user's
 //!   shell so that it has the user's environment.
 //! - [`project`]: which project a folder belongs to, and its Git branch.
+//! - [`layout`]: the split tree of panes of the main area.
 
 pub mod launch;
+pub mod layout;
 mod model;
 pub mod project;
 
 pub use launch::{LaunchFailure, LaunchMode, Launcher};
+pub use layout::{Direction, Edge, Layout, LayoutError, Node, PaneId, Placement, SplitId};
 pub use model::{
     InvalidSessionKey, MAX_CLAUDE_SESSION_ID_BYTES, MAX_COMMAND_BYTES, MAX_TITLE_CHARS, Session,
     SessionKey, SessionKind, SessionState, clean_title, default_title, now_ms,
