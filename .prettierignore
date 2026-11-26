@@ -5,3 +5,5 @@ node_modules/
 pnpm-lock.yaml
 apps/desktop/src-tauri/gen/
 CHANGELOG.md
+# Written by a Rust test: see apps/desktop/src-tauri/src/contract.rs.
+apps/desktop/src/lib/ipc.contract.json

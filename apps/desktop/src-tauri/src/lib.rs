@@ -9,6 +9,8 @@ use tauri::{Manager, WindowEvent};
 use termx_core::diagnostics::tracing;
 
 pub mod commands;
+#[cfg(test)]
+mod contract;
 pub mod logging;
 pub mod terminal;
 #[cfg(test)]
