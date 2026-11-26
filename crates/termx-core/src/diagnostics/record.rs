@@ -13,6 +13,7 @@ use serde_json::{Map, Value};
 use time::OffsetDateTime;
 
 use super::redact::Redactor;
+use super::scrub;
 
 /// Longest string value kept in a record, in bytes. Longer values are cut and
 /// marked, so that a single record cannot grow without bound.
@@ -73,8 +74,11 @@ impl LineContext {
         line
     }
 
+    /// Redacts the identity of the user, removes what looks like a secret,
+    /// and caps the length. Every string of every record goes through here.
     fn clean(&self, value: &str) -> String {
-        truncate(self.redactor.text(value).into_owned())
+        let redacted = self.redactor.text(value);
+        truncate(scrub::secrets(&redacted).into_owned())
     }
 
     fn clean_value(&self, value: Value) -> Value {
@@ -246,6 +250,26 @@ mod tests {
         assert_eq!(parsed["msg"], "cannot open ~/notes.txt");
         assert_eq!(parsed["fields"]["path"], "~/notes.txt");
         assert_eq!(parsed["fields"]["nested"][0], "~");
+    }
+
+    #[test]
+    fn secrets_are_removed_from_the_message_and_from_every_field() {
+        let token = "ghp_16C7e42F292c6912E7710c838347Ae178B4a";
+        let line = context().format(Record {
+            timestamp: timestamp(),
+            level: "ERROR",
+            target: "t",
+            message: &format!("request with {token} failed"),
+            span: None,
+            fields: fields(json!({
+                "header": format!("Authorization: Bearer {token}"),
+                "nested": [format!("password={token}")],
+            })),
+        });
+
+        assert!(!line.contains("16C7e42F"), "{line}");
+        let parsed: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(parsed["msg"], "request with <redacted> failed");
     }
 
     #[test]
