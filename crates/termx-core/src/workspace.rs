@@ -13,10 +13,12 @@
 //! - [`layout`]: the split tree of panes of the main area.
 //! - [`store`]: the state file, written atomically and owned by one
 //!   instance.
+//! - [`notify`]: change notifications, so that a frontend never polls.
 
 pub mod launch;
 pub mod layout;
 mod model;
+pub mod notify;
 pub mod project;
 pub mod store;
 
@@ -26,6 +28,7 @@ pub use model::{
     InvalidSessionKey, MAX_CLAUDE_SESSION_ID_BYTES, MAX_COMMAND_BYTES, MAX_TITLE_CHARS, Session,
     SessionKey, SessionKind, SessionState, clean_title, default_title, now_ms,
 };
+pub use notify::{ChangeSet, Subscription};
 pub use project::{GitInfo, Project, ProjectKind};
 pub use store::{PersistenceMode, WindowGeometry};
 
