@@ -61,6 +61,7 @@ use std::sync::Arc;
 use tracing_subscriber::layer::SubscriberExt;
 
 pub mod bundle;
+pub mod gate;
 mod layer;
 mod level;
 mod panic;
@@ -73,6 +74,7 @@ mod writer;
 
 pub use tracing;
 
+pub use self::gate::{Dropped, GateConfig, RecordGate, Severity};
 pub use self::level::{LogLevel, ParseLogLevelError};
 pub use self::panic::PANIC_TARGET;
 pub use self::rate_limit::{Decision, RateLimiter};

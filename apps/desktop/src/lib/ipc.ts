@@ -1,5 +1,7 @@
 import { invoke, type InvokeArgs } from "@tauri-apps/api/core";
 
+import { LogLimiter, type LogLimits } from "./logLimiter";
+
 /**
  * Typed wrappers around the Tauri commands exposed by the Rust side
  * (apps/desktop/src-tauri/src/commands). Components call these instead of
@@ -43,43 +45,46 @@ export interface ExportedBundle {
 
 const LOG_COMMAND = "log_frontend_event";
 
-/** Records sent to the log per window of `LOG_WINDOW_MS`, at most. */
-export const LOG_LIMIT = 20;
-export const LOG_WINDOW_MS = 10_000;
-
-let logWindowStart = 0;
-let logWindowCount = 0;
+let logLimiter = new LogLimiter();
 
 /**
  * Writes a record to the log file. This is the only way the frontend logs.
  *
  * It never throws and never rejects, because a logging problem must not
  * cause another error. Records over the limit are dropped here, before they
- * reach the Rust side, which applies its own rate limit as well.
+ * reach the Rust side, which applies its own rate limit as well. Drops are
+ * counted, and the count is logged before the next record that gets through.
  *
  * Privacy: never pass terminal output, typed input, environment variable
  * values or file contents. See docs/logging.md.
  */
 export async function logFrontendEvent(event: FrontendEvent): Promise<void> {
-  const now = Date.now();
-  if (now - logWindowStart >= LOG_WINDOW_MS) {
-    logWindowStart = now;
-    logWindowCount = 0;
-  }
-  if (logWindowCount >= LOG_LIMIT) return;
-  logWindowCount += 1;
+  const dropped = logLimiter.admit(event.level, `${event.source}\n${event.message}`);
+  if (dropped === null) return;
 
   try {
+    const total = dropped.error + dropped.warn + dropped.info;
+    if (total > 0) {
+      await invoke(LOG_COMMAND, {
+        event: {
+          level: "warn",
+          source: "frontend-limit",
+          message:
+            `${String(total)} records were dropped by the frontend rate limit ` +
+            `(${String(dropped.error)} errors, ${String(dropped.warn)} warnings, ` +
+            `${String(dropped.info)} others)`,
+        } satisfies FrontendEvent,
+      });
+    }
     await invoke(LOG_COMMAND, { event });
   } catch {
     // Nowhere left to report to.
   }
 }
 
-/** Forgets the records counted so far. For tests. */
-export function resetFrontendLogLimit(): void {
-  logWindowStart = 0;
-  logWindowCount = 0;
+/** Starts the rate limit over, optionally with other limits. For tests. */
+export function resetFrontendLogLimit(limits?: LogLimits, now?: () => number): void {
+  logLimiter = new LogLimiter(limits, now);
 }
 
 /** Opens the folder that holds the log files in the file manager. */
