@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { type KeyStroke, mapKey, OptionKeys, SHIFT_ENTER_SEQUENCE } from "./keymap";
+import { type KeyStroke, mapKey, OptionKeys, sanitizePaste, SHIFT_ENTER_SEQUENCE } from "./keymap";
 
 function stroke(key: string, modifiers: Partial<KeyStroke> = {}): KeyStroke {
   const code = /^[a-z]$/i.test(key) ? `Key${key.toUpperCase()}` : key;
@@ -132,6 +132,24 @@ describe("the Option keys of a Mac", () => {
     keys.track(down("AltLeft"));
     expect(keys.actsAsMeta("both")).toBe(true);
     expect(keys.actsAsMeta("none")).toBe(false);
+  });
+});
+
+describe("sanitizePaste", () => {
+  it("removes the marker that would end a bracketed paste early", () => {
+    expect(sanitizePaste("safe\x1b[201~rm -rf ~\r")).toBe("saferm -rf ~\r");
+    expect(sanitizePaste("\x1b[201~\x1b[201~")).toBe("");
+  });
+
+  it("removes a marker that only appears once another one is taken out", () => {
+    expect(sanitizePaste("a\x1b[20\x1b[201~1~b")).toBe("ab");
+  });
+
+  it("keeps every other byte, including other escape sequences", () => {
+    const text = "tab\there\r\nline two\n\x1b[200~ \x1b[31m caf\u00e9 \u2713 \x00\x7f";
+
+    expect(sanitizePaste(text)).toBe(text);
+    expect(sanitizePaste("")).toBe("");
   });
 });
 
