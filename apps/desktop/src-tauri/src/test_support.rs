@@ -35,6 +35,10 @@ impl TestLog {
         self.diagnostics.shutdown();
         let mut records = Vec::new();
         for file in log_files(self.diagnostics.log_dir()).unwrap() {
+            // The first-errors file only has copies.
+            if file.name.ends_with("-errors.log") {
+                continue;
+            }
             let text = std::fs::read_to_string(&file.path).unwrap();
             records.extend(
                 text.lines()

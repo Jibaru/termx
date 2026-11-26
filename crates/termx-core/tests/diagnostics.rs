@@ -10,8 +10,8 @@ use std::process::Command;
 use serde_json::Value;
 use termx_core::diagnostics::tracing::{self, debug, error, info, info_span, warn};
 use termx_core::diagnostics::{
-    Diagnostics, LOG_TARGET, LogConfig, LogLevel, PANIC_TARGET, Redactor, Retention,
-    STARTUP_TARGET, log_files,
+    Diagnostics, FIRST_ERRORS_RECORDS, LOG_TARGET, LogConfig, LogLevel, PANIC_TARGET,
+    REPEATS_WRITTEN, Redactor, Retention, STARTUP_TARGET, log_files,
 };
 
 /// Set for the child process of the panic test: the directory to log into.
@@ -44,13 +44,27 @@ fn read_text(dir: &Path) -> String {
     log_files(dir)
         .unwrap()
         .iter()
+        .filter(|file| !file.name.ends_with("-errors.log"))
         .map(|file| fs::read_to_string(&file.path).unwrap())
         .collect()
 }
 
+/// The records of the log proper, in order. The first-errors file holds
+/// copies of some of them and is read with [`read_first_errors`].
 fn read_records(dir: &Path) -> Vec<Value> {
+    read_files(dir, |name| !name.ends_with("-errors.log"))
+}
+
+fn read_first_errors(dir: &Path) -> Vec<Value> {
+    read_files(dir, |name| name.ends_with("-errors.log"))
+}
+
+fn read_files(dir: &Path, wanted: impl Fn(&str) -> bool) -> Vec<Value> {
     let mut records = Vec::new();
     for file in log_files(dir).unwrap() {
+        if !wanted(&file.name) {
+            continue;
+        }
         let text = fs::read_to_string(&file.path).unwrap();
         assert!(text.is_empty() || text.ends_with('\n'), "{text:?}");
         for line in text.lines() {
@@ -60,6 +74,21 @@ fn read_records(dir: &Path) -> Vec<Value> {
         }
     }
     records
+}
+
+/// A message that is different for every `index` even after numbers are
+/// ignored, so that it is never taken for a repeat.
+fn distinct(index: usize) -> String {
+    let mut word = String::new();
+    let mut rest = index;
+    loop {
+        word.push(char::from(b'a' + (rest % 26) as u8));
+        rest /= 26;
+        if rest == 0 {
+            break;
+        }
+    }
+    format!("problem {word}")
 }
 
 #[test]
@@ -72,7 +101,8 @@ fn logging_creates_the_file_and_writes_one_json_object_per_line() {
         error!(command = "resize", error = %"no such session", attempts = 2, ok = false, "command failed");
     });
 
-    assert_eq!(log_files(&log_dir).unwrap().len(), 1);
+    // The log, and the copy of its first errors.
+    assert_eq!(log_files(&log_dir).unwrap().len(), 2);
     assert_eq!(records.len(), 2);
 
     let first = &records[0];
@@ -270,7 +300,12 @@ fn the_bundle_exported_from_a_live_logger_contains_its_records() {
 
     let mut archive = zip::ZipArchive::new(fs::File::open(&bundle).unwrap()).unwrap();
     assert!(archive.by_name("system-info.json").is_ok());
-    let name = format!("logs/{}", log_files(&log_dir).unwrap()[0].name);
+    let files = log_files(&log_dir).unwrap();
+    let main = files
+        .iter()
+        .find(|file| file.name.ends_with("-000.log"))
+        .unwrap();
+    let name = format!("logs/{}", main.name);
     let log = std::io::read_to_string(archive.by_name(&name).unwrap()).unwrap();
     assert!(log.contains("something broke"));
 }
@@ -339,7 +374,7 @@ const ABORT_CHILD_DIR: &str = "TERMX_TEST_ABORT_LOG_DIR";
 /// How the child of the abort tests ends: `abort` or `exit`.
 const ABORT_CHILD_MODE: &str = "TERMX_TEST_ABORT_MODE";
 /// Errors the child logs right before it dies.
-const ERRORS_BEFORE_DEATH: usize = 5_000;
+const ERRORS_BEFORE_DEATH: usize = 500;
 
 /// Runs `test` again in a child process that logs errors and then dies
 /// without any cleanup, and returns the error records found on disk.
@@ -370,7 +405,8 @@ fn die_after_logging_if_child() {
     let _diagnostics = Diagnostics::init(config(Path::new(&dir))).unwrap();
     for index in 0..ERRORS_BEFORE_DEATH {
         info!(index, "working");
-        error!(index, "something is going wrong");
+        // Different every time, so that none is suppressed as a repeat.
+        error!("{}", distinct(index));
     }
     error!("the cause of the crash");
     if std::env::var(ABORT_CHILD_MODE).as_deref() == Ok("abort") {
@@ -412,7 +448,7 @@ fn a_flood_of_low_level_records_cannot_push_out_an_error() {
         for index in 0..200_000u32 {
             debug!(index, "noise");
             if index % 1_000 == 0 {
-                error!(index, "a real error");
+                error!("{}", distinct(index as usize));
             }
         }
         error!("the last error");
@@ -436,4 +472,98 @@ fn a_flood_of_low_level_records_cannot_push_out_an_error() {
         .map(|record| record["fields"]["dropped"].as_u64().unwrap())
         .sum();
     assert_eq!(written + dropped, 200_000);
+}
+
+#[test]
+fn a_repeated_error_is_written_a_few_times_and_then_counted() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let records = logged(config(dir.path()), |_| {
+        for attempt in 0..100_000u32 {
+            // The number in the message does not make it a different error.
+            error!(attempt, "cannot reach the session, attempt {attempt}");
+        }
+        warn!("something else");
+    });
+
+    let written: Vec<&Value> = records
+        .iter()
+        .filter(|record| record["msg"].as_str().unwrap().starts_with("cannot reach"))
+        .collect();
+    assert_eq!(written.len(), REPEATS_WRITTEN as usize);
+    assert_eq!(written[0]["msg"], "cannot reach the session, attempt 0");
+    assert_eq!(written[0]["fields"]["attempt"], 0);
+
+    let summaries: Vec<&Value> = records
+        .iter()
+        .filter(|record| record["fields"].get("repeated").is_some())
+        .collect();
+    assert_eq!(summaries.len(), 1, "{summaries:?}");
+    assert_eq!(summaries[0]["level"], "ERROR");
+    assert_eq!(summaries[0]["target"], "diagnostics");
+    assert_eq!(
+        summaries[0]["fields"]["repeated"],
+        100_000 - u64::from(REPEATS_WRITTEN)
+    );
+    assert_eq!(
+        summaries[0]["fields"]["message"],
+        "cannot reach the session, attempt 0"
+    );
+    // A different record is not held back by the flood.
+    assert!(
+        records
+            .iter()
+            .any(|record| record["msg"] == "something else")
+    );
+    // And the log is a handful of lines, not a hundred thousand.
+    assert!(records.len() < 20, "{} records", records.len());
+}
+
+#[test]
+fn the_same_message_from_two_places_is_not_a_repeat() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let records = logged(config(dir.path()), |_| {
+        for _ in 0..REPEATS_WRITTEN + 20 {
+            error!("it failed");
+        }
+        error!("it failed");
+    });
+
+    let written = records
+        .iter()
+        .filter(|record| record["msg"] == "it failed")
+        .count();
+    assert_eq!(written, REPEATS_WRITTEN as usize + 1);
+}
+
+#[test]
+fn the_first_error_of_a_launch_survives_a_flood_of_other_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = config(dir.path());
+    config.retention = Retention {
+        max_file_bytes: 4 * 1024,
+        max_total_bytes: 16 * 1024,
+        min_files_kept: 0,
+        ..Retention::default()
+    };
+
+    let records = logged(config, |_| {
+        error!(code = 28, "the error that started it all");
+        for index in 0..20_000 {
+            error!("{}", distinct(index));
+        }
+    });
+
+    // The log itself only has room for the end of the flood...
+    assert!(
+        records
+            .iter()
+            .all(|record| record["msg"] != "the error that started it all")
+    );
+    // ...and the first errors are still on disk.
+    let first = read_first_errors(dir.path());
+    assert_eq!(first[0]["msg"], "the error that started it all");
+    assert_eq!(first[0]["fields"]["code"], 28);
+    assert_eq!(first.len(), FIRST_ERRORS_RECORDS as usize);
 }

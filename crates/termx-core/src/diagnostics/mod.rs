@@ -73,11 +73,13 @@ pub mod bundle;
 pub mod gate;
 mod layer;
 mod level;
+mod normalise;
 mod panic;
 pub mod rate_limit;
 mod record;
 pub mod redact;
 mod rotate;
+mod suppress;
 mod system;
 mod writer;
 
@@ -85,13 +87,15 @@ pub use tracing;
 
 pub use self::gate::{Dropped, GateConfig, RecordGate, Severity};
 pub use self::level::{LogLevel, ParseLogLevelError};
+pub use self::normalise::message_key;
 pub use self::panic::PANIC_TARGET;
 pub use self::rate_limit::{Decision, RateLimiter};
 pub use self::record::{MAX_VALUE_BYTES, TRUNCATION_MARKER};
 pub use self::redact::Redactor;
 pub use self::rotate::{LogFile, Retention, is_log_file_name, log_files, prune, verify_log_dir};
+pub use self::suppress::{WINDOW as REPEAT_WINDOW, WRITTEN_PER_WINDOW as REPEATS_WRITTEN};
 pub use self::system::SystemInfo;
-pub use self::writer::LOG_TARGET;
+pub use self::writer::{FIRST_ERRORS_RECORDS, LOG_TARGET, URGENT_WAIT};
 
 use self::layer::JsonLinesLayer;
 use self::record::LineContext;
