@@ -21,7 +21,7 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Barrier, OnceLock, mpsc};
+use std::sync::{Arc, Barrier, Mutex, OnceLock, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -375,6 +375,27 @@ fn panicking_readable_callback_does_not_wedge_the_session() {
         assert!(visible_text(&raw).contains("END-OF-OUTPUT"));
         let status = pty.try_wait().expect("the exit status was never published");
         assert!(status.success(), "{status}");
+    });
+}
+
+#[test]
+fn dropping_the_handle_does_not_run_the_readable_callback() {
+    guarded(|| {
+        // The callback needs a lock that the dropping thread holds. Calling
+        // it while the handle is dropped would deadlock.
+        let gate = Arc::new(Mutex::new(()));
+        let (pty, mut output) = Pty::spawn(&helper(&["sleep"]), PtySize::default()).unwrap();
+        read_until(&mut output, "ready");
+        output.on_readable({
+            let gate = Arc::clone(&gate);
+            move || drop(gate.lock())
+        });
+
+        let held = gate.lock().unwrap();
+        drop(pty);
+        drop(held);
+
+        assert_eq!(output.recv(), None);
     });
 }
 
