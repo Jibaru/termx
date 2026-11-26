@@ -20,6 +20,11 @@ thiserror = "2.0.21"
 filedescriptor = "0.8.3"
 rlimit = "0.12"
 
+# Lets a Windows test observe the raw console, to check what the PTY layer
+# does with its start-up query.
+[target.'cfg(windows)'.dev-dependencies]
+portable-pty = "0.9.0"
+
 # Child process driven by the PTY integration tests. It is a test fixture
 # declared as an example so that it is built by `cargo test` but never
 # installed or shipped with the library.
