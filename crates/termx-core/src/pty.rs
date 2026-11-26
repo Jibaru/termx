@@ -109,7 +109,9 @@ mod reader;
 mod shell;
 mod types;
 
-pub use command::{COLORTERM, PtyCommand, TERM, TERM_PROGRAM};
+pub use command::{
+    COLORTERM, DEFAULT_ENV_DENYLIST, DEFAULT_LOCALE, PtyCommand, TERM, TERM_PROGRAM,
+};
 pub use error::PtyError;
 pub use limits::{OPEN_FILE_LIMIT_TARGET, raise_open_file_limit};
 pub use manager::{PtyManager, SessionId};
