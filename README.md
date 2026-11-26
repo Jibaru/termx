@@ -9,14 +9,37 @@ sessions at once.
 
 ## Status
 
-**Early development.** The repository currently contains the project
-skeleton: a desktop window with a placeholder UI wired to the Rust core. It is
-not a usable terminal yet, and there are no releases.
+**Early development.** termx opens your login shell in a working terminal:
+one session per window for now. There are no releases yet; see
+[Build, run and test](#build-run-and-test) to try it.
+
+## Using the terminal
+
+| Action                         | macOS       | Windows and Linux            |
+| ------------------------------ | ----------- | ---------------------------- |
+| Copy the selection             | Cmd+C       | Ctrl+Shift+C or Ctrl+Insert  |
+| Paste                          | Cmd+V       | Ctrl+Shift+V or Shift+Insert |
+| Open a link in the browser     | Cmd+click   | Ctrl+click                   |
+| New line in Claude Code        | Shift+Enter | Shift+Enter                  |
+| Restart after the shell exited | Enter       | Enter                        |
+
+- **Shift+Enter** sends the same sequence as Option+Enter (`ESC` followed by
+  Enter), which Claude Code reads as "new line" without any setup. Do not run
+  `/terminal-setup` for it.
+- On macOS, **Option is the Meta key**, as Claude Code and shells expect for
+  shortcuts such as Option+B or Option+Enter. It therefore does not type the
+  alternate characters of your keyboard layout.
+- Programs may copy to your clipboard (the OSC 52 escape sequence, used by
+  Claude Code's `/copy` and by tmux). They can never read it.
+- The scrollback keeps 10,000 lines.
+
+Not there yet: the kitty keyboard protocol, font ligatures, inline images,
+links to files, search, and settings (the font, colours and key bindings are
+fixed for now).
 
 ## Planned features
 
 - Many terminal sessions in one window, listed in a sidebar
-- A fast terminal view backed by a native pseudo-terminal on every platform
 - At-a-glance status of each Claude Code session (working, waiting, done)
 - A companion Claude Code plugin that reports session state to termx
 - Configurable shell, fonts, colours and key bindings
