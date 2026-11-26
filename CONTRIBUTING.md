@@ -29,18 +29,20 @@ crates/
   termx-core/              Core library. Must not depend on Tauri or any UI code
     src/lib.rs             Public API and module declarations
     src/pty.rs             Pseudo-terminal handling
-    src/session.rs         Terminal session model
+    src/session.rs         Terminal sessions: registry, output batching, flow control
     src/config.rs          User configuration
     src/diagnostics/       Logging, panic capture, redaction, diagnostics bundle
 apps/
   desktop/                 The desktop application
     src/                   Frontend (React, TypeScript, Vite)
       components/          UI components
+      terminal/            The xterm.js terminal: controller, key map, look, session store
       lib/ipc.ts           Typed wrappers around the Tauri commands
     src-tauri/             Tauri shell (Rust), depends on termx-core
       src/lib.rs           Application builder and command registration
       src/commands/        Tauri commands, one module per feature area
       src/logging.rs       Log directory per platform, logging start and stop
+      src/terminal.rs      Session state of the app: channels, window ownership, shutdown
       capabilities/        Tauri permissions granted to the windows
       tauri.conf.json      Tauri configuration
 docs/                      User documentation

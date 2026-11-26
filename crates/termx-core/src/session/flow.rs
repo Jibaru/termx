@@ -17,9 +17,9 @@
 /// This is how much output can be on its way to, or queued in, the terminal
 /// emulator of one session. It is a few screens of dense output: enough for
 /// the emulator to always have work queued while it is the bottleneck, and
-/// small enough that Ctrl+C takes effect at once, since everything still
-/// buffered is printed after the process was interrupted. The value is the
-/// one Orca (MIT licence) settled on for the same purpose.
+/// small enough to keep short what is still printed after Ctrl+C, since
+/// everything already buffered comes out after the process was interrupted.
+/// The value is the one Orca (MIT licence) uses for the same purpose.
 pub const HIGH_WATERMARK_BYTES: u64 = 256 * 1024;
 
 /// Number of unacknowledged bytes below which a paused session resumes.

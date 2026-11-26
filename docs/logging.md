@@ -42,6 +42,10 @@ termx log there instead.
   and a backtrace.
 - Errors in the interface: uncaught JavaScript errors, unhandled promise
   rejections, rendering errors and failed calls to the backend.
+- The life of each terminal session: the program it runs (the path of your
+  shell, never its arguments), the size of the terminal, the process
+  identifier and, when it ends, its exit code. Never what was typed or
+  printed in it.
 - At the more verbose levels, lifecycle events that help to follow what the
   application was doing.
 
