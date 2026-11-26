@@ -111,7 +111,7 @@ fn file_name(stamp: &str, run_id: &str, sequence: u32) -> String {
 
 /// Whether `name` is exactly a name this module gives to a log file:
 /// `termx-YYYYMMDDTHHMMSSZ-<12 hex digits>-<3 or more digits>.log`, or the
-/// same with one of the [side file](CRASH_FILE) names in place of the digits.
+/// same with `errors` or `crash` in place of the digits.
 #[must_use]
 pub fn is_log_file_name(name: &str) -> bool {
     run_id_of(name).is_some()
