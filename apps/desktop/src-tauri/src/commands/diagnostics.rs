@@ -159,12 +159,15 @@ fn record_frontend_event(state: &DiagnosticsState, event: FrontendEvent) -> bool
         FrontendLevel::Warn => Severity::Warn,
         FrontendLevel::Info => Severity::Info,
     };
-    let key = format!("{}\n{}", event.source, event.message);
     let admitted = state
         .frontend_gate
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
-        .admit(severity, &key);
+        .admit(
+            severity,
+            cut(&event.source, MAX_SOURCE_CHARS),
+            &event.message,
+        );
     let Some(dropped) = admitted else {
         return false;
     };
