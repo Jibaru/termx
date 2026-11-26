@@ -19,6 +19,9 @@ use super::{DiagnosticsError, LogLevel, SystemInfo};
 /// Name of the file inside the bundle that describes the environment.
 pub const SYSTEM_INFO_FILE_NAME: &str = "system-info.json";
 
+/// How many file names are tried before giving up on a crowded folder.
+const MAX_NAME_ATTEMPTS: u32 = 1_000;
+
 /// Directory inside the bundle that holds the log files.
 pub const LOGS_DIR_NAME: &str = "logs";
 
@@ -65,8 +68,7 @@ pub fn export(
     let logs = log_files(log_dir).map_err(|source| DiagnosticsError::io(log_dir, source))?;
     fs::create_dir_all(dest_dir).map_err(|source| DiagnosticsError::io(dest_dir, source))?;
 
-    let path = free_path(dest_dir, &compact_timestamp(now));
-    let file = File::create_new(&path).map_err(|source| DiagnosticsError::io(&path, source))?;
+    let (path, file) = create_bundle_file(dest_dir, &compact_timestamp(now))?;
     if let Err(source) = write(file, &logs, context, now) {
         let _ = fs::remove_file(&path);
         return Err(DiagnosticsError::io(&path, source));
@@ -74,15 +76,23 @@ pub fn export(
     Ok(path)
 }
 
-/// A bundle path in `dir` that is not taken yet.
-fn free_path(dir: &Path, stamp: &str) -> PathBuf {
+/// Creates a bundle file in `dir` under a name that is not taken. The file
+/// is created exclusively, so an existing file or link is never written to.
+fn create_bundle_file(dir: &Path, stamp: &str) -> Result<(PathBuf, File), DiagnosticsError> {
     let mut path = dir.join(format!("termx-diagnostics-{stamp}.zip"));
-    let mut counter = 2u32;
-    while path.exists() {
-        path = dir.join(format!("termx-diagnostics-{stamp}-{counter}.zip"));
-        counter += 1;
+    for counter in 2..=MAX_NAME_ATTEMPTS {
+        match File::create_new(&path) {
+            Ok(file) => return Ok((path, file)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                path = dir.join(format!("termx-diagnostics-{stamp}-{counter}.zip"));
+            }
+            Err(source) => return Err(DiagnosticsError::io(&path, source)),
+        }
     }
-    path
+    Err(DiagnosticsError::io(
+        dir,
+        io::Error::new(io::ErrorKind::AlreadyExists, "no free bundle file name"),
+    ))
 }
 
 fn write(
@@ -96,19 +106,23 @@ fn write(
     let mut entries = Vec::with_capacity(logs.len());
 
     for log in logs {
-        let Some(name) = log.path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        // A file can disappear between the listing and now if it is rotated
-        // or pruned; the bundle is still useful without it.
+        let name = &log.name;
+        // A file can disappear between the listing and now if it is pruned;
+        // the bundle is still useful without it. The listing only has
+        // regular files; check again that no link was swapped in since.
+        let still_regular =
+            fs::symlink_metadata(&log.path).is_ok_and(|metadata| metadata.file_type().is_file());
         let Ok(source) = File::open(&log.path) else {
             continue;
         };
+        if !still_regular {
+            continue;
+        }
         zip.start_file(format!("{LOGS_DIR_NAME}/{name}"), options)?;
-        // The active file keeps growing: stop at the size it had when listed.
+        // The current file keeps growing: stop at the size it had when listed.
         let bytes = io::copy(&mut source.take(log.size), &mut zip)?;
         entries.push(LogFileEntry {
-            name: name.to_owned(),
+            name: name.clone(),
             bytes,
         });
     }
@@ -138,6 +152,9 @@ mod tests {
 
     use super::{BundleContext, export};
     use crate::diagnostics::{LogLevel, SystemInfo};
+
+    const OLDER: &str = "termx-20261125T101500Z-00aa11bb22cc-000.log";
+    const CURRENT: &str = "termx-20261126T190411Z-5f0c2a9be771-000.log";
 
     fn system() -> SystemInfo {
         SystemInfo {
@@ -176,12 +193,8 @@ mod tests {
     fn the_bundle_holds_the_log_files_and_the_system_information() {
         let logs = tempfile::tempdir().unwrap();
         let dest = tempfile::tempdir().unwrap();
-        fs::write(logs.path().join("termx.log"), "current\n").unwrap();
-        fs::write(
-            logs.path().join("termx-20261125T101500Z-000.log"),
-            "older\n",
-        )
-        .unwrap();
+        fs::write(logs.path().join(OLDER), "older\n").unwrap();
+        fs::write(logs.path().join(CURRENT), "current\n").unwrap();
         let system = system();
 
         let path = export(logs.path(), dest.path(), context(&system)).unwrap();
@@ -197,13 +210,13 @@ mod tests {
         assert_eq!(
             entries.keys().map(String::as_str).collect::<Vec<_>>(),
             [
-                "logs/termx-20261125T101500Z-000.log",
-                "logs/termx.log",
+                format!("logs/{OLDER}").as_str(),
+                format!("logs/{CURRENT}").as_str(),
                 "system-info.json"
             ]
         );
-        assert_eq!(entries["logs/termx.log"], "current\n");
-        assert_eq!(entries["logs/termx-20261125T101500Z-000.log"], "older\n");
+        assert_eq!(entries[&format!("logs/{CURRENT}")], "current\n");
+        assert_eq!(entries[&format!("logs/{OLDER}")], "older\n");
 
         let info: Value = serde_json::from_str(&entries["system-info.json"]).unwrap();
         assert_eq!(info["app_version"], "1.2.3");
@@ -257,9 +270,10 @@ mod tests {
     fn files_that_are_not_termx_logs_stay_out_of_the_bundle() {
         let logs = tempfile::tempdir().unwrap();
         let dest = tempfile::tempdir().unwrap();
-        fs::write(logs.path().join("termx.log"), "current\n").unwrap();
+        fs::write(logs.path().join(CURRENT), "current\n").unwrap();
         fs::write(logs.path().join("secrets.txt"), "do not export\n").unwrap();
         fs::write(logs.path().join("shell-history.log"), "do not export\n").unwrap();
+        fs::write(logs.path().join("termx-notes.log"), "do not export\n").unwrap();
         let system = system();
 
         let path = export(logs.path(), dest.path(), context(&system)).unwrap();
@@ -271,6 +285,23 @@ mod tests {
                 .values()
                 .all(|content| !content.contains("do not export"))
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symbolic_link_in_the_log_directory_is_not_exported() {
+        let logs = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let private = outside.path().join("private.txt");
+        fs::write(&private, "do not export\n").unwrap();
+        std::os::unix::fs::symlink(&private, logs.path().join(CURRENT)).unwrap();
+        let system = system();
+
+        let path = export(logs.path(), dest.path(), context(&system)).unwrap();
+
+        let entries = read_zip(&path);
+        assert_eq!(entries.keys().collect::<Vec<_>>(), ["system-info.json"]);
     }
 
     #[test]

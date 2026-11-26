@@ -10,8 +10,7 @@ use std::process::Command;
 use serde_json::Value;
 use termx_core::diagnostics::tracing::{self, debug, error, info, info_span, warn};
 use termx_core::diagnostics::{
-    ACTIVE_FILE_NAME, Diagnostics, LogConfig, LogLevel, PANIC_TARGET, Redactor, Retention,
-    STARTUP_TARGET, log_files,
+    Diagnostics, LogConfig, LogLevel, PANIC_TARGET, Redactor, Retention, STARTUP_TARGET, log_files,
 };
 
 /// Set for the child process of the panic test: the directory to log into.
@@ -39,6 +38,15 @@ fn logged(config: LogConfig, body: impl FnOnce(&Diagnostics)) -> Vec<Value> {
     read_records(&dir)
 }
 
+/// Everything in the log directory, oldest file first.
+fn read_text(dir: &Path) -> String {
+    log_files(dir)
+        .unwrap()
+        .iter()
+        .map(|file| fs::read_to_string(&file.path).unwrap())
+        .collect()
+}
+
 fn read_records(dir: &Path) -> Vec<Value> {
     let mut records = Vec::new();
     for file in log_files(dir).unwrap() {
@@ -63,7 +71,7 @@ fn logging_creates_the_file_and_writes_one_json_object_per_line() {
         error!(command = "resize", error = %"no such session", attempts = 2, ok = false, "command failed");
     });
 
-    assert!(log_dir.join(ACTIVE_FILE_NAME).is_file());
+    assert_eq!(log_files(&log_dir).unwrap().len(), 1);
     assert_eq!(records.len(), 2);
 
     let first = &records[0];
@@ -86,7 +94,7 @@ fn every_record_has_the_documented_keys_in_the_documented_order() {
     let dir = tempfile::tempdir().unwrap();
 
     let records = logged(config(dir.path()), |_| warn!(code = 3, "careful"));
-    let text = fs::read_to_string(dir.path().join(ACTIVE_FILE_NAME)).unwrap();
+    let text = read_text(dir.path());
 
     let positions: Vec<usize> = [
         "\"ts\":",
@@ -176,7 +184,7 @@ fn the_home_directory_never_reaches_the_file() {
         error!(path = %path.display(), debug_path = ?path, "cannot read /home/ana/.config/termx");
     });
 
-    let text = fs::read_to_string(dir.path().join(ACTIVE_FILE_NAME)).unwrap();
+    let text = read_text(dir.path());
     assert!(!text.contains("/home/ana"), "{text}");
     assert!(text.contains("~/projects/termx/config.toml"), "{text}");
     assert!(text.contains("cannot read ~/.config/termx"), "{text}");
@@ -222,7 +230,8 @@ fn rotation_keeps_the_log_within_its_limits_while_logging() {
     config.retention = Retention {
         max_file_bytes: 4 * 1024,
         max_total_bytes: 16 * 1024,
-        max_age: Retention::DEFAULT_MAX_AGE,
+        min_files_kept: 0,
+        ..Retention::default()
     };
 
     let records = logged(config, |_| {
@@ -260,7 +269,8 @@ fn the_bundle_exported_from_a_live_logger_contains_its_records() {
 
     let mut archive = zip::ZipArchive::new(fs::File::open(&bundle).unwrap()).unwrap();
     assert!(archive.by_name("system-info.json").is_ok());
-    let log = std::io::read_to_string(archive.by_name("logs/termx.log").unwrap()).unwrap();
+    let name = format!("logs/{}", log_files(&log_dir).unwrap()[0].name);
+    let log = std::io::read_to_string(archive.by_name(&name).unwrap()).unwrap();
     assert!(log.contains("something broke"));
 }
 

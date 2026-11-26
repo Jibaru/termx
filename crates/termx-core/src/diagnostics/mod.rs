@@ -78,7 +78,7 @@ pub use self::panic::PANIC_TARGET;
 pub use self::rate_limit::{Decision, RateLimiter};
 pub use self::record::{MAX_VALUE_BYTES, TRUNCATION_MARKER};
 pub use self::redact::Redactor;
-pub use self::rotate::{ACTIVE_FILE_NAME, LogFile, Retention, log_files, prune};
+pub use self::rotate::{LogFile, Retention, is_log_file_name, log_files, prune};
 pub use self::system::SystemInfo;
 
 use self::layer::JsonLinesLayer;
@@ -231,11 +231,12 @@ impl Diagnostics {
     ///
     /// Fails when the log directory or file cannot be created.
     pub fn build(config: LogConfig) -> Result<(Self, tracing::Dispatch), DiagnosticsError> {
-        let file = RotatingFile::open(&config.dir, config.retention)
+        let run_id = new_run_id();
+        let file = RotatingFile::open(&config.dir, config.retention, &run_id)
             .map_err(|source| DiagnosticsError::io(&config.dir, source))?;
         let file: SharedFile = Arc::new(Mutex::new(file));
         let context = Arc::new(LineContext {
-            run_id: new_run_id(),
+            run_id,
             redactor: config.redactor,
         });
 
@@ -369,10 +370,7 @@ impl Write for FileWriter {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .flush()
+        Ok(())
     }
 }
 
