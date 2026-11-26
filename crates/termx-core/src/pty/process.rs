@@ -118,10 +118,17 @@ const KILL_GRACE: Duration = Duration::from_millis(250);
 /// is what a process exiting normally causes, and when the process is killed.
 /// The pause starts short so that those wake-ups, and short-lived commands,
 /// are followed by a few quick checks, then doubles up to the maximum.
+///
+/// The slow polling that remains is a backstop for the one case nothing
+/// announces: the process exits while something else, such as a background
+/// job it started, keeps the terminal open. It costs one `waitpid` per second
+/// and per terminal, and bounds the delay before such an exit is noticed to
+/// one second. Blocking in `wait` instead would remove it, but reaping could
+/// then no longer be serialised with `kill` (see [`ChildControl`]).
 #[cfg(unix)]
 const EXIT_POLL_MIN: Duration = Duration::from_millis(1);
 #[cfg(unix)]
-const EXIT_POLL_MAX: Duration = Duration::from_millis(250);
+const EXIT_POLL_MAX: Duration = Duration::from_secs(1);
 
 impl Pty {
     /// Opens a pseudo-terminal of the given size and starts `command` in it.
