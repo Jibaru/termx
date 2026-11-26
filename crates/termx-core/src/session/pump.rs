@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use super::batch::{BATCH_MAX_BYTES, Batcher};
 use super::flow::FlowControl;
 use super::{SessionId, SessionSink};
+use crate::diagnostics::tracing::warn;
 use crate::pty::{ExitStatus, Pty, PtyOutput, RecvTimeoutError};
 
 /// How often the exit status is looked for when the output of a process has
@@ -22,6 +23,26 @@ use crate::pty::{ExitStatus, Pty, PtyOutput, RecvTimeoutError};
 /// The status is normally published before the output ends, so this only
 /// matters for a process that closed its terminal and kept running.
 pub(crate) const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// How long a session may stay paused without receiving any
+/// acknowledgement before the bytes it is waiting for are written off.
+///
+/// A healthy frontend acknowledges within milliseconds, and a busy one
+/// within a fraction of a second, so five seconds without a single
+/// acknowledgement means that something is wrong: an acknowledgement was
+/// lost, or the frontend is stuck. Waiting for ever would freeze the
+/// terminal with no way out for the user.
+pub const STALL_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How many times in a row the outstanding bytes of a session are written
+/// off without any acknowledgement in between.
+///
+/// Each write-off lets about one high-water mark of output through, so a
+/// frontend that never acknowledges again receives a trickle (some 50 KiB
+/// per second) for a minute, about 3 MiB in all, and then nothing: a
+/// frontend that is dead although its channel looks alive must not be sent
+/// output without limit.
+pub const STALL_WRITE_OFFS_MAX: u32 = 12;
 
 /// Capacity given to the output buffer of the PTY of a session, in bytes.
 ///
@@ -104,6 +125,10 @@ pub(crate) struct Pump {
     /// When to look for the exit status again, once the output has ended
     /// without it.
     exit_check: Option<Instant>,
+    /// Since when the session has been paused without an acknowledgement.
+    stalled_since: Option<Instant>,
+    /// Write-offs since the last acknowledgement.
+    write_offs: u32,
 }
 
 impl Pump {
@@ -116,17 +141,67 @@ impl Pump {
             flow: FlowControl::default(),
             source_closed: false,
             exit_check: None,
+            stalled_since: None,
+            write_offs: 0,
         }
     }
 
-    /// Records that the frontend has processed `bytes` of output. Call
-    /// [`poll`](Self::poll) afterwards: the session may have resumed.
-    pub(crate) fn acknowledge(&mut self, bytes: u64) {
+    /// Records that the frontend has processed `bytes` of output at `now`.
+    /// Call [`poll`](Self::poll) afterwards: the session may have resumed.
+    pub(crate) fn acknowledge(&mut self, now: Instant, bytes: u64) {
         self.flow.acknowledge(bytes);
+        if bytes > 0 {
+            // The frontend is alive: the watchdog starts over.
+            self.write_offs = 0;
+            self.stalled_since = self.flow.is_paused().then_some(now);
+        }
+    }
+
+    /// The stall watchdog: resumes a session that has been paused for
+    /// [`STALL_TIMEOUT`] without any acknowledgement, by writing off what
+    /// it was waiting for. See the module documentation of `session`.
+    fn resume_if_stalled(&mut self, now: Instant) {
+        let Some(since) = self.stalled_since else {
+            return;
+        };
+        if !self.flow.is_paused()
+            || now.saturating_duration_since(since) < STALL_TIMEOUT
+            || self.write_offs >= STALL_WRITE_OFFS_MAX
+            || !self.sink.is_alive()
+        {
+            return;
+        }
+        if self.write_offs == 0 {
+            // Once per stall: the write-offs that follow are the same event.
+            warn!(
+                session_id = self.id.as_u64(),
+                unacknowledged = self.flow.unacknowledged(),
+                "the frontend stopped acknowledging output; delivering slowly without it"
+            );
+        }
+        self.write_offs += 1;
+        self.flow.write_off();
+        self.stalled_since = None;
+    }
+
+    /// Whether the watchdog can still resume this session by itself.
+    fn can_resume_by_itself(&self) -> bool {
+        self.write_offs < STALL_WRITE_OFFS_MAX && self.sink.is_alive()
     }
 
     /// Moves as much output as is allowed and due at `now`.
     pub(crate) fn poll(&mut self, now: Instant) -> PumpState {
+        self.resume_if_stalled(now);
+        let state = self.pump(now);
+        if !self.flow.is_paused() {
+            self.stalled_since = None;
+        } else if self.stalled_since.is_none() {
+            self.stalled_since = Some(now);
+        }
+        state
+    }
+
+    fn pump(&mut self, now: Instant) -> PumpState {
         loop {
             let mut progressed = false;
 
@@ -193,8 +268,12 @@ impl Pump {
             return self.exit_check;
         }
         if self.flow.is_paused() {
-            // Only an acknowledgement can let the pending output out.
-            return None;
+            // An acknowledgement lets the pending output out, or the
+            // watchdog when none comes.
+            return self
+                .stalled_since
+                .filter(|_| self.can_resume_by_itself())
+                .map(|since| since + STALL_TIMEOUT);
         }
         self.batcher.deadline()
     }
@@ -298,9 +377,17 @@ pub(crate) mod testing {
 
     /// A sink that records what it is told. Clones share the same record.
     #[derive(Clone, Default)]
-    pub(crate) struct RecordingSink(Arc<Mutex<Vec<Delivery>>>);
+    pub(crate) struct RecordingSink(
+        Arc<Mutex<Vec<Delivery>>>,
+        Arc<std::sync::atomic::AtomicBool>,
+    );
 
     impl RecordingSink {
+        /// Makes the sink report that its frontend is gone.
+        pub(crate) fn disconnect(&self) {
+            self.1.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+
         pub(crate) fn deliveries(&self) -> Vec<Delivery> {
             self.0
                 .lock()
@@ -348,6 +435,10 @@ pub(crate) mod testing {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .push(Delivery::Exited(session, status));
+        }
+
+        fn is_alive(&self) -> bool {
+            !self.1.load(std::sync::atomic::Ordering::SeqCst)
         }
     }
 }
@@ -398,7 +489,7 @@ mod tests {
         fn acknowledge_all_processed(&mut self, acknowledged: &mut u64) {
             let processed = self.sink.output().len() as u64;
             let due = (processed - *acknowledged) / ACK_BATCH_BYTES * ACK_BATCH_BYTES;
-            self.pump.acknowledge(due);
+            self.pump.acknowledge(self.now, due);
             *acknowledged += due;
         }
     }
@@ -556,7 +647,8 @@ mod tests {
             f.source.push(chunk.clone());
         }
 
-        for _ in 0..1_000 {
+        // Polled for a while, but for less than the stall watchdog allows.
+        for _ in 0..100 {
             f.poll();
             f.now += BOUNDARY_HOLD_MAX;
         }
@@ -570,20 +662,127 @@ mod tests {
             sent as u64 <= HIGH_WATERMARK_BYTES + BATCH_MAX_BYTES as u64,
             "the pump overshot the high-water mark by more than a batch: {sent} bytes"
         );
-        // What was not sent is mostly still in the source, where it
-        // throttles the process: the pump holds less than two batches.
-        let unread = f.source.unread();
-        let held = chunks * BATCH_MAX_BYTES - unread - sent;
-        assert!(held < 2 * BATCH_MAX_BYTES, "the pump holds {held} bytes");
-        assert!(unread > 0);
-        assert_eq!(f.pump.deadline(), None, "a paused pump must not spin");
+        // What was not sent is still in the source, where it throttles the
+        // process.
+        assert_eq!(f.source.unread(), chunks * BATCH_MAX_BYTES - sent);
+        // The only thing left to wait for is the watchdog: no spinning.
+        let paused_at = f.pump.deadline().expect("no watchdog deadline") - STALL_TIMEOUT;
+        assert!(paused_at <= f.now);
 
-        // Nothing moves, however long it lasts.
+        // A frontend that is gone is never resumed for: nothing moves,
+        // however long it lasts.
+        f.sink.disconnect();
+        assert_eq!(f.pump.deadline(), None, "a paused pump must not spin");
         let reads = f.source.reads();
         f.now += Duration::from_secs(3600);
         f.poll();
         assert_eq!(f.sink.output().len(), sent);
         assert_eq!(f.source.reads(), reads);
+    }
+
+    /// Fills a pump until it pauses and returns how much it sent.
+    fn pause(f: &mut Fixture) -> usize {
+        for _ in 0..256 {
+            f.source.push(vec![b'x'; BATCH_MAX_BYTES]);
+        }
+        f.poll();
+        f.now += BATCH_WINDOW;
+        f.poll();
+        assert!(f.sink.output().len() as u64 > HIGH_WATERMARK_BYTES);
+        f.sink.output().len()
+    }
+
+    #[test]
+    fn a_stalled_session_resumes_slowly_when_no_acknowledgement_comes() {
+        let mut f = fixture();
+        let sent = pause(&mut f);
+
+        // Nothing until the timeout...
+        f.now += STALL_TIMEOUT - MS * 10;
+        f.poll();
+        assert_eq!(f.sink.output().len(), sent);
+
+        // ...then about one more high-water mark, and a new wait.
+        f.poll_at_deadline();
+        f.now += BATCH_WINDOW;
+        f.poll();
+        let resumed = f.sink.output().len() - sent;
+        assert!(resumed as u64 > HIGH_WATERMARK_BYTES, "{resumed} bytes");
+        assert!(resumed as u64 <= HIGH_WATERMARK_BYTES + BATCH_MAX_BYTES as u64);
+        f.now += STALL_TIMEOUT / 2;
+        f.poll();
+        assert_eq!(f.sink.output().len(), sent + resumed, "it is a trickle");
+    }
+
+    #[test]
+    fn a_frontend_that_never_comes_back_is_given_up_on() {
+        let mut f = fixture();
+        let sent = pause(&mut f);
+
+        // An hour of silence.
+        for _ in 0..3600 {
+            f.now += Duration::from_secs(1);
+            f.poll();
+        }
+
+        // The trickle was bounded, and the pump no longer wakes up for it.
+        let trickled = (f.sink.output().len() - sent) as u64;
+        let most =
+            u64::from(STALL_WRITE_OFFS_MAX) * (HIGH_WATERMARK_BYTES + BATCH_MAX_BYTES as u64);
+        assert!(trickled > 0);
+        assert!(
+            trickled <= most,
+            "{trickled} bytes were sent unacknowledged"
+        );
+        assert_eq!(f.pump.deadline(), None);
+        assert!(f.source.unread() > 0, "the process is still held back");
+    }
+
+    #[test]
+    fn an_acknowledgement_ends_the_stall_and_resets_the_watchdog() {
+        let mut f = fixture();
+        pause(&mut f);
+        // Written off almost as often as allowed...
+        for _ in 0..STALL_WRITE_OFFS_MAX - 1 {
+            f.now += STALL_TIMEOUT;
+            f.poll();
+            f.now += BATCH_WINDOW;
+            f.poll();
+        }
+        let before = f.sink.output().len();
+
+        // ...when the frontend comes back to life.
+        f.pump.acknowledge(f.now, u64::MAX);
+        f.poll();
+        f.now += BATCH_WINDOW;
+        f.poll();
+        assert!(f.sink.output().len() > before, "normal flow resumed");
+
+        // Had the count not started over, this second stall would be the
+        // last write-off; instead the watchdog is fully armed again.
+        for _ in 0..3 {
+            f.now += STALL_TIMEOUT;
+            f.poll();
+            f.now += BATCH_WINDOW;
+            f.poll();
+        }
+        assert!(f.pump.deadline().is_some(), "the watchdog gave up early");
+    }
+
+    #[test]
+    fn an_acknowledgement_that_does_not_resume_restarts_the_timeout() {
+        let mut f = fixture();
+        let sent = pause(&mut f);
+
+        f.now += STALL_TIMEOUT - MS;
+        // Not enough to get below the low-water mark, but a sign of life.
+        f.pump.acknowledge(f.now, 1);
+        f.poll();
+        f.now += STALL_TIMEOUT - MS;
+        f.poll();
+
+        assert_eq!(f.sink.output().len(), sent, "written off too early");
+        assert_eq!(f.pump.deadline(), Some(f.now + MS));
     }
 
     #[test]
@@ -620,11 +819,11 @@ mod tests {
         assert!(sent > HIGH_WATERMARK_BYTES);
 
         // Not far enough below: still paused.
-        f.pump.acknowledge(sent - LOW_WATERMARK_BYTES);
+        f.pump.acknowledge(f.now, sent - LOW_WATERMARK_BYTES);
         f.poll();
         assert_eq!(f.sink.output().len() as u64, sent);
 
-        f.pump.acknowledge(1);
+        f.pump.acknowledge(f.now, 1);
         f.poll();
         assert!(f.sink.output().len() as u64 > sent, "the pump resumed");
     }
@@ -677,9 +876,10 @@ mod tests {
 
         assert_eq!(f.poll(), PumpState::Running);
         assert_eq!(f.sink.exit(), None, "output is still waiting");
-        assert_eq!(f.pump.deadline(), None);
+        // Nothing to do but wait for an acknowledgement, or the watchdog.
+        assert_eq!(f.pump.deadline(), Some(f.now + STALL_TIMEOUT));
 
-        f.pump.acknowledge(u64::MAX);
+        f.pump.acknowledge(f.now, u64::MAX);
         assert_eq!(f.poll(), PumpState::Finished);
         assert_eq!(f.sink.output().len(), 8 * BATCH_MAX_BYTES);
         assert!(matches!(

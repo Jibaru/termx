@@ -68,6 +68,13 @@ impl FlowControl {
         }
     }
 
+    /// Gives up on the acknowledgement of everything sent so far, as if it
+    /// had been acknowledged. See the stall watchdog of the pump.
+    pub(crate) fn write_off(&mut self) {
+        self.unacknowledged = 0;
+        self.paused = false;
+    }
+
     /// How many more bytes can be handed to the frontend before the session
     /// is paused. Zero while it is paused.
     pub(crate) fn credit(&self) -> usize {
@@ -84,7 +91,6 @@ impl FlowControl {
     }
 
     /// Bytes handed to the frontend and not acknowledged yet.
-    #[cfg(test)]
     pub(crate) fn unacknowledged(&self) -> u64 {
         self.unacknowledged
     }

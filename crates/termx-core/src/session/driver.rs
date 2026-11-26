@@ -58,7 +58,7 @@ pub(crate) fn run(events: &Receiver<Event>, mut finished: impl FnMut(SessionId))
             Ok(Event::Readable(id)) => due.push(id),
             Ok(Event::Acknowledge(id, bytes)) => {
                 if let Some(pump) = pumps.get_mut(&id) {
-                    pump.acknowledge(bytes);
+                    pump.acknowledge(now, bytes);
                     due.push(id);
                 }
             }

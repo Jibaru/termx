@@ -87,6 +87,16 @@
 //! the frontend, at most one batch in the pump, and the buffer of the PTY,
 //! which a session shrinks to [`PTY_BUFFER_BYTES`].
 //!
+//! **When acknowledgements stop.** A session that stays paused for
+//! [`STALL_TIMEOUT`] without a single acknowledgement, while its sink is
+//! alive, is not left stuck for ever: one warning is logged and the
+//! outstanding bytes are written off, which lets one more high-water mark of
+//! output through. This repeats at most [`STALL_WRITE_OFFS_MAX`] times in a
+//! row; any acknowledgement starts the count again. A frontend that lost an
+//! acknowledgement therefore recovers by itself, a frontend that is slow is
+//! fed at a trickle, and one that is truly dead costs a bounded amount of
+//! memory before its session stops for good.
+//!
 //! The pump never takes more from the PTY than it may pass on. That keeps
 //! the output still to come after the user interrupts a program that floods
 //! the terminal to about what was already on its way, instead of megabytes
@@ -114,7 +124,7 @@ mod pump;
 pub use batch::{BATCH_MAX_BYTES, BATCH_WINDOW, BOUNDARY_HOLD_MAX};
 pub use flow::{ACK_BATCH_BYTES, HIGH_WATERMARK_BYTES, LOW_WATERMARK_BYTES};
 pub use manager::{SHUTDOWN_CLOSE_WAIT, SessionManager, SessionOptions};
-pub use pump::PTY_BUFFER_BYTES;
+pub use pump::{PTY_BUFFER_BYTES, STALL_TIMEOUT, STALL_WRITE_OFFS_MAX};
 
 use crate::pty::ExitStatus;
 pub use crate::pty::SessionId;
@@ -144,4 +154,12 @@ pub trait SessionSink: Send + 'static {
     ///
     /// It is not called for a session that was closed or shut down.
     fn exited(&mut self, session: SessionId, status: ExitStatus);
+
+    /// Whether output can still reach the frontend. A sink that knows its
+    /// transport is gone returns `false`, which stops the session from
+    /// resuming on its own when acknowledgements stop coming (see
+    /// [`STALL_TIMEOUT`]): there is nobody to resume for.
+    fn is_alive(&self) -> bool {
+        true
+    }
 }
