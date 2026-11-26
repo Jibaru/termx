@@ -257,6 +257,11 @@ impl SessionSink for ChannelSink {
             ),
         }
     }
+
+    fn is_alive(&self) -> bool {
+        // A channel that failed belongs to a webview that is gone.
+        !self.delivery_failed
+    }
 }
 
 /// The build number of Windows, which xterm.js needs to know how the
