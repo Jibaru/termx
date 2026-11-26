@@ -92,7 +92,9 @@ pub fn log_files(dir: &Path) -> io::Result<Vec<LogFile>> {
         if !(active || rotated) {
             continue;
         }
-        let Ok(metadata) = entry.metadata() else {
+        // Not `entry.metadata()`: on Windows that comes from the directory
+        // listing, which lags behind for a file that is open for writing.
+        let Ok(metadata) = fs::metadata(entry.path()) else {
             continue;
         };
         if !metadata.is_file() {
