@@ -1,0 +1,411 @@
+{
+  "comment": "Examples of what the frontend and the Rust side exchange. Written by `TERMX_UPDATE_CONTRACT=1 cargo test -p termx-desktop contract`; do not edit by hand. See src-tauri/src/contract.rs.",
+  "deltas": [
+    {
+      "layout": {
+        "focused": 2,
+        "nextId": 6,
+        "root": {
+          "direction": "row",
+          "first": {
+            "id": 1,
+            "session": "s-claude",
+            "type": "pane"
+          },
+          "id": 3,
+          "ratio": 0.5,
+          "second": {
+            "direction": "column",
+            "first": {
+              "id": 2,
+              "session": "s-shell",
+              "type": "pane"
+            },
+            "id": 5,
+            "ratio": 0.5,
+            "second": {
+              "id": 4,
+              "session": null,
+              "type": "pane"
+            },
+            "type": "split"
+          },
+          "type": "split"
+        }
+      },
+      "projects": [
+        {
+          "key": "/work/app",
+          "kind": "git",
+          "name": "app",
+          "root": "/work/app"
+        }
+      ],
+      "recentFolders": [
+        "/work/app"
+      ],
+      "removed": [
+        "s-killed"
+      ],
+      "revision": 43,
+      "sessionOrder": [
+        "s-claude",
+        "s-shell"
+      ],
+      "sessions": [
+        {
+          "autoTitle": "Fix the login",
+          "claudeSessionId": "0b9d6f7e-3c1a-4f3e-9a55-2f6f1f0f8a10",
+          "command": null,
+          "createdAt": 1795716000000,
+          "cwd": "/work/app-review",
+          "git": {
+            "branch": "review",
+            "commit": null,
+            "worktree": "app-review"
+          },
+          "id": "s-claude",
+          "kind": "claude",
+          "lastActivityAt": 1795716005340,
+          "liveCwd": "/work/app-review/src",
+          "name": "Login work",
+          "project": {
+            "key": "/work/app",
+            "kind": "git",
+            "name": "app",
+            "root": "/work/app"
+          },
+          "state": {
+            "status": "running"
+          },
+          "terminalId": 7,
+          "title": "Login work",
+          "waitingSince": null
+        }
+      ]
+    },
+    {
+      "layout": null,
+      "projects": null,
+      "recentFolders": null,
+      "removed": [],
+      "revision": 44,
+      "sessionOrder": null,
+      "sessions": []
+    }
+  ],
+  "enums": {
+    "direction": [
+      "row",
+      "column"
+    ],
+    "edge": [
+      "left",
+      "right",
+      "top",
+      "bottom",
+      "center"
+    ],
+    "launchMode": [
+      "fresh",
+      "resume"
+    ],
+    "placement": [
+      "before",
+      "after"
+    ],
+    "projectKind": [
+      "git",
+      "folder"
+    ],
+    "sessionKind": [
+      "claude",
+      "shell",
+      "background"
+    ],
+    "sessionStatus": [
+      "dormant",
+      "starting",
+      "running",
+      "exited"
+    ]
+  },
+  "exitEvents": [
+    {
+      "code": 3,
+      "event": "exit",
+      "signal": null
+    },
+    {
+      "code": 113,
+      "event": "exit",
+      "failure": {
+        "kind": "claudeNotFound",
+        "message": "Claude Code is not installed, or your shell cannot find it: the `claude` command was not found. Install Claude Code, check that `claude` works in a terminal, and start the session again."
+      },
+      "signal": null
+    }
+  ],
+  "launchFailures": [
+    {
+      "kind": "claudeNotFound",
+      "message": "Claude Code is not installed, or your shell cannot find it: the `claude` command was not found. Install Claude Code, check that `claude` works in a terminal, and start the session again."
+    },
+    {
+      "kind": "folderMissing",
+      "message": "The folder of this session does not exist any more."
+    },
+    {
+      "kind": "invalidCommand",
+      "message": "This background session has no command to run."
+    },
+    {
+      "kind": "spawnFailed",
+      "message": "The session could not be started: too many open files."
+    }
+  ],
+  "persistence": [
+    {
+      "mode": "primary"
+    },
+    {
+      "mode": "secondary"
+    },
+    {
+      "mode": "disabled",
+      "reason": "the state file cannot be read"
+    },
+    {
+      "mode": "memory"
+    }
+  ],
+  "requests": {
+    "createSession": [
+      {
+        "kind": "shell"
+      },
+      {
+        "command": "pnpm dev",
+        "cwd": "/work/app",
+        "kind": "background",
+        "name": "dev server",
+        "show": false
+      }
+    ],
+    "startSession": [
+      {
+        "cols": 120,
+        "rows": 40
+      },
+      {
+        "cols": 80,
+        "mode": "resume",
+        "rows": 24
+      }
+    ]
+  },
+  "snapshot": {
+    "layout": {
+      "focused": 2,
+      "nextId": 6,
+      "root": {
+        "direction": "row",
+        "first": {
+          "id": 1,
+          "session": "s-claude",
+          "type": "pane"
+        },
+        "id": 3,
+        "ratio": 0.5,
+        "second": {
+          "direction": "column",
+          "first": {
+            "id": 2,
+            "session": "s-shell",
+            "type": "pane"
+          },
+          "id": 5,
+          "ratio": 0.5,
+          "second": {
+            "id": 4,
+            "session": null,
+            "type": "pane"
+          },
+          "type": "split"
+        },
+        "type": "split"
+      }
+    },
+    "persistence": {
+      "mode": "primary"
+    },
+    "projects": [
+      {
+        "key": "/work/app",
+        "kind": "git",
+        "name": "app",
+        "root": "/work/app"
+      },
+      {
+        "key": "/work/notes",
+        "kind": "folder",
+        "name": "notes",
+        "root": "/work/notes"
+      }
+    ],
+    "recentFolders": [
+      "/work/app",
+      "/work/notes"
+    ],
+    "revision": 42,
+    "sessions": [
+      {
+        "autoTitle": "Fix the login",
+        "claudeSessionId": "0b9d6f7e-3c1a-4f3e-9a55-2f6f1f0f8a10",
+        "command": null,
+        "createdAt": 1795716000000,
+        "cwd": "/work/app-review",
+        "git": {
+          "branch": "review",
+          "commit": null,
+          "worktree": "app-review"
+        },
+        "id": "s-claude",
+        "kind": "claude",
+        "lastActivityAt": 1795716005340,
+        "liveCwd": "/work/app-review/src",
+        "name": "Login work",
+        "project": {
+          "key": "/work/app",
+          "kind": "git",
+          "name": "app",
+          "root": "/work/app"
+        },
+        "state": {
+          "status": "running"
+        },
+        "terminalId": 7,
+        "title": "Login work",
+        "waitingSince": null
+      },
+      {
+        "autoTitle": null,
+        "claudeSessionId": null,
+        "command": null,
+        "createdAt": 1795700000000,
+        "cwd": "/work/notes",
+        "git": null,
+        "id": "s-shell",
+        "kind": "shell",
+        "lastActivityAt": 1795700100000,
+        "liveCwd": null,
+        "name": null,
+        "project": {
+          "key": "/work/notes",
+          "kind": "folder",
+          "name": "notes",
+          "root": "/work/notes"
+        },
+        "state": {
+          "status": "dormant"
+        },
+        "terminalId": null,
+        "title": "Shell",
+        "waitingSince": null
+      },
+      {
+        "autoTitle": null,
+        "claudeSessionId": null,
+        "command": "ngrok http 3000",
+        "createdAt": 1795700000000,
+        "cwd": "/work/app",
+        "git": {
+          "branch": null,
+          "commit": "0123456",
+          "worktree": null
+        },
+        "id": "s-tunnel",
+        "kind": "background",
+        "lastActivityAt": 1795700100000,
+        "liveCwd": null,
+        "name": null,
+        "project": {
+          "key": "/work/app",
+          "kind": "git",
+          "name": "app",
+          "root": "/work/app"
+        },
+        "state": {
+          "status": "starting"
+        },
+        "terminalId": null,
+        "title": "ngrok http 3000",
+        "waitingSince": null
+      },
+      {
+        "autoTitle": null,
+        "claudeSessionId": null,
+        "command": null,
+        "createdAt": 1795700000000,
+        "cwd": "/work/notes",
+        "git": null,
+        "id": "s-failed",
+        "kind": "claude",
+        "lastActivityAt": 1795700100000,
+        "liveCwd": null,
+        "name": null,
+        "project": {
+          "key": "/work/notes",
+          "kind": "folder",
+          "name": "notes",
+          "root": "/work/notes"
+        },
+        "state": {
+          "code": 113,
+          "failure": {
+            "kind": "claudeNotFound",
+            "message": "Claude Code is not installed, or your shell cannot find it: the `claude` command was not found. Install Claude Code, check that `claude` works in a terminal, and start the session again."
+          },
+          "signal": null,
+          "status": "exited"
+        },
+        "terminalId": null,
+        "title": "Claude Code",
+        "waitingSince": null
+      },
+      {
+        "autoTitle": null,
+        "claudeSessionId": null,
+        "command": null,
+        "createdAt": 1795700000000,
+        "cwd": "/work/notes",
+        "git": null,
+        "id": "s-killed",
+        "kind": "shell",
+        "lastActivityAt": 1795700100000,
+        "liveCwd": null,
+        "name": null,
+        "project": {
+          "key": "/work/notes",
+          "kind": "folder",
+          "name": "notes",
+          "root": "/work/notes"
+        },
+        "state": {
+          "code": null,
+          "failure": null,
+          "signal": "Hangup",
+          "status": "exited"
+        },
+        "terminalId": null,
+        "title": "Shell",
+        "waitingSince": null
+      }
+    ]
+  },
+  "startedSession": {
+    "ackBatchBytes": 8192,
+    "terminal": 7,
+    "windowsBuildNumber": 22631
+  }
+}

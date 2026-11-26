@@ -1,0 +1,327 @@
+import { describe, expect, it } from "vitest";
+
+import contract from "./ipc.contract.json";
+import {
+  applyWorkspaceDelta,
+  type GitInfo,
+  LAUNCH_FAILURE_KINDS,
+  type LaunchFailure,
+  type LaunchMode,
+  type Layout,
+  type LayoutNode,
+  type NewSession,
+  type PaneEdge,
+  type PersistenceMode,
+  type Project,
+  type Session,
+  SESSION_KINDS,
+  SESSION_STATUSES,
+  type SessionExit,
+  type SessionKind,
+  type SessionState,
+  type SplitDirection,
+  type SplitPlacement,
+  type StartedSession,
+  type StartSessionOptions,
+  type WorkspaceDelta,
+  type WorkspaceSnapshot,
+} from "./ipc";
+
+/**
+ * Guards the types of `ipc.ts` against the Rust side.
+ *
+ * `ipc.contract.json` holds one example of everything the two sides
+ * exchange. A Rust test builds it from the real types and fails when the
+ * file differs (src-tauri/src/contract.rs). This file checks the same
+ * examples against the TypeScript types:
+ *
+ * - The compiler makes sure each list of keys below names exactly the
+ *   fields of its type (`satisfies Record<keyof T, true>`), and each list
+ *   of values exactly the members of its union (`Exhaustive`).
+ * - The tests make sure the examples have exactly those keys and values.
+ *
+ * So a field or a value that is added, removed or renamed on one side only
+ * fails here or there.
+ */
+
+/** `true` only if the tuple type `Listed` names every member of `Union`. */
+type Exhaustive<Union, Listed extends readonly Union[]> = [Union] extends [Listed[number]]
+  ? true
+  : never;
+
+const SESSION_KEYS = {
+  id: true,
+  kind: true,
+  cwd: true,
+  liveCwd: true,
+  command: true,
+  title: true,
+  name: true,
+  autoTitle: true,
+  project: true,
+  git: true,
+  state: true,
+  terminalId: true,
+  createdAt: true,
+  lastActivityAt: true,
+  waitingSince: true,
+  claudeSessionId: true,
+} satisfies Record<keyof Session, true>;
+
+const PROJECT_KEYS = {
+  key: true,
+  name: true,
+  root: true,
+  kind: true,
+} satisfies Record<keyof Project, true>;
+
+const GIT_KEYS = {
+  branch: true,
+  commit: true,
+  worktree: true,
+} satisfies Record<keyof GitInfo, true>;
+
+const EXITED_KEYS = {
+  status: true,
+  code: true,
+  signal: true,
+  failure: true,
+} satisfies Record<keyof Extract<SessionState, { status: "exited" }>, true>;
+
+const FAILURE_KEYS = {
+  kind: true,
+  message: true,
+} satisfies Record<keyof LaunchFailure, true>;
+
+const LAYOUT_KEYS = {
+  root: true,
+  focused: true,
+  nextId: true,
+} satisfies Record<keyof Layout, true>;
+
+const PANE_KEYS = {
+  type: true,
+  id: true,
+  session: true,
+} satisfies Record<keyof Extract<LayoutNode, { type: "pane" }>, true>;
+
+const SPLIT_KEYS = {
+  type: true,
+  id: true,
+  direction: true,
+  ratio: true,
+  first: true,
+  second: true,
+} satisfies Record<keyof Extract<LayoutNode, { type: "split" }>, true>;
+
+const SNAPSHOT_KEYS = {
+  revision: true,
+  sessions: true,
+  projects: true,
+  layout: true,
+  recentFolders: true,
+  persistence: true,
+} satisfies Record<keyof WorkspaceSnapshot, true>;
+
+const DELTA_KEYS = {
+  revision: true,
+  sessions: true,
+  removed: true,
+  sessionOrder: true,
+  projects: true,
+  layout: true,
+  recentFolders: true,
+} satisfies Record<keyof WorkspaceDelta, true>;
+
+const STARTED_KEYS = {
+  terminal: true,
+  ackBatchBytes: true,
+  windowsBuildNumber: true,
+} satisfies Record<keyof StartedSession, true>;
+
+const EXIT_KEYS = {
+  code: true,
+  signal: true,
+  failure: true,
+} satisfies Record<keyof SessionExit, true>;
+
+const PROJECT_KINDS = ["git", "folder"] as const satisfies readonly Project["kind"][];
+const LAUNCH_MODES = ["fresh", "resume"] as const satisfies readonly LaunchMode[];
+const DIRECTIONS = ["row", "column"] as const satisfies readonly SplitDirection[];
+const PLACEMENTS = ["before", "after"] as const satisfies readonly SplitPlacement[];
+const EDGES = ["left", "right", "top", "bottom", "center"] as const satisfies readonly PaneEdge[];
+const PERSISTENCE_MODES = [
+  "primary",
+  "secondary",
+  "disabled",
+  "memory",
+] as const satisfies readonly PersistenceMode["mode"][];
+
+// Each list names every member of its union, or this does not compile.
+export const EXHAUSTIVE: [
+  Exhaustive<SessionKind, typeof SESSION_KINDS>,
+  Exhaustive<SessionState["status"], typeof SESSION_STATUSES>,
+  Exhaustive<LaunchFailure["kind"], typeof LAUNCH_FAILURE_KINDS>,
+  Exhaustive<Project["kind"], typeof PROJECT_KINDS>,
+  Exhaustive<LaunchMode, typeof LAUNCH_MODES>,
+  Exhaustive<SplitDirection, typeof DIRECTIONS>,
+  Exhaustive<SplitPlacement, typeof PLACEMENTS>,
+  Exhaustive<PaneEdge, typeof EDGES>,
+  Exhaustive<PersistenceMode["mode"], typeof PERSISTENCE_MODES>,
+] = [true, true, true, true, true, true, true, true, true];
+
+type Json = Record<string, unknown>;
+
+function keysOf(value: unknown): string[] {
+  return Object.keys(value as Json).sort();
+}
+
+function expectKeys(value: unknown, keys: Record<string, true>): void {
+  expect(keysOf(value)).toEqual(Object.keys(keys).sort());
+}
+
+function expectSession(value: unknown): void {
+  const session = value as Json;
+  expectKeys(session, SESSION_KEYS);
+  expectKeys(session.project, PROJECT_KEYS);
+  if (session.git !== null) expectKeys(session.git, GIT_KEYS);
+  const state = session.state as Json;
+  expect(SESSION_STATUSES).toContain(state.status);
+  if (state.status === "exited") {
+    expectKeys(state, EXITED_KEYS);
+    if (state.failure !== null) expectFailure(state.failure);
+  } else {
+    expect(keysOf(state)).toEqual(["status"]);
+  }
+  expect(SESSION_KINDS).toContain(session.kind);
+}
+
+function expectFailure(value: unknown): void {
+  expectKeys(value, FAILURE_KEYS);
+  expect(LAUNCH_FAILURE_KINDS).toContain((value as Json).kind);
+}
+
+function expectLayout(value: unknown): void {
+  expectKeys(value, LAYOUT_KEYS);
+  const visit = (node: Json): void => {
+    if (node.type === "pane") {
+      expectKeys(node, PANE_KEYS);
+    } else {
+      expect(node.type).toBe("split");
+      expectKeys(node, SPLIT_KEYS);
+      expect(DIRECTIONS).toContain(node.direction);
+      visit(node.first as Json);
+      visit(node.second as Json);
+    }
+  };
+  visit((value as Json).root as Json);
+}
+
+describe("the contract with the Rust side", () => {
+  it("has a snapshot with the fields of WorkspaceSnapshot", () => {
+    const snapshot = contract.snapshot;
+
+    expectKeys(snapshot, SNAPSHOT_KEYS);
+    expect(snapshot.sessions.length).toBeGreaterThan(0);
+    snapshot.sessions.forEach(expectSession);
+    snapshot.projects.forEach((project) => {
+      expectKeys(project, PROJECT_KEYS);
+      expect(PROJECT_KINDS).toContain(project.kind);
+    });
+    expectLayout(snapshot.layout);
+    // The examples cover every state, kind and nullable field.
+    expect(new Set(snapshot.sessions.map((session) => session.state.status))).toEqual(
+      new Set(SESSION_STATUSES),
+    );
+    expect(new Set(snapshot.sessions.map((session) => session.kind))).toEqual(
+      new Set(SESSION_KINDS),
+    );
+    expect(snapshot.sessions.some((session) => session.git === null)).toBe(true);
+    expect(snapshot.sessions.some((session) => session.git !== null)).toBe(true);
+  });
+
+  it("has deltas with the fields of WorkspaceDelta, set or null", () => {
+    const [full, empty] = contract.deltas;
+
+    for (const delta of contract.deltas) expectKeys(delta, DELTA_KEYS);
+    full?.sessions.forEach(expectSession);
+    expectLayout(full?.layout);
+    full?.projects?.forEach((project) => {
+      expectKeys(project, PROJECT_KEYS);
+    });
+    expect(empty).toMatchObject({
+      sessions: [],
+      removed: [],
+      sessionOrder: null,
+      projects: null,
+      layout: null,
+      recentFolders: null,
+    });
+  });
+
+  it("can be applied as the types say", () => {
+    // The cast is the claim under test: the checks above are what back it.
+    const snapshot = contract.snapshot as unknown as WorkspaceSnapshot;
+    const [full, empty] = contract.deltas as unknown as [WorkspaceDelta, WorkspaceDelta];
+
+    const after = applyWorkspaceDelta(snapshot, full);
+
+    expect(after.revision).toBe(full.revision);
+    expect(after.sessions.map((session) => session.id)).toEqual(full.sessionOrder);
+    expect(after.layout).toEqual(full.layout);
+    expect(applyWorkspaceDelta(after, empty).sessions).toEqual(after.sessions);
+  });
+
+  it("lists the values of every enumeration", () => {
+    expect(contract.enums).toEqual({
+      sessionKind: SESSION_KINDS,
+      sessionStatus: SESSION_STATUSES,
+      projectKind: PROJECT_KINDS,
+      launchMode: LAUNCH_MODES,
+      direction: DIRECTIONS,
+      placement: PLACEMENTS,
+      edge: EDGES,
+    });
+    expect(contract.persistence.map((persistence) => persistence.mode)).toEqual(PERSISTENCE_MODES);
+    expect(contract.persistence.map(keysOf)).toEqual([
+      ["mode"],
+      ["mode"],
+      ["mode", "reason"],
+      ["mode"],
+    ]);
+    contract.launchFailures.forEach(expectFailure);
+    expect(contract.launchFailures.map((failure) => failure.kind)).toEqual(LAUNCH_FAILURE_KINDS);
+  });
+
+  it("describes a started session and the exit of one", () => {
+    expectKeys(contract.startedSession, STARTED_KEYS);
+
+    const [plain, failed] = contract.exitEvents as Json[];
+    // An ordinary exit leaves `failure` out; `startSession` turns that
+    // into `null`.
+    expect(keysOf(plain)).toEqual(["code", "event", "signal"]);
+    expect(keysOf(failed)).toEqual(["event", ...Object.keys(EXIT_KEYS)].sort());
+    expect(failed?.event).toBe("exit");
+    expectFailure(failed?.failure);
+  });
+
+  it("sends requests the Rust side reads as intended", () => {
+    // Typed here, and read by the Rust test: both sides agree on them.
+    const createSession: NewSession[] = [
+      { kind: "shell" },
+      {
+        kind: "background",
+        cwd: "/work/app",
+        command: "pnpm dev",
+        name: "dev server",
+        show: false,
+      },
+    ];
+    const startSession: StartSessionOptions[] = [
+      { cols: 120, rows: 40 },
+      { mode: "resume", cols: 80, rows: 24 },
+    ];
+
+    expect(contract.requests).toEqual({ createSession, startSession });
+  });
+});

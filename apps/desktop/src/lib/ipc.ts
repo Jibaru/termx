@@ -108,7 +108,9 @@ export function exportDiagnostics(): Promise<ExportedBundle> {
 // --- The workspace ---------------------------------------------------------
 //
 // The types below mirror what the Rust side sends
-// (`termx_core::workspace`): change both sides together.
+// (`termx_core::workspace`). `ipc.contract.json` holds one of each, written
+// by a Rust test, and `ipc.contract.test.ts` checks the types against it:
+// change both sides together.
 
 /**
  * Identifies a session for its whole life, including across restarts of
