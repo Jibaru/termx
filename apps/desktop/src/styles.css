@@ -45,48 +45,80 @@ body {
 }
 
 .sidebar {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
   background-color: var(--color-surface);
   border-right: 1px solid var(--color-border);
 }
 
-.main-pane {
+.sidebar-sessions {
+  flex: 1;
+  min-height: 0;
+}
+
+.sidebar-footer {
   display: flex;
   flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
+  gap: 2px;
+  padding: 8px 12px 10px;
+  border-top: 1px solid var(--color-border);
+}
+
+.main-pane {
+  display: flex;
   min-width: 0;
+  min-height: 0;
   background-color: var(--color-bg);
+}
+
+/* The pane of a terminal. The padding is on the element of xterm.js, where
+   its fit addon expects it; the pane itself must have none, or the terminal
+   would be measured larger than the room it has. */
+.terminal-host {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background-color: var(--terminal-background, var(--color-bg));
+}
+
+.terminal-host .xterm {
+  height: 100%;
+  padding: var(--terminal-padding-y, 4px) var(--terminal-padding-x, 6px);
+}
+
+/* xterm.js paints this layer black, and it shows through the padding. */
+.terminal-host .xterm .xterm-viewport {
+  background-color: var(--terminal-background, var(--color-bg));
 }
 
 .app-name {
   margin: 0;
   font-family: var(--font-mono);
-  font-size: 32px;
+  font-size: 13px;
   font-weight: 600;
-  letter-spacing: -0.02em;
 }
 
 .core-version {
   margin: 0;
   color: var(--color-text-muted);
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: 11px;
 }
 
 .diagnostics-actions {
   display: flex;
   flex-direction: column;
-  align-items: center;
   gap: 4px;
   max-width: 100%;
-  margin-top: 8px;
-  padding: 0 16px;
+  margin-top: 4px;
 }
 
 .diagnostics-buttons {
   display: flex;
-  gap: 16px;
+  flex-wrap: wrap;
+  gap: 4px 12px;
 }
 
 .link-button {
@@ -116,7 +148,6 @@ body {
   color: var(--color-text-muted);
   font-size: 12px;
   overflow-wrap: anywhere;
-  text-align: center;
   user-select: text;
 }
 

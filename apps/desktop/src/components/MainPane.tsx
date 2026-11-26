@@ -1,28 +1,16 @@
-import { DiagnosticsActions } from "./DiagnosticsActions";
-import { type CoreVersionState, useCoreVersion } from "../lib/useCoreVersion";
+import type { TerminalController } from "../terminal/TerminalController";
+import { TerminalView } from "./TerminalView";
 
-function describeCoreVersion(state: CoreVersionState): string {
-  switch (state.status) {
-    case "loading":
-      return "core …";
-    case "ready":
-      return `core v${state.version}`;
-    case "error":
-      return "core version unavailable";
-  }
+interface MainPaneProps {
+  /** The terminal on screen, once there is one. */
+  controller: TerminalController | undefined;
 }
 
-/** Main region. It will host the terminal view; for now it is a placeholder. */
-export function MainPane() {
-  const coreVersion = useCoreVersion();
-
+/** Main region: the active terminal. */
+export function MainPane({ controller }: MainPaneProps) {
   return (
-    <main className="main-pane">
-      <h1 className="app-name">termx</h1>
-      <p className="core-version" data-status={coreVersion.status}>
-        {describeCoreVersion(coreVersion)}
-      </p>
-      <DiagnosticsActions />
+    <main className="main-pane" aria-label="Terminal">
+      {controller && <TerminalView controller={controller} />}
     </main>
   );
 }

@@ -1,4 +1,6 @@
-import { invoke, type InvokeArgs } from "@tauri-apps/api/core";
+import { Channel, invoke, type InvokeArgs } from "@tauri-apps/api/core";
+import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
+import { openUrl } from "@tauri-apps/plugin-opener";
 
 import { LogLimiter, type LogLimits } from "./logLimiter";
 import { describeIpcFailure } from "./logSafe";
@@ -101,6 +103,142 @@ export function openLogFolder(): Promise<void> {
  */
 export function exportDiagnostics(): Promise<ExportedBundle> {
   return call<ExportedBundle>("export_diagnostics");
+}
+
+/** What a new terminal session runs. Mirrors `CreateSessionRequest` in Rust. */
+export interface CreateSessionOptions {
+  /** The program to run. The user's login shell when omitted. */
+  program?: string;
+  /** Arguments of `program`. */
+  args?: string[];
+  /** The working directory. The home directory when omitted. */
+  cwd?: string;
+  /** Width of the terminal, in columns. */
+  cols: number;
+  /** Height of the terminal, in rows. */
+  rows: number;
+}
+
+/** A session that was started. Mirrors `CreatedSession` in Rust. */
+export interface CreatedSession {
+  /** Identifier to pass to the other session functions. */
+  id: number;
+  /**
+   * How many processed bytes to accumulate before acknowledging them with
+   * `ackSession`.
+   */
+  ackBatchBytes: number;
+  /** The build number of Windows, or `null` on other systems. */
+  windowsBuildNumber: number | null;
+}
+
+/** How the process of a session ended. */
+export interface SessionExit {
+  /** The exit code, or `null` if a signal ended the process. */
+  code: number | null;
+  /** Description of the signal that ended the process, if any. */
+  signal: string | null;
+}
+
+/** Receives what a session produces. */
+export interface SessionHandlers {
+  /**
+   * A batch of output, exactly as the process wrote it. Pass it to the
+   * terminal emulator and acknowledge its length with `ackSession` once it
+   * was processed. Never log it.
+   */
+  onOutput: (bytes: Uint8Array) => void;
+  /** The process has exited. Nothing follows. */
+  onExit: (exit: SessionExit) => void;
+}
+
+/** A JSON message of the session channel. Mirrors `SessionEvent` in Rust. */
+type SessionEvent = { event: "exit" } & SessionExit;
+
+/**
+ * What arrives on the channel of a session: output as raw bytes, events as
+ * JSON. The bytes are an `ArrayBuffer`, except through the fallback
+ * transport Tauri uses when the webview cannot fetch from the custom
+ * protocol, which delivers an array of numbers.
+ */
+type SessionMessage = ArrayBuffer | number[] | SessionEvent;
+
+function isSessionEvent(message: SessionMessage): message is SessionEvent {
+  return !Array.isArray(message) && "event" in message;
+}
+
+/**
+ * Starts a terminal session and resolves with its identifier.
+ *
+ * Output can reach `handlers.onOutput`, and even the exit `handlers.onExit`,
+ * before the promise resolves: a process may print, or end, at once. The
+ * handlers are called in the order things happened.
+ */
+export function createSession(
+  options: CreateSessionOptions,
+  handlers: SessionHandlers,
+): Promise<CreatedSession> {
+  const onEvent = new Channel<SessionMessage>();
+  onEvent.onmessage = (message) => {
+    if (isSessionEvent(message)) {
+      handlers.onExit({ code: message.code, signal: message.signal });
+    } else {
+      handlers.onOutput(
+        Array.isArray(message) ? Uint8Array.from(message) : new Uint8Array(message),
+      );
+    }
+  };
+  return call<CreatedSession>("session_create", { request: options, onEvent });
+}
+
+/**
+ * Sends input to a session, as if it had been typed.
+ *
+ * `data` is text. With `binary`, each of its characters stands for one byte
+ * instead, which is how xterm.js reports input that is not text (`onBinary`).
+ *
+ * Wait for the promise before sending the next input of the same session:
+ * that is what keeps input in order.
+ */
+export function writeSession(id: number, data: string, binary = false): Promise<void> {
+  return call("session_write", { id, data, binary });
+}
+
+/** Changes the size of the terminal of a session. */
+export function resizeSession(id: number, cols: number, rows: number): Promise<void> {
+  return call("session_resize", { id, cols, rows });
+}
+
+/**
+ * Tells the session that `bytes` of its output were processed. A session
+ * whose output is not acknowledged is held back, so that a program printing
+ * faster than the terminal can draw does not fill the memory.
+ */
+export function ackSession(id: number, bytes: number): Promise<void> {
+  return call("session_ack", { id, bytes });
+}
+
+/** Closes a session, killing its process. */
+export function closeSession(id: number): Promise<void> {
+  return call("session_close", { id });
+}
+
+/**
+ * Opens a link in the system browser. Only `http` and `https` links are
+ * opened: the Rust side refuses everything else.
+ */
+export function openExternalUrl(url: string): Promise<void> {
+  return openUrl(url);
+}
+
+/** The text on the system clipboard. */
+export function readClipboardText(): Promise<string> {
+  return readText();
+}
+
+/** Puts `text` on the system clipboard. */
+export function writeClipboardText(text: string): Promise<void> {
+  return writeText(text);
 }
 
 /** Whether a rejected call carries the `CommandError` of a Rust command. */
