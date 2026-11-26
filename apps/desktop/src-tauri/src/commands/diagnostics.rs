@@ -65,10 +65,14 @@ pub struct ExportedBundle {
 /// limited. The frontend ignores its result: a logging problem must never
 /// cause another error in the interface.
 ///
+/// It is an asynchronous command so that it runs on a worker thread: a
+/// synchronous one runs on the main thread, where waiting for the log file
+/// would freeze the interface.
+///
 /// # Errors
 ///
 /// Only fails if recording the event panicked.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn log_frontend_event(
     state: State<'_, DiagnosticsState>,
     event: FrontendEvent,
