@@ -1,0 +1,75 @@
+name: Pull request
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize, labeled, unlabeled]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  title:
+    name: Conventional pull request title
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    steps:
+      - name: Check the pull request title
+        uses: amannn/action-semantic-pull-request@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  commits:
+    name: Conventional commits
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # Rules come from commitlint.config.mjs.
+      - name: Check the commit messages
+        uses: wagoid/commitlint-github-action@v6
+
+  change-file:
+    name: Change file
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+        with:
+          # The full history is needed to compare against the base branch.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check that the pull request adds a change file when it needs one
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          SKIP_LABEL_SET: ${{ contains(github.event.pull_request.labels.*.name, 'no-changelog') }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: .github/scripts/check-change-file.sh
+
+      # knope-dev/action publishes no major version tag, so it is pinned to an
+      # exact release.
+      - name: Install Knope
+        uses: knope-dev/action@v2.1.2
+        with:
+          version: 0.24.0
+
+      - name: Validate the Knope configuration
+        run: knope --validate
+
+      # Fails when a change file is malformed or the versioned files disagree.
+      - name: Dry-run the release
+        if: hashFiles('.changeset/*.md') != ''
+        run: knope prepare-release --dry-run
