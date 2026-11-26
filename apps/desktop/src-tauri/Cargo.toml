@@ -1,0 +1,23 @@
+[package]
+name = "termx-desktop"
+description = "termx desktop application"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+# A distinct library name avoids an output file name clash with the binary on
+# Windows.
+name = "termx_desktop_lib"
+
+[build-dependencies]
+tauri-build = { version = "2.7.6", features = [] }
+
+[dependencies]
+tauri = { version = "2.12.7", features = [] }
+termx-core = { workspace = true }
