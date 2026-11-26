@@ -82,6 +82,18 @@ impl ExitStatus {
         }
     }
 
+    /// The status of a process that exited with `code`.
+    ///
+    /// Statuses normally come from a [`Pty`](super::Pty); this is for code
+    /// that reacts to one and wants to be tested without a process.
+    #[must_use]
+    pub const fn from_code(code: u32) -> Self {
+        Self {
+            code: Some(code),
+            signal: None,
+        }
+    }
+
     /// Returns `true` if the process exited with code 0.
     #[must_use]
     pub fn success(&self) -> bool {

@@ -5,13 +5,24 @@
 //! run. This module is the layer above, and does not depend on a user
 //! interface.
 //!
+//! - [`Session`], [`SessionKind`], [`SessionState`]: the model of a
+//!   session.
+//! - [`launch`]: what to run for each kind of session, through the user's
+//!   shell so that it has the user's environment.
 //! - [`project`]: which project a folder belongs to, and its Git branch.
 
+pub mod launch;
+mod model;
 pub mod project;
 
+pub use launch::{LaunchFailure, LaunchMode, Launcher};
+pub use model::{
+    InvalidSessionKey, MAX_CLAUDE_SESSION_ID_BYTES, MAX_COMMAND_BYTES, MAX_TITLE_CHARS, Session,
+    SessionKey, SessionKind, SessionState, clean_title, default_title, now_ms,
+};
 pub use project::{GitInfo, Project, ProjectKind};
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Serializer;
 
@@ -19,4 +30,15 @@ use serde::Serializer;
 /// failing: a frontend must always get its sessions.
 fn lossy_path<S: Serializer>(path: &Path, serializer: S) -> Result<S::Ok, S::Error> {
     serializer.serialize_str(&path.to_string_lossy())
+}
+
+/// [`lossy_path`] for an optional path.
+fn lossy_path_option<S: Serializer>(
+    path: &Option<PathBuf>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    match path {
+        Some(path) => serializer.serialize_some(&*path.to_string_lossy()),
+        None => serializer.serialize_none(),
+    }
 }
