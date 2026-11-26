@@ -8,32 +8,47 @@
 //!
 //! # What is replaced
 //!
-//! 1. **The home directory of the current user becomes `~`**, in any of the
-//!    spellings it is known to take: with `/`, `\`, doubled backslashes (as
-//!    printed by `{:?}`) or mixed separators; percent-encoded in whole or in
-//!    part, as in URLs (`/Users/ana%20maria`, `C%3A/Users/Ana`); as seen
-//!    from WSL (`/mnt/c/Users/Ana`); and in any letter case on Windows and
-//!    macOS, whose file systems ignore case.
+//! 1. **The home directory of the current user becomes `~`**, wherever it
+//!    appears, in the spellings it is known to take: with `/`, `\`, any
+//!    number of backslashes in a row (as `{:?}` and JSON print them) or mixed
+//!    separators; percent-encoded in whole or in part, once or twice
+//!    (`/Users/ana%20maria`, `C%3A/Users/Ana`, `%252Fhome%252Fana`); as seen
+//!    from WSL (`/mnt/c/Users/Ana`); with accented letters composed or
+//!    decomposed; and in any letter case on Windows and macOS, whose file
+//!    systems ignore case.
 //! 2. **Any other path that has the shape of a home directory keeps its
 //!    shape but loses the name**: `/Users/<user>`, `/home/<user>`,
 //!    `C:\Users\<user>`, `/mnt/c/Users/<user>`. This covers other accounts
 //!    and the home directory of the machine a binary was built on, which
-//!    shows up in backtraces. The name ends at the next separator, quote,
-//!    whitespace or bracket, so a name with spaces is only cut at the first
-//!    space unless it is the current user's.
+//!    shows up in backtraces. To leave things like `src/home/Home.tsx` and
+//!    `/api/users/list` alone, the path must start where a path can start
+//!    (the beginning of the text, or after white space, a quote, a bracket,
+//!    `=`, `:`, `,`, `;` or `file://`), `/home/` and `/Users/` must be
+//!    spelled exactly like that, and the Windows form needs a drive. The
+//!    name ends at the next separator, quote, white space or bracket, so a
+//!    name with spaces is only cut at the first space unless it is the
+//!    current user's.
 //! 3. **The bare name of the current user becomes `<user>`** when it stands
-//!    as a whole word, in any letter case. To avoid mangling ordinary text
-//!    this only applies to names of at least [`MIN_USER_NAME_CHARS`]
-//!    characters that are not generic account names or common log words
-//!    (`admin`, `user`, `root`, `error`, ...).
+//!    as a whole word, in any letter case, percent-encoded or not. To avoid
+//!    garbling ordinary text:
+//!    - names shorter than [`MIN_USER_NAME_CHARS`] characters, generic
+//!      account names and common words (`admin`, `node`, `command`, `code`,
+//!      ...; see [`COMMON_NAMES`]) are never replaced outside a path;
+//!    - names of fewer than [`MIN_DISTINCTIVE_NAME_CHARS`] characters are
+//!      only replaced where a user name is expected: next to a path
+//!      separator or an `@`, or as the value of something called `user`,
+//!      `login`, `owner`, `account` or `author`;
+//!    - longer names are replaced anywhere.
 //!
 //! # What is not
 //!
 //! Redaction is pattern matching, not understanding. A home directory in an
-//! unusual place is only recognised for the current user, a short or generic
-//! user name is not replaced outside a path, and any other personal data in
-//! a message is not recognised at all. The rule that protects that is the
-//! one about what must never be logged in the first place.
+//! unusual place is only recognised for the current user, a short or common
+//! user name is not replaced outside a path, a user who happens to be called
+//! like an ordinary word that is not on the list will see that word replaced,
+//! and any other personal data in a message is not recognised at all. The
+//! rule that protects that is the one about what must never be logged in the
+//! first place.
 
 use std::borrow::Cow;
 use std::path::Path;
@@ -42,41 +57,179 @@ use std::sync::OnceLock;
 /// Shortest user name that is replaced when it appears outside a path.
 pub const MIN_USER_NAME_CHARS: usize = 4;
 
+/// Shortest user name that is replaced anywhere, and not only where a user
+/// name is expected.
+pub const MIN_DISTINCTIVE_NAME_CHARS: usize = 6;
+
 /// What a redacted user name is replaced with.
 pub const USER_PLACEHOLDER: &str = "<user>";
 
 /// Names that are never replaced outside a path: generic accounts, and words
-/// that are too common in logs.
-const COMMON_NAMES: &[&str] = &[
+/// that are too common in the log of a terminal emulator.
+pub const COMMON_NAMES: &[&str] = &[
+    "account",
     "admin",
     "administrator",
+    "agent",
+    "android",
+    "apple",
+    "apps",
+    "backend",
+    "backup",
+    "bash",
+    "build",
+    "cache",
+    "cargo",
+    "claude",
+    "client",
+    "code",
+    "command",
+    "config",
+    "cursor",
+    "daemon",
+    "data",
     "debug",
     "default",
+    "demo",
+    "deploy",
+    "desktop",
+    "developer",
+    "docker",
     "error",
+    "example",
+    "failed",
+    "failure",
     "false",
+    "family",
+    "file",
+    "files",
+    "frontend",
+    "github",
+    "google",
     "guest",
     "home",
+    "http",
+    "https",
     "info",
+    "input",
+    "java",
+    "javascript",
+    "library",
+    "linux",
     "local",
+    "logging",
+    "login",
+    "logs",
+    "macos",
     "main",
+    "manager",
+    "master",
+    "message",
+    "mobile",
+    "mysql",
+    "name",
+    "network",
+    "nobody",
+    "node",
     "none",
     "null",
+    "office",
+    "operator",
+    "oracle",
+    "output",
     "owner",
+    "panic",
+    "path",
+    "personal",
+    "postgres",
+    "private",
+    "process",
     "public",
+    "python",
+    "react",
+    "release",
     "root",
     "runner",
+    "rust",
+    "sample",
+    "server",
+    "service",
+    "session",
     "shared",
+    "shell",
+    "source",
+    "staff",
+    "student",
+    "support",
     "system",
+    "target",
+    "tauri",
+    "temp",
+    "terminal",
     "termx",
     "test",
     "tests",
+    "thread",
     "trace",
     "true",
+    "typescript",
     "ubuntu",
     "unknown",
     "user",
     "users",
+    "vagrant",
+    "void",
+    "vscode",
     "warn",
+    "wheel",
+    "window",
+    "windows",
+    "work",
+];
+
+/// Names of things whose value is a user name.
+const IDENTITY_KEYS: &[&str] = &["user", "username", "login", "owner", "account", "author"];
+
+/// Precomposed Latin letters and what they decompose to: the letter and a
+/// combining mark. macOS hands out file names decomposed, most other things
+/// compose them, and a name must be found either way.
+const DECOMPOSITIONS: &[(char, char, char)] = &[
+    ('à', 'a', '\u{300}'),
+    ('á', 'a', '\u{301}'),
+    ('â', 'a', '\u{302}'),
+    ('ã', 'a', '\u{303}'),
+    ('ä', 'a', '\u{308}'),
+    ('å', 'a', '\u{30a}'),
+    ('ç', 'c', '\u{327}'),
+    ('è', 'e', '\u{300}'),
+    ('é', 'e', '\u{301}'),
+    ('ê', 'e', '\u{302}'),
+    ('ë', 'e', '\u{308}'),
+    ('ì', 'i', '\u{300}'),
+    ('í', 'i', '\u{301}'),
+    ('î', 'i', '\u{302}'),
+    ('ï', 'i', '\u{308}'),
+    ('ñ', 'n', '\u{303}'),
+    ('ò', 'o', '\u{300}'),
+    ('ó', 'o', '\u{301}'),
+    ('ô', 'o', '\u{302}'),
+    ('õ', 'o', '\u{303}'),
+    ('ö', 'o', '\u{308}'),
+    ('ù', 'u', '\u{300}'),
+    ('ú', 'u', '\u{301}'),
+    ('û', 'u', '\u{302}'),
+    ('ü', 'u', '\u{308}'),
+    ('ý', 'y', '\u{301}'),
+    ('ÿ', 'y', '\u{308}'),
+    ('ć', 'c', '\u{301}'),
+    ('č', 'c', '\u{30c}'),
+    ('ě', 'e', '\u{30c}'),
+    ('ń', 'n', '\u{301}'),
+    ('ř', 'r', '\u{30c}'),
+    ('ś', 's', '\u{301}'),
+    ('š', 's', '\u{30c}'),
+    ('ź', 'z', '\u{301}'),
+    ('ž', 'z', '\u{30c}'),
 ];
 
 /// A home directory, split so that it can be matched in any spelling.
@@ -84,8 +237,18 @@ const COMMON_NAMES: &[&str] = &[
 struct Home {
     /// Lower-case drive letter, for Windows paths.
     drive: Option<u8>,
-    /// The directories below the root.
-    components: Vec<String>,
+    /// The directories below the root, each in the spellings it can take.
+    components: Vec<Vec<String>>,
+}
+
+/// The name of the user, as it is looked for outside paths.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UserName {
+    /// The spellings the name can take.
+    spellings: Vec<String>,
+    /// Distinctive enough to be replaced anywhere, not only where a user
+    /// name is expected.
+    anywhere: bool,
 }
 
 /// Replaces the home directory and the name of the user.
@@ -97,8 +260,8 @@ pub struct Redactor {
     /// Home directories that could not be split, matched as plain text.
     literals: Vec<String>,
     /// Names replaced when they appear as a whole word.
-    user_names: Vec<String>,
-    ignore_ascii_case: bool,
+    user_names: Vec<UserName>,
+    ignore_case: bool,
     /// Whether rule 2 (home-shaped paths of anyone) is applied.
     any_user_dirs: bool,
 }
@@ -117,7 +280,7 @@ impl Redactor {
     #[must_use]
     pub fn with_case_sensitivity(home: Option<&Path>, case_sensitive: bool) -> Self {
         let mut redactor = Self {
-            ignore_ascii_case: !case_sensitive,
+            ignore_case: !case_sensitive,
             any_user_dirs: true,
             ..Self::default()
         };
@@ -170,10 +333,9 @@ impl Redactor {
             return;
         }
 
-        let components: Vec<String> = rest
+        let components: Vec<&str> = rest
             .split(['/', '\\'])
             .filter(|component| !component.is_empty())
-            .map(str::to_owned)
             .collect();
         // A home directory that is a filesystem root would turn every path
         // into `~`, so it is ignored.
@@ -181,17 +343,28 @@ impl Redactor {
             return;
         };
 
+        let length = name.chars().count();
         let common = COMMON_NAMES
             .iter()
             .any(|common| name.eq_ignore_ascii_case(common));
-        if name.chars().count() >= MIN_USER_NAME_CHARS
-            && !common
-            && !self.user_names.iter().any(|known| known == name)
-        {
-            self.user_names.push(name.clone());
+        if length >= MIN_USER_NAME_CHARS && !common {
+            let user_name = UserName {
+                // A name is a name in any letter case.
+                spellings: spellings(name, true),
+                anywhere: length >= MIN_DISTINCTIVE_NAME_CHARS,
+            };
+            if !self.user_names.contains(&user_name) {
+                self.user_names.push(user_name);
+            }
         }
 
-        let home = Home { drive, components };
+        let home = Home {
+            drive,
+            components: components
+                .iter()
+                .map(|component| spellings(component, self.ignore_case))
+                .collect(),
+        };
         if !self.homes.contains(&home) {
             self.homes.push(home);
             // Longest first, so that a home inside another one wins.
@@ -273,7 +446,7 @@ impl Redactor {
             };
             let matched = home.components.iter().all(|component| {
                 let Some(after) = match_separator(haystack, position)
-                    .and_then(|start| self.match_component(haystack, start, component.as_bytes()))
+                    .and_then(|start| self.match_any(haystack, start, component))
                 else {
                     return false;
                 };
@@ -286,35 +459,19 @@ impl Redactor {
         }
 
         self.literals.iter().find_map(|literal| {
-            let end = self.match_component(haystack, index, literal.as_bytes())?;
+            let end = match_text(haystack, index, literal.as_bytes(), self.ignore_case)?;
             whole(end).then_some(end)
         })
     }
 
-    /// Matches `component` at `position`, where every byte may be written as
-    /// it is or percent-encoded.
-    fn match_component(
-        &self,
-        haystack: &[u8],
-        mut position: usize,
-        component: &[u8],
-    ) -> Option<usize> {
-        for expected in component {
-            let found = *haystack.get(position)?;
-            let equal = if self.ignore_ascii_case {
-                found.eq_ignore_ascii_case(expected)
-            } else {
-                found == *expected
-            };
-            if equal {
-                position += 1;
-            } else if found == b'%' && percent_byte(haystack, position) == Some(*expected) {
-                position += 3;
-            } else {
-                return None;
-            }
-        }
-        Some(position)
+    /// Matches any of `spellings` at `position`; the longest one wins.
+    fn match_any(&self, haystack: &[u8], position: usize, spellings: &[String]) -> Option<usize> {
+        spellings
+            .iter()
+            .filter_map(|spelling| {
+                match_text(haystack, position, spelling.as_bytes(), self.ignore_case)
+            })
+            .max()
     }
 
     /// The name in a path shaped like a home directory starting at `index`:
@@ -326,19 +483,23 @@ impl Redactor {
         let drive = match_drive(haystack, index);
         let position = drive.map_or(index, |(_, position)| position);
         let position = match_separator(haystack, position)?;
-        let position = match_keyword(haystack, position, b"users").or_else(|| {
-            // `/home` is not where Windows keeps its users.
-            drive
-                .is_none()
-                .then(|| match_keyword(haystack, position, b"home"))
-                .flatten()
-        })?;
+        let position = match drive {
+            // Windows ignores case, and so does the path it shows to WSL.
+            Some(_) => match_keyword(haystack, position, b"users", true),
+            None => match_keyword(haystack, position, b"Users", false)
+                .or_else(|| match_keyword(haystack, position, b"home", false)),
+        }?;
         let start = match_separator(haystack, position)?;
+        // Checked last because it looks backwards: is this where a path
+        // starts, or the middle of one (`src/home/x`, `/api/users/x`)?
+        if !starts_a_path(haystack, index, drive.is_some()) {
+            return None;
+        }
 
         let mut end = start;
         while end < haystack.len()
             && !ends_a_name(haystack[end])
-            && !matches!(percent_byte(haystack, end), Some(b'/' | b'\\'))
+            && !matches!(encoded_byte(haystack, end), Some((b'/' | b'\\', _)))
         {
             end += 1;
         }
@@ -347,17 +508,126 @@ impl Redactor {
 
     /// End of the current user's name standing as a whole word at `index`.
     fn match_user_name(&self, haystack: &[u8], index: usize) -> Option<usize> {
-        let is_word = |byte: &u8| byte.is_ascii_alphanumeric() || *byte == b'_' || *byte >= 0x80;
-        if index > 0 && is_word(&haystack[index - 1]) {
+        // The name must start a word. A percent-encoded character before it
+        // ends in hexadecimal digits but is not part of a word.
+        let before = &haystack[..index];
+        let inside_a_word = before.last().is_some_and(|byte| is_word_byte(*byte))
+            && encoded_byte_before(before).is_none_or(is_word_byte);
+        if inside_a_word {
             return None;
         }
         self.user_names.iter().find_map(|name| {
-            let end = index + name.len();
-            let candidate = haystack.get(index..end)?;
-            let whole = haystack.get(end).is_none_or(|next| !is_word(next));
-            (candidate.eq_ignore_ascii_case(name.as_bytes()) && whole).then_some(end)
+            let end = name
+                .spellings
+                .iter()
+                .filter_map(|spelling| match_text(haystack, index, spelling.as_bytes(), true))
+                .max()?;
+            let whole = haystack.get(end).is_none_or(|next| !is_word_byte(*next));
+            (whole && (name.anywhere || expects_a_user_name(haystack, index, end))).then_some(end)
         })
     }
+}
+
+/// The spellings of `text` to look for: composed and decomposed accents, and
+/// with `any_case` also all lower-case and all upper-case. ASCII letters are
+/// compared without regard to case separately, so the case variants only
+/// matter for the other letters.
+fn spellings(text: &str, any_case: bool) -> Vec<String> {
+    let mut spellings = vec![text.to_owned()];
+    let mut add = |spelling: String| {
+        if !spellings.contains(&spelling) {
+            spellings.push(spelling);
+        }
+    };
+    let composed = compose(text);
+    let decomposed = decompose(&composed);
+    for form in [composed, decomposed] {
+        if any_case {
+            // Upper-casing a decomposed letter keeps its mark, so every form
+            // gets both cases.
+            add(form.to_lowercase());
+            add(form.to_uppercase());
+        }
+        add(form);
+    }
+    spellings
+}
+
+fn decompose(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    for character in text.chars() {
+        let lower = character.to_lowercase().next().unwrap_or(character);
+        match DECOMPOSITIONS
+            .iter()
+            .find(|(composed, _, _)| *composed == lower)
+        {
+            Some((_, base, mark)) => {
+                if character == lower {
+                    output.push(*base);
+                } else {
+                    output.extend(base.to_uppercase());
+                }
+                output.push(*mark);
+            }
+            None => output.push(character),
+        }
+    }
+    output
+}
+
+fn compose(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    for character in text.chars() {
+        let composed = output.chars().next_back().and_then(|previous| {
+            let lower = previous.to_lowercase().next().unwrap_or(previous);
+            let (composed, _, _) = DECOMPOSITIONS
+                .iter()
+                .find(|(_, base, mark)| *base == lower && *mark == character)?;
+            Some(if previous == lower {
+                composed.to_string()
+            } else {
+                composed.to_uppercase().collect()
+            })
+        });
+        match composed {
+            Some(composed) => {
+                output.pop();
+                output.push_str(&composed);
+            }
+            None => output.push(character),
+        }
+    }
+    output
+}
+
+/// Matches `expected` at `position`, where every byte may be written as it
+/// is or percent-encoded, once or more. Returns where the match ends.
+fn match_text(
+    haystack: &[u8],
+    mut position: usize,
+    expected: &[u8],
+    ignore_ascii_case: bool,
+) -> Option<usize> {
+    for wanted in expected {
+        let found = *haystack.get(position)?;
+        let same = |byte: u8| {
+            if ignore_ascii_case {
+                byte.eq_ignore_ascii_case(wanted)
+            } else {
+                byte == *wanted
+            }
+        };
+        if same(found) {
+            position += 1;
+        } else if let Some((_, length)) =
+            encoded_byte(haystack, position).filter(|(decoded, _)| same(*decoded))
+        {
+            position += length;
+        } else {
+            return None;
+        }
+    }
+    Some(position)
 }
 
 /// Matches a drive at `index` and returns its lower-case letter and where the
@@ -365,45 +635,165 @@ impl Redactor {
 fn match_drive(haystack: &[u8], index: usize) -> Option<(u8, usize)> {
     let rest = haystack.get(index..)?;
     match rest {
+        [b'/', b'm', b'n', b't', b'/', letter, ..] if letter.is_ascii_alphabetic() => {
+            Some((letter.to_ascii_lowercase(), index + 6))
+        }
         [letter, b':', ..] if letter.is_ascii_alphabetic() => {
             Some((letter.to_ascii_lowercase(), index + 2))
         }
-        [letter, b'%', b'3', b'A' | b'a', ..] if letter.is_ascii_alphabetic() => {
-            Some((letter.to_ascii_lowercase(), index + 4))
-        }
-        [b'/', b'm', b'n', b't', b'/', letter, ..] if letter.is_ascii_alphabetic() => {
-            Some((letter.to_ascii_lowercase(), index + 6))
+        [letter, b'%', ..] if letter.is_ascii_alphabetic() => {
+            let (decoded, length) = encoded_byte(haystack, index + 1)?;
+            (decoded == b':').then_some((letter.to_ascii_lowercase(), index + 1 + length))
         }
         _ => None,
     }
 }
 
-/// Matches one path separator at `position` in any spelling: `/`, `\`, a
-/// doubled backslash, or either of them percent-encoded.
+/// Matches one path separator at `position` in any spelling: `/`, one or
+/// more backslashes (they double with every layer of escaping), or either of
+/// them percent-encoded.
 fn match_separator(haystack: &[u8], position: usize) -> Option<usize> {
-    match haystack.get(position..)? {
-        [b'\\', b'\\', ..] => Some(position + 2),
-        [b'/' | b'\\', ..] => Some(position + 1),
-        _ => matches!(percent_byte(haystack, position), Some(b'/' | b'\\')).then_some(position + 3),
+    match haystack.get(position)? {
+        b'/' => Some(position + 1),
+        b'\\' => {
+            let mut end = position;
+            while haystack.get(end) == Some(&b'\\') {
+                end += 1;
+            }
+            Some(end)
+        }
+        _ => match encoded_byte(haystack, position)? {
+            (b'/' | b'\\', length) => Some(position + length),
+            _ => None,
+        },
     }
 }
 
-/// Matches the lower-case `keyword` at `position`, ignoring case.
-fn match_keyword(haystack: &[u8], position: usize, keyword: &[u8]) -> Option<usize> {
+/// Matches `keyword` at `position`.
+fn match_keyword(
+    haystack: &[u8],
+    position: usize,
+    keyword: &[u8],
+    ignore_ascii_case: bool,
+) -> Option<usize> {
     let end = position + keyword.len();
-    haystack
-        .get(position..end)?
-        .eq_ignore_ascii_case(keyword)
-        .then_some(end)
+    let candidate = haystack.get(position..end)?;
+    let equal = if ignore_ascii_case {
+        candidate.eq_ignore_ascii_case(keyword)
+    } else {
+        candidate == keyword
+    };
+    equal.then_some(end)
 }
 
-/// The byte written as `%XX` at `position`, if there is one.
-fn percent_byte(haystack: &[u8], position: usize) -> Option<u8> {
-    let [b'%', high, low] = haystack.get(position..position + 3)? else {
+/// The byte percent-encoded at `position` and the length of its encoding:
+/// `%2F`, or encoded again as `%252F`, and so on.
+fn encoded_byte(haystack: &[u8], position: usize) -> Option<(u8, usize)> {
+    if haystack.get(position) != Some(&b'%') {
+        return None;
+    }
+    // Every further layer of encoding turns the `%` into `%25`.
+    let mut digits = position + 1;
+    while haystack.get(digits..digits + 2) == Some(b"25")
+        && haystack
+            .get(digits + 2..digits + 4)
+            .is_some_and(|next| next.iter().all(u8::is_ascii_hexdigit))
+    {
+        digits += 2;
+    }
+    let [high, low] = haystack.get(digits..digits + 2)? else {
         return None;
     };
     let digit = |byte: &u8| char::from(*byte).to_digit(16);
-    u8::try_from(digit(high)? * 16 + digit(low)?).ok()
+    let byte = u8::try_from(digit(high)? * 16 + digit(low)?).ok()?;
+    Some((byte, digits + 2 - position))
+}
+
+/// Whether a home-shaped path that begins at `index` is at a place where a
+/// path begins, rather than in the middle of a longer path or a URL.
+fn starts_a_path(haystack: &[u8], index: usize, has_drive: bool) -> bool {
+    let Some(previous) = index.checked_sub(1).map(|before| haystack[before]) else {
+        return true;
+    };
+    if has_drive && !haystack[index..].starts_with(b"/mnt/") {
+        // `C:\Users`: anything but a letter or digit may come before the
+        // drive letter, which covers `file:///C:/` and `\\?\C:\`.
+        return !previous.is_ascii_alphanumeric();
+    }
+    previous.is_ascii_whitespace()
+        || matches!(
+            previous,
+            b'"' | b'\'' | b'`' | b'=' | b':' | b',' | b';' | b'(' | b'[' | b'{' | b'<' | b'|'
+        )
+        || haystack[..index]
+            .get(index.saturating_sub(7)..)
+            .is_some_and(|before| before.eq_ignore_ascii_case(b"file://"))
+}
+
+/// Whether the word at `start..end` is where a user name is expected: next
+/// to a path separator or an `@`, or the value of something named like a
+/// user (`user=`, `"owner": "`).
+fn expects_a_user_name(haystack: &[u8], start: usize, end: usize) -> bool {
+    let after = haystack.get(end).copied();
+    if after == Some(b'@') || match_separator(haystack, end).is_some() {
+        return true;
+    }
+    let before = &haystack[..start];
+    if before
+        .last()
+        .is_some_and(|previous| matches!(previous, b'@' | b'/' | b'\\'))
+        || ends_with_encoded_separator(before)
+    {
+        return true;
+    }
+
+    // Backwards: an optional quote, `=` or `:`, an optional quote, a key.
+    let is_filler = |byte: &u8| matches!(byte, b' ' | b'"' | b'\'');
+    let trimmed = trim_end(before, is_filler);
+    let Some((separator, key_side)) = trimmed.split_last() else {
+        return false;
+    };
+    if !matches!(separator, b'=' | b':') {
+        return false;
+    }
+    let key_side = trim_end(key_side, is_filler);
+    let key_start = key_side
+        .iter()
+        .rposition(|byte| !(byte.is_ascii_alphanumeric() || *byte == b'_'))
+        .map_or(0, |position| position + 1);
+    let key = key_side[key_start..].to_ascii_lowercase();
+    IDENTITY_KEYS
+        .iter()
+        .any(|known| key.ends_with(known.as_bytes()))
+}
+
+fn trim_end(bytes: &[u8], unwanted: impl Fn(&u8) -> bool) -> &[u8] {
+    let end = bytes
+        .iter()
+        .rposition(|byte| !unwanted(byte))
+        .map_or(0, |position| position + 1);
+    &bytes[..end]
+}
+
+fn ends_with_encoded_separator(before: &[u8]) -> bool {
+    matches!(encoded_byte_before(before), Some(b'/' | b'\\'))
+}
+
+/// The byte whose percent-encoding `before` ends with, if it ends with one.
+fn encoded_byte_before(before: &[u8]) -> Option<u8> {
+    // `%XX`, `%25XX`, `%2525XX`.
+    (3..=7).step_by(2).find_map(|length| {
+        let start = before.len().checked_sub(length)?;
+        encoded_byte(before, start)
+            .filter(|(_, encoded)| *encoded == length)
+            .map(|(byte, _)| byte)
+    })
+}
+
+/// Letters, digits, `_`, and anything that is not ASCII: what a word that
+/// contains a name is made of.
+fn is_word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte >= 0x80
 }
 
 /// Whether `byte` right after a matched home directory means that the last
@@ -549,9 +939,9 @@ mod tests {
         assert_eq!(mac().text("/users/ana maria/x"), "~/x");
         assert_eq!(mac().text("/USERS/ANA%20MARIA"), "~");
         assert_eq!(windows().text(r"c:\users\anabel\file.txt"), r"~\file.txt");
-        // Where case matters, a different case is a different directory. It
-        // still has the shape of a home directory, so the name goes.
-        assert_eq!(unix().text("/HOME/ANA/x"), "/HOME/<user>/x");
+        // Where case matters, a different case is a different directory, and
+        // not one that has the shape of a home directory.
+        assert_eq!(unix().text("/HOME/ANA/x"), "/HOME/ANA/x");
     }
 
     #[test]
@@ -593,10 +983,12 @@ mod tests {
         assert_eq!(redactor.text("/home/José/x"), "~/x");
         assert_eq!(redactor.text("/home/Jos%C3%A9/x"), "~/x");
         assert_eq!(redactor.text("/home/Joséphine/x"), "/home/<user>/x");
+        // Four letters: only where a user name is expected.
         assert_eq!(
             redactor.text("hola José, ¿qué tal?"),
-            "hola <user>, ¿qué tal?"
+            "hola José, ¿qué tal?"
         );
+        assert_eq!(redactor.text("user=José;"), "user=<user>;");
     }
 
     #[test]
@@ -704,5 +1096,124 @@ mod tests {
         let shown = super::path(home.join("termx-redaction-test"));
         assert!(shown.starts_with('~'), "{shown:?} should start with ~");
         assert!(!shown.contains(&*home.to_string_lossy()));
+    }
+
+    #[test]
+    fn separators_escaped_or_encoded_more_than_once_are_recognised() {
+        let redactor = windows();
+        // A path that went through `{:?}` or JSON twice.
+        assert_eq!(redactor.text(r"C:\\\\Users\\\\Anabel\\\\x"), r"~\\\\x");
+        assert_eq!(
+            redactor.text(r"C:\\\\Users\\\\Bob\\\\x"),
+            r"C:\\\\Users\\\\<user>\\\\x"
+        );
+        // A URL inside a URL.
+        assert_eq!(unix().text("next=%252Fhome%252Fana%252Fx"), "next=~%252Fx");
+        assert_eq!(
+            unix().text("next=%252Fhome%252Fbob%252Fx"),
+            "next=%252Fhome%252F<user>%252Fx"
+        );
+        assert_eq!(
+            redactor.text("C%253A%255CUsers%255CAnabel%255Cx"),
+            "~%255Cx"
+        );
+    }
+
+    #[test]
+    fn the_user_name_is_found_percent_encoded_and_in_other_forms() {
+        let redactor = mac();
+        assert_eq!(redactor.text("user=Ana%20Maria&x=1"), "user=<user>&x=1");
+        assert_eq!(redactor.text("ANA MARIA logged in"), "<user> logged in");
+
+        let accented = Redactor::with_case_sensitivity(Some(Path::new("/Users/Jocelyné")), false);
+        // Decomposed, as macOS hands out file names.
+        assert_eq!(accented.text("/Users/Jocelyne\u{301}/x"), "~/x");
+        assert_eq!(accented.text("hello Jocelyne\u{301}!"), "hello <user>!");
+        // Upper case, composed and decomposed.
+        assert_eq!(accented.text("/USERS/JOCELYNÉ/x"), "~/x");
+        assert_eq!(accented.text("JOCELYNE\u{301} said"), "<user> said");
+
+        // And the other way round: a decomposed home, composed text.
+        let decomposed =
+            Redactor::with_case_sensitivity(Some(Path::new("/Users/Jocelyne\u{301}")), false);
+        assert_eq!(decomposed.text("/Users/Jocelyné/x"), "~/x");
+    }
+
+    #[test]
+    fn things_that_only_resemble_a_home_directory_are_left_alone() {
+        for redactor in [unix(), mac(), windows()] {
+            for text in [
+                "src/home/Home.tsx:10:2",
+                "at render (tauri://localhost/src/home/Home.tsx:10:2)",
+                "GET /api/users/list failed",
+                "https://example.org/api/Users/42/profile",
+                "crate::home::dir",
+                "the users/groups table",
+                "a/home/b and x/Users/y",
+                "D:Users",
+            ] {
+                assert_eq!(redactor.text(text), text);
+            }
+        }
+    }
+
+    #[test]
+    fn a_home_shaped_path_is_recognised_wherever_a_path_can_start() {
+        let redactor = unix();
+        for (text, expected) in [
+            ("/home/bob/x", "/home/<user>/x"),
+            ("in /home/bob/x", "in /home/<user>/x"),
+            ("path=/Users/bob/x", "path=/Users/<user>/x"),
+            (
+                "PATH=/usr/bin:/home/bob/bin",
+                "PATH=/usr/bin:/home/<user>/bin",
+            ),
+            ("[\"/home/bob\"]", "[\"/home/<user>\"]"),
+            ("file:///home/bob/x", "file:///home/<user>/x"),
+            ("FILE:///Users/bob/x", "FILE:///Users/<user>/x"),
+            ("p=%2Fhome%2Fbob", "p=%2Fhome%2F<user>"),
+            ("file:///C:/Users/Bob/x", "file:///C:/Users/<user>/x"),
+            (r"\\?\c:\users\Bob", r"\\?\c:\users\<user>"),
+            ("in /mnt/c/Users/Bob/x", "in /mnt/c/Users/<user>/x"),
+        ] {
+            assert_eq!(redactor.text(text), expected, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_user_called_like_a_common_word_does_not_garble_the_log() {
+        for (name, text) in [
+            ("node", "node_modules/.bin/node exited: node not found"),
+            ("command", "command failed: unknown command"),
+            ("code", "exit code 3, see the code"),
+            ("shell", "the shell exited"),
+            ("claude", "claude code session started"),
+        ] {
+            let home = format!("/home/{name}");
+            let redactor = Redactor::with_case_sensitivity(Some(Path::new(&home)), true);
+            assert_eq!(redactor.text(text), text, "user {name}");
+            // The home directory itself is still replaced.
+            assert_eq!(redactor.text(&format!("{home}/x")), "~/x");
+        }
+    }
+
+    #[test]
+    fn a_short_name_is_only_replaced_where_a_user_name_is_expected() {
+        let redactor = Redactor::with_case_sensitivity(Some(Path::new("/home/mara")), true);
+        for text in ["mara is a word here", "samara, maracas, Mara's", "tamara"] {
+            assert_eq!(redactor.text(text), text);
+        }
+        for (text, expected) in [
+            ("user=mara", "user=<user>"),
+            ("\"username\": \"Mara\"", "\"username\": \"<user>\""),
+            ("owner: mara", "owner: <user>"),
+            ("mara@workstation", "<user>@workstation"),
+            ("ssh://git@mara", "ssh://git@<user>"),
+            ("/data/mara/x", "/data/<user>/x"),
+            (r"D:\work\mara", r"D:\work\<user>"),
+            ("x%2Fmara%2Fy", "x%2F<user>%2Fy"),
+        ] {
+            assert_eq!(redactor.text(text), expected, "{text}");
+        }
     }
 }
