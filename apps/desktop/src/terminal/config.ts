@@ -48,12 +48,19 @@ export interface TerminalConfig {
   cursorBlink: boolean;
   cursorStyle: "block" | "underline" | "bar";
   /**
-   * On macOS, whether the Option key acts as Meta (it sends `ESC` followed
-   * by the key) instead of typing the alternate characters of the layout.
-   * Claude Code and shells use Meta for shortcuts such as Option+Enter and
-   * Option+B.
+   * On macOS, which Option keys act as Meta (they send `ESC` followed by
+   * the key) instead of typing the alternate characters of the keyboard
+   * layout. Claude Code and shells use Meta for shortcuts such as Option+B.
+   *
+   * - `left`: the left Option key is Meta, the right one types characters.
+   *   Shortcuts work, and so do á, ñ, ¿ or, on layouts that need Option for
+   *   them, @ # [ ] { } \ | ~.
+   * - `both`: both keys are Meta. Those characters cannot be typed.
+   * - `none`: both keys type characters. Meta shortcuts need Escape.
+   *
+   * Option+Enter inserts a new line in Claude Code under every setting.
    */
-  macOptionIsMeta: boolean;
+  optionAsMeta: "left" | "both" | "none";
   /**
    * Text whose contrast with its background is below this ratio is drawn
    * lighter or darker until it reaches it. 1 leaves colours alone; 4.5 is
@@ -118,7 +125,7 @@ export const DEFAULT_TERMINAL_CONFIG: TerminalConfig = {
   scrollback: 10_000,
   cursorBlink: false,
   cursorStyle: "block",
-  macOptionIsMeta: true,
+  optionAsMeta: "left",
   minimumContrastRatio: 4.5,
   padding: { x: 6, y: 4 },
   renderer: "webgl",

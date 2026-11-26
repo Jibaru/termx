@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { CreatedSession, CreateSessionOptions, SessionHandlers } from "../lib/ipc";
 import type { Platform } from "../lib/platform";
 import { recordIPC } from "../test/ipcRecorder";
+import { ACK_BATCH, bytes, fakeBackend, pane, resizePane, settle } from "../test/terminalHarness";
 import {
   FakeFitAddon,
   FakeResizeObserver,
@@ -12,12 +12,11 @@ import {
   FakeWebLinksAddon,
   resetXtermMocks,
 } from "../test/xtermMock";
-import { DEFAULT_TERMINAL_CONFIG } from "./config";
+import { DEFAULT_TERMINAL_CONFIG, type TerminalConfig } from "./config";
 import {
   MIN_FIT_HEIGHT_PX,
   MIN_FIT_WIDTH_PX,
   RESIZE_DEBOUNCE_MS,
-  type TerminalBackend,
   TerminalController,
 } from "./TerminalController";
 
@@ -42,132 +41,21 @@ vi.mock("@xterm/addon-web-links", async () => {
   return { WebLinksAddon: mocks.FakeWebLinksAddon };
 });
 
-const ACK_BATCH = 1000;
-
-/** A promise settled by the test. */
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  let reject!: (reason: unknown) => void;
-  const promise = new Promise<T>((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
-  return { promise, resolve, reject };
-}
-
-/** One call to `createSession`, which the test answers when it wants to. */
-interface CreateCall {
-  options: CreateSessionOptions;
-  handlers: SessionHandlers;
-  /** Resolves the call: the session exists. */
-  started: (overrides?: Partial<CreatedSession>) => Promise<void>;
-  /** Rejects the call. */
-  failed: (reason: unknown) => Promise<void>;
-}
-
-/** The Rust side, as far as a controller can tell. */
-function fakeBackend() {
-  const creates: CreateCall[] = [];
-  const writes: { id: number; data: string; binary: boolean; done: () => Promise<void> }[] = [];
-  const resizes: { id: number; cols: number; rows: number }[] = [];
-  const acks: { id: number; bytes: number }[] = [];
-  const closed: number[] = [];
-  const opened: string[] = [];
-  const clipboard = { text: "", writes: [] as string[], reads: 0 };
-  let nextId = 1;
-
-  const backend: TerminalBackend = {
-    createSession: (options, handlers) => {
-      const call = deferred<CreatedSession>();
-      const id = nextId++;
-      creates.push({
-        options,
-        handlers,
-        started: async (overrides = {}) => {
-          call.resolve({ id, ackBatchBytes: ACK_BATCH, windowsBuildNumber: null, ...overrides });
-          await settle();
-        },
-        failed: async (reason) => {
-          call.reject(reason);
-          await settle();
-        },
-      });
-      return call.promise;
-    },
-    writeSession: (id, data, binary = false) => {
-      const call = deferred<undefined>();
-      writes.push({
-        id,
-        data,
-        binary,
-        done: async () => {
-          call.resolve(undefined);
-          await settle();
-        },
-      });
-      return call.promise;
-    },
-    resizeSession: (id, cols, rows) => {
-      resizes.push({ id, cols, rows });
-      return Promise.resolve();
-    },
-    ackSession: (id, bytes) => {
-      acks.push({ id, bytes });
-      return Promise.resolve();
-    },
-    closeSession: (id) => {
-      closed.push(id);
-      return Promise.resolve();
-    },
-    openExternalUrl: (url) => {
-      opened.push(url);
-      return Promise.resolve();
-    },
-    readClipboardText: () => {
-      clipboard.reads += 1;
-      return Promise.resolve(clipboard.text);
-    },
-    writeClipboardText: (text) => {
-      clipboard.writes.push(text);
-      return Promise.resolve();
-    },
-  };
-  return { backend, creates, writes, resizes, acks, closed, opened, clipboard };
-}
-
-/** Lets the promise callbacks that are ready run. */
-async function settle(): Promise<void> {
-  for (let turn = 0; turn < 5; turn += 1) await Promise.resolve();
-}
-
-/** A pane of the given size. happy-dom does no layout, so the size is set. */
-function pane(width = 960, height = 600): HTMLElement {
-  const element = document.createElement("div");
-  Object.defineProperty(element, "clientWidth", { configurable: true, value: width });
-  Object.defineProperty(element, "clientHeight", { configurable: true, value: height });
-  document.body.appendChild(element);
-  return element;
-}
-
-function resizePane(element: HTMLElement, width: number, height: number): void {
-  Object.defineProperty(element, "clientWidth", { configurable: true, value: width });
-  Object.defineProperty(element, "clientHeight", { configurable: true, value: height });
-}
-
-function bytes(text: string): Uint8Array {
-  return new TextEncoder().encode(text);
-}
-
 interface Setup {
   platform?: Platform;
+  config?: Partial<TerminalConfig>;
   /** Leave the session starting instead of answering the create call. */
   leaveStarting?: boolean;
 }
 
 /** A controller attached to a pane, with its session running. */
-async function attached({ platform = "macos", leaveStarting = false }: Setup = {}) {
+async function attached({ platform = "macos", config, leaveStarting = false }: Setup = {}) {
   const fake = fakeBackend();
-  const controller = new TerminalController({ backend: fake.backend, platform });
+  const controller = new TerminalController({
+    backend: fake.backend,
+    platform,
+    config: { ...DEFAULT_TERMINAL_CONFIG, ...config },
+  });
   const container = pane();
   controller.attach(container);
   const terminal = FakeTerminal.last;
@@ -217,7 +105,6 @@ describe("starting", () => {
       fontFamily: DEFAULT_TERMINAL_CONFIG.fontFamily,
       fontSize: 14,
       scrollback: 10_000,
-      macOptionIsMeta: true,
       allowTransparency: false,
       theme: DEFAULT_TERMINAL_CONFIG.theme,
     });
@@ -539,6 +426,125 @@ describe("keys", () => {
 
     expect(handledByXterm).toBe(true);
     expect(clipboard.writes).toEqual([]);
+  });
+});
+
+describe("composition", () => {
+  it.each(["macos", "windows", "linux"] as const)(
+    "Shift+Enter that confirms an input method is not turned into a newline on %s",
+    async (platform) => {
+      const { terminal, writes } = await attached({ platform });
+
+      for (const init of [
+        { key: "Enter", code: "Enter", shiftKey: true, isComposing: true },
+        { key: "Process", code: "Enter", shiftKey: true, keyCode: 229 },
+      ]) {
+        const { handledByXterm, event } = terminal.key("keydown", init);
+        expect(handledByXterm).toBe(true);
+        expect(event.defaultPrevented).toBe(false);
+      }
+      expect(writes).toEqual([]);
+    },
+  );
+});
+
+describe("the Option key on macOS", () => {
+  const leftOption = { key: "Alt", code: "AltLeft", altKey: true, location: 1 };
+  const rightOption = { key: "Alt", code: "AltRight", altKey: true, location: 2 };
+
+  it("is Meta for the left key and types characters for the right one by default", async () => {
+    const { terminal } = await attached({ platform: "macos" });
+    expect(terminal.options.macOptionIsMeta).toBe(false);
+
+    terminal.key("keydown", leftOption);
+    const b = terminal.key("keydown", { key: "∫", code: "KeyB", altKey: true });
+    // xterm.js does the encoding, with its switch on for this key.
+    expect(terminal.options.macOptionIsMeta).toBe(true);
+    expect(b.handledByXterm).toBe(true);
+    terminal.key("keyup", { key: "Alt", code: "AltLeft" });
+
+    terminal.key("keydown", rightOption);
+    const n = terminal.key("keydown", { key: "Dead", code: "KeyN", altKey: true });
+    expect(terminal.options.macOptionIsMeta).toBe(false);
+    // Left alone: the system starts the dead key for ñ.
+    expect(n.handledByXterm).toBe(true);
+    expect(n.event.defaultPrevented).toBe(false);
+  });
+
+  it("does not touch a composition that is in progress", async () => {
+    const { terminal, writes } = await attached({ platform: "macos" });
+    terminal.key("keydown", rightOption);
+    terminal.key("keydown", { key: "Dead", code: "KeyE", altKey: true });
+    terminal.key("keyup", { key: "Alt", code: "AltRight" });
+
+    // The left Option key goes down while the dead key waits for its vowel.
+    terminal.key("keydown", leftOption);
+    const vowel = terminal.key("keydown", {
+      key: "é",
+      code: "KeyE",
+      altKey: true,
+      isComposing: true,
+      keyCode: 229,
+    });
+
+    expect(terminal.options.macOptionIsMeta).toBe(false);
+    expect(vowel.handledByXterm).toBe(true);
+    expect(vowel.event.defaultPrevented).toBe(false);
+    expect(writes).toEqual([]);
+  });
+
+  it.each([
+    ["both", true, true],
+    ["none", false, false],
+  ] as const)("follows the `%s` setting for both keys", async (optionAsMeta, left, right) => {
+    const { terminal } = await attached({ platform: "macos", config: { optionAsMeta } });
+
+    terminal.key("keydown", leftOption);
+    terminal.key("keydown", { key: "∫", code: "KeyB", altKey: true });
+    expect(terminal.options.macOptionIsMeta).toBe(left);
+    terminal.key("keyup", { key: "Alt", code: "AltLeft" });
+
+    terminal.key("keydown", rightOption);
+    terminal.key("keydown", { key: "∫", code: "KeyB", altKey: true });
+    expect(terminal.options.macOptionIsMeta).toBe(right);
+  });
+
+  it.each(["left", "both", "none"] as const)(
+    "Option+Enter sends ESC CR with either key when set to `%s`",
+    async (optionAsMeta) => {
+      const { terminal, writes } = await attached({ platform: "macos", config: { optionAsMeta } });
+
+      for (const option of [leftOption, rightOption]) {
+        terminal.key("keydown", option);
+        const enter = terminal.key("keydown", { key: "Enter", code: "Enter", altKey: true });
+        terminal.key("keyup", { key: "Alt", code: option.code });
+        expect(enter.handledByXterm).toBe(false);
+      }
+      await writes[0]?.done();
+
+      expect(writes.map((write) => write.data)).toEqual(["\x1b\r", "\x1b\r"]);
+    },
+  );
+
+  it("forgets a key whose release happened in another window", async () => {
+    const { terminal } = await attached({ platform: "macos" });
+    terminal.key("keydown", leftOption);
+
+    window.dispatchEvent(new Event("blur"));
+    // Back in the window with Option held again, by a key not seen going down.
+    terminal.key("keydown", { key: "ñ", code: "KeyN", altKey: true });
+
+    expect(terminal.options.macOptionIsMeta).toBe(false);
+  });
+
+  it("is left to xterm.js on the other platforms, where Alt is always Meta", async () => {
+    const { terminal } = await attached({ platform: "linux" });
+    const before = terminal.options.macOptionIsMeta;
+
+    terminal.key("keydown", leftOption);
+    terminal.key("keydown", { key: "b", code: "KeyB", altKey: true });
+
+    expect(terminal.options.macOptionIsMeta).toBe(before);
   });
 });
 

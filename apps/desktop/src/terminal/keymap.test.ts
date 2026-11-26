@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { mapKey, type KeyStroke, SHIFT_ENTER_SEQUENCE } from "./keymap";
+import { type KeyStroke, mapKey, OptionKeys, SHIFT_ENTER_SEQUENCE } from "./keymap";
 
 function stroke(key: string, modifiers: Partial<KeyStroke> = {}): KeyStroke {
   const code = /^[a-z]$/i.test(key) ? `Key${key.toUpperCase()}` : key;
@@ -11,6 +11,8 @@ function stroke(key: string, modifiers: Partial<KeyStroke> = {}): KeyStroke {
     ctrlKey: false,
     altKey: false,
     metaKey: false,
+    isComposing: false,
+    keyCode: 0,
     ...modifiers,
   };
 }
@@ -29,14 +31,107 @@ describe("Shift+Enter", () => {
   it.each(PLATFORMS)("leaves the other Enter combinations to xterm.js on %s", (platform) => {
     expect(mapKey(stroke("Enter"), platform)).toEqual({ kind: "default" });
     for (const modifiers of [
-      { altKey: true },
       { ctrlKey: true },
       { metaKey: true },
       { shiftKey: true, ctrlKey: true },
-      { shiftKey: true, altKey: true },
+      { altKey: true, metaKey: true },
     ]) {
       expect(mapKey(stroke("Enter", modifiers), platform)).toEqual({ kind: "default" });
     }
+  });
+});
+
+describe("Option+Enter", () => {
+  it.each(PLATFORMS)("sends the same bytes as Shift+Enter on %s", (platform) => {
+    const expected = { kind: "send", data: SHIFT_ENTER_SEQUENCE };
+
+    expect(mapKey(stroke("Enter", { altKey: true }), platform)).toEqual(expected);
+    expect(mapKey(stroke("Enter", { altKey: true, shiftKey: true }), platform)).toEqual(expected);
+  });
+});
+
+describe("during a composition", () => {
+  it.each(PLATFORMS)("no key is intercepted on %s", (platform) => {
+    // Enter confirms the text of an input method: it must not become a
+    // newline for the program, with or without Shift.
+    for (const composing of [{ isComposing: true }, { keyCode: 229 }]) {
+      for (const key of [
+        stroke("Enter", { shiftKey: true, ...composing }),
+        stroke("Enter", { altKey: true, ...composing }),
+        stroke("Process", { shiftKey: true, ...composing }),
+        stroke("C", { ctrlKey: true, shiftKey: true, ...composing }),
+        stroke("V", { ctrlKey: true, shiftKey: true, ...composing }),
+        stroke("Insert", { shiftKey: true, ...composing }),
+      ]) {
+        expect(mapKey(key, platform)).toEqual({ kind: "default" });
+      }
+    }
+  });
+});
+
+describe("the Option keys of a Mac", () => {
+  const down = (code: string, altKey = true) => ({ type: "keydown", code, altKey });
+  const up = (code: string, altKey = false) => ({ type: "keyup", code, altKey });
+
+  it("only the left one is Meta in `left` mode", () => {
+    const keys = new OptionKeys();
+    expect(keys.actsAsMeta("left")).toBe(false);
+
+    keys.track(down("AltLeft"));
+    keys.track(down("KeyB"));
+    expect(keys.actsAsMeta("left")).toBe(true);
+    keys.track(up("KeyB", true));
+    keys.track(up("AltLeft"));
+    expect(keys.actsAsMeta("left")).toBe(false);
+
+    keys.track(down("AltRight"));
+    keys.track(down("KeyN"));
+    expect(keys.actsAsMeta("left")).toBe(false);
+  });
+
+  it("the right one wins when both are held", () => {
+    const keys = new OptionKeys();
+
+    keys.track(down("AltLeft"));
+    keys.track(down("AltRight"));
+    expect(keys.actsAsMeta("left")).toBe(false);
+
+    keys.track(up("AltRight", true));
+    expect(keys.actsAsMeta("left")).toBe(true);
+  });
+
+  it("an Option key that was not seen going down types characters", () => {
+    const keys = new OptionKeys();
+
+    // Held before the terminal had the focus.
+    keys.track(down("KeyN"));
+
+    expect(keys.actsAsMeta("left")).toBe(false);
+  });
+
+  it("a release that was missed is noticed at the next key without Option", () => {
+    const keys = new OptionKeys();
+    keys.track(down("AltLeft"));
+
+    // The window lost the focus; Option was released elsewhere.
+    keys.track(down("KeyA", false));
+    expect(keys.actsAsMeta("left")).toBe(false);
+
+    keys.track(down("AltLeft"));
+    keys.reset();
+    expect(keys.actsAsMeta("left")).toBe(false);
+  });
+
+  it("`both` and `none` do not depend on which key is held", () => {
+    const keys = new OptionKeys();
+    keys.track(down("AltRight"));
+    expect(keys.actsAsMeta("both")).toBe(true);
+    expect(keys.actsAsMeta("none")).toBe(false);
+
+    keys.reset();
+    keys.track(down("AltLeft"));
+    expect(keys.actsAsMeta("both")).toBe(true);
+    expect(keys.actsAsMeta("none")).toBe(false);
   });
 });
 
