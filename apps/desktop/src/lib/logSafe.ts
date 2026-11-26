@@ -7,8 +7,12 @@
  *
  * - for an `Error`, only its name, message and stack are logged, never its
  *   other properties;
- * - for anything else, only the type and, for objects, the names of the
- *   top-level keys are logged. Values are never logged, not even strings.
+ * - for anything else, only the type and, for objects, the number of
+ *   top-level keys and the names of those that are plainly field names are
+ *   logged. Values are never logged, not even strings.
+ *
+ * The Rust side also removes what looks like a secret from every record
+ * (`scrub.rs`), messages and stacks of errors included.
  */
 
 export interface LoggableError {
@@ -16,11 +20,19 @@ export interface LoggableError {
   stack?: string;
 }
 
-/** Longest key name and most keys listed for a thrown object. */
-const MAX_KEY_LENGTH = 40;
+/** Most key names listed for a thrown object. */
 const MAX_KEYS = 20;
 
-/** The type of `value` and, for objects, its top-level key names. */
+/**
+ * A key is only named when it looks like a field name written by a
+ * programmer: letters and underscores, at most 24 of them, optionally ending
+ * in one or two digits. Anything else can be data (a token used as a key, an
+ * e-mail address, a path) and is only counted.
+ */
+const FIELD_NAME = /^[A-Za-z_$][A-Za-z_$]{0,23}\d{0,2}$/;
+
+/** The type of `value` and, for objects, its number of keys and the names of
+ * those that are plainly field names. */
 export function describeShape(value: unknown): string {
   if (value === null) return "null";
   if (Array.isArray(value)) return `array of length ${String(value.length)}`;
@@ -34,9 +46,12 @@ export function describeShape(value: unknown): string {
       } catch {
         return "object";
       }
-      const shown = keys.slice(0, MAX_KEYS).map((key) => key.slice(0, MAX_KEY_LENGTH));
-      const more = keys.length > MAX_KEYS ? `, and ${String(keys.length - MAX_KEYS)} more` : "";
-      return `object with keys [${shown.join(", ")}${more}]`;
+      const names = keys.filter((key) => FIELD_NAME.test(key));
+      const shown = names.slice(0, MAX_KEYS);
+      const hidden = keys.length - shown.length;
+      const list = hidden > 0 ? [...shown, `+${String(hidden)} not shown`] : shown;
+      const count = `${String(keys.length)} ${keys.length === 1 ? "key" : "keys"}`;
+      return `object with ${count} [${list.join(", ")}]`;
     }
     default:
       return typeof value;
