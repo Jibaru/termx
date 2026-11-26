@@ -45,11 +45,16 @@ apps/
       src/lib.rs           Application builder and command registration
       src/commands/        Tauri commands, one module per feature area
       src/logging.rs       Log directory per platform, logging start and stop
+      src/e2e.rs           Hooks for the end-to-end tests, only in builds made for them
       src/terminal.rs      Terminals of the app: channels, window ownership, shutdown
       src/workspace.rs     Workspace of the app: state directory, change events, window
       src/contract.rs      Test that keeps lib/ipc.contract.json true to the Rust types
       capabilities/        Tauri permissions granted to the windows
       tauri.conf.json      Tauri configuration
+e2e/                       End-to-end tests, which drive the real application
+  specs/                   The tests, one file per area
+  src/                     The harness: starting the application, typing, reading the terminal
+  helpers/                 The programs the tests run inside the terminal
 docs/                      User documentation
 plugin/                    Placeholder for the future Claude Code plugin
 ```
@@ -96,6 +101,145 @@ pnpm test
 `pnpm format` formats everything Prettier covers, and `cargo fmt --all`
 formats the Rust code.
 
+Continuous integration also runs the [end-to-end tests](#end-to-end-tests) on
+the three platforms.
+
+## End-to-end tests
+
+The tests in `e2e/` start the real application and use it: a real webview,
+the real xterm.js, a real shell in a real PTY. They catch what the unit tests
+cannot, because those replace xterm.js and the Rust side with stand-ins: keys
+that send the wrong bytes, a terminal that stays blank, a resize that never
+reaches the program, a shell that survives the application.
+
+### Running them
+
+```sh
+pnpm e2e:build   # the frontend, then a debug build with the `e2e` feature
+pnpm e2e         # every test
+pnpm e2e specs/keys.e2e.ts          # one file
+pnpm e2e -t "Shift+Enter"           # the tests whose name matches
+```
+
+`pnpm e2e:build` again after changing the application; the tests themselves
+need no build.
+
+- **macOS**: nothing else to install.
+- **Windows**: nothing else to install. The WebView2 runtime is part of
+  Windows 10 and 11. `pnpm e2e` goes through Windows PowerShell once, to give
+  the suite the default handling of Ctrl+C whatever started it (see
+  `e2e/run.mjs`).
+- **Linux**: a display is needed. On a desktop, run the commands as they
+  are. Without one (a server, a container), run the suite under a virtual
+  display: install `xvfb` and use
+  `xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" pnpm e2e`.
+  CI does that, and also takes a picture of that display with `import`, from
+  ImageMagick, to check that the terminal is drawn on it; outside CI that one
+  check is left out and ImageMagick is not needed.
+
+Each test file opens a window of termx for a few seconds, about a minute in
+all. **The window takes the keyboard focus**: what you type meanwhile lands
+in the terminal under test, which loses you those keys and can fail the test.
+Leave the keyboard alone while the suite runs.
+
+The tests never touch your files or your shell configuration: every
+application they start gets an empty home directory, its own log directory
+and a shell that reads no profile (`bash --noprofile --norc`, or
+`cmd.exe /D` on Windows). One test overwrites the system clipboard; it only
+runs in CI, or with `TERMX_E2E_CLIPBOARD=1`.
+
+When a test fails, look in `e2e/artifacts/<name of the run>/`: `failures/`
+has what the terminal showed, its state and a screenshot for each failed
+test; `app-output.log` and `logs/` have what the application printed and
+logged. CI uploads the same directory as an artifact of the failed job.
+
+### How they work
+
+`pnpm e2e:build` compiles the application with the cargo feature `e2e`
+(`apps/desktop/src-tauri/src/e2e.rs`). That feature, and nothing else, adds:
+
+- a WebDriver server inside the application, the
+  [embedded server](https://webdriver.io/docs/desktop-testing/tauri) of the
+  WebdriverIO Tauri service. It is used on the three platforms so that there
+  is one harness: macOS has no WebDriver for its webview, which rules out
+  `tauri-driver` there. It only listens when `TAURI_WEBDRIVER_PORT` is set,
+  and only on the loopback interface;
+- `TERMX_E2E_SHELL`, which names the program the terminals run instead of
+  your login shell;
+- a marker that makes the frontend expose its terminals, so that a test can
+  read the buffer of xterm.js (`apps/desktop/src/test/e2eHook.ts`).
+
+None of this can ship. The feature is off by default, and enabling it in a
+build without debug assertions, which a release is, is a compile error.
+Without the marker the frontend exposes nothing. The capabilities and the
+content security policy of the application are the same with and without the
+feature. Keep it that way: a hook for the tests goes behind the feature, in
+`e2e.rs`.
+
+**Keys are not physical key presses.** No tool can press keys in the webview
+of the three platforms, so the suite delivers `KeyboardEvent`s to the
+terminal, described as the webview describes the real key (`key`, `code`,
+`keyCode`, which of the two Option keys). That tests everything from the key
+handler of termx to the program in the terminal, and not the webview turning
+a physical key into that event. Pastes are `paste` events, for the same
+reason.
+
+### Writing one
+
+A test file starts one application for all its tests with `useApp`, and
+uses its terminal:
+
+```ts
+import { describe, it } from "vitest";
+
+import { useApp } from "../src/fixture.ts";
+
+describe("typing in the terminal", () => {
+  const fixture = useApp("typing"); // also the name of the artifacts directory
+
+  it("runs a typed command and shows its output", async () => {
+    const { terminal } = fixture;
+    const token = terminal.token();
+
+    await terminal.submit(`echo ${token}`); // types it, then Enter
+
+    await terminal.waitForExactLine(token); // read from the buffer of xterm.js
+  });
+});
+```
+
+The rules that keep the suite deterministic:
+
+- **Wait on a condition, never for a fixed time.** `waitForExactLine`,
+  `waitForLine`, `waitForState` and `waitFor` check until the condition holds
+  or the time is up, and say what the terminal showed when it is.
+- **Never repeat a test.** A test that fails once in a while is a failing
+  test: find out why. The only thing that is repeated is a start of the
+  application that never got as far as a WebDriver session, and CI reports
+  every one of those.
+- **Tell your output apart with a token.** The tests of a file share a
+  terminal, and the command line you type is on screen too. Wait for a line
+  that _is_ `terminal.token()`, not for one that contains a fixed word.
+- **Type what both shells understand.** The same test runs under bash and
+  under `cmd.exe`: `echo`, `exit 3` and little else. For anything more, add a
+  command to `e2e/helpers/helper.mjs` and start it with
+  `terminal.startHelper`. `terminal.startRaw()` starts the one that prints
+  the bytes it receives, which is how keys and pastes are checked.
+- **Assert on text and state, not on pixels.** `terminal.lines()` and
+  `terminal.state()` read xterm.js. The one test that looks at pixels
+  (`specs/launch.e2e.ts`) only counts those that are not the background,
+  with a tolerance, and compares no image.
+- Code that runs in the page lives in `e2e/src/page.ts`. It is sent to the
+  webview as text, so it cannot use anything from outside its function.
+- A test that only makes sense on one platform says so:
+  `it.runIf(process.platform === "darwin")`.
+
+If a test shows a bug in the application that is not fixed in the same pull
+request, keep the test and mark it `it.fails`, with a comment that says what
+is wrong and links to where it is explained. Do not skip it and do not weaken
+it: the test starts failing when the bug is fixed, which is the reminder to
+remove the mark. `specs/ctrl-c.e2e.ts` has one.
+
 ## Code style
 
 - Code, comments, documentation and commit messages are written in English.
@@ -104,6 +248,8 @@ formats the Rust code.
   with Prettier.
 - New behaviour comes with tests: Rust unit tests next to the code, and
   Vitest tests next to the frontend modules (`*.test.ts` or `*.test.tsx`).
+  Behaviour that only shows in the running application (keys, rendering, the
+  life of the shell) also gets an [end-to-end test](#end-to-end-tests).
 
 ## Logging conventions
 
