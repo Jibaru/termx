@@ -13,13 +13,12 @@ instead of a placeholder.
   Ctrl+Shift+V on Windows and Linux. Programs can copy to your clipboard, but
   never read it.
 - Shift+Enter inserts a new line in Claude Code without running
-  `/terminal-setup`, and on macOS the Option key works as Meta.
+  `/terminal-setup`. On macOS the left Option key works as Meta, while the
+  right one still types characters such as á, ñ or @.
 - A program that prints faster than the screen can draw is slowed down
   instead of using more and more memory.
 - When the shell exits, the terminal shows its exit code, and Enter starts a
   new one.
 - Quitting termx ends the shells it started.
 
-The dark theme and the font are fixed for now; settings come later. On macOS
-the Option key no longer types the alternate characters of your keyboard
-layout in the terminal.
+The dark theme and the font are fixed for now; settings come later.
