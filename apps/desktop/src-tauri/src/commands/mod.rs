@@ -5,8 +5,9 @@
 //! declared below) and register it in the `generate_handler!` list in
 //! `lib.rs`.
 //!
-//! A command that can fail returns [`error::CommandResult`] and wraps its
-//! result in [`error::logged`], so that every failure is logged exactly once.
+//! A command that can fail or panic returns [`error::CommandResult`] and runs
+//! its body inside [`error::logged`] (or [`error::logged_async`]), so that
+//! every failure is logged exactly once and a panic becomes an error.
 
 pub mod app;
 pub mod diagnostics;
