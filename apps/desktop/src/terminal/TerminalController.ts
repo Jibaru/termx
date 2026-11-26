@@ -23,7 +23,7 @@ import {
 } from "../lib/ipc";
 import { detectPlatform, type Platform } from "../lib/platform";
 import { DEFAULT_TERMINAL_CONFIG, type TerminalConfig } from "./config";
-import { isComposing, mapKey, OptionKeys } from "./keymap";
+import { isComposing, mapKey, OptionKeys, sanitizePaste } from "./keymap";
 import { clipboardTextFromOsc52 } from "./osc52";
 
 /**
@@ -286,6 +286,8 @@ export class TerminalController {
       this.scheduleFit();
     });
     this.resizeObserver.observe(container);
+    // In the capture phase, before xterm.js sees the event: see `handlePaste`.
+    container.addEventListener("paste", this.handlePaste, true);
     window.addEventListener("blur", this.handleWindowBlur);
     this.terminal.focus();
 
@@ -304,6 +306,7 @@ export class TerminalController {
     if (this.container && element?.parentElement === this.container) {
       this.container.removeChild(element);
     }
+    this.container?.removeEventListener("paste", this.handlePaste, true);
     window.removeEventListener("blur", this.handleWindowBlur);
     this.container = null;
   }
@@ -522,13 +525,33 @@ export class TerminalController {
     this.backend
       .readClipboardText()
       .then((text) => {
-        // `paste` wraps the text in the bracketed paste markers when the
-        // program asked for them, and normalises its line endings.
-        if (text !== "" && !this.disposed) this.terminal.paste(text);
+        this.paste(text);
       })
       .catch((error: unknown) => {
         reportError("terminal-paste", error);
       });
+  }
+
+  /**
+   * Every paste the webview performs itself (Cmd+V, the Edit menu, the
+   * context menu) arrives here before it reaches xterm.js, so that pasted
+   * text is sanitised whatever way it comes in.
+   */
+  private readonly handlePaste = (event: ClipboardEvent): void => {
+    event.preventDefault();
+    event.stopPropagation();
+    this.paste(event.clipboardData?.getData("text/plain") ?? "");
+  };
+
+  /**
+   * Pastes `text` into the terminal. xterm.js wraps it in the bracketed
+   * paste markers when the program asked for them, and turns its line
+   * endings into carriage returns either way; the text itself must not
+   * contain the end marker.
+   */
+  private paste(text: string): void {
+    const clean = sanitizePaste(text);
+    if (clean !== "" && !this.disposed) this.terminal.paste(clean);
   }
 
   /** A program asked to access the clipboard (OSC 52). */

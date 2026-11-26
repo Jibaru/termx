@@ -149,3 +149,24 @@ export class OptionKeys {
     }
   }
 }
+
+/** The marker that ends a bracketed paste. */
+const BRACKETED_PASTE_END = "\x1b[201~";
+
+/**
+ * Removes the end-of-paste marker from text about to be pasted.
+ *
+ * A program that asked for bracketed paste treats what lies between the
+ * markers as text, not as keys. Pasted text that contains the end marker
+ * itself would close the bracket early, and what follows it would be run as
+ * if it had been typed: a web page can put that on the clipboard. The
+ * removal is repeated, because taking one marker out can join the pieces of
+ * another. Every other byte is kept.
+ */
+export function sanitizePaste(text: string): string {
+  let clean = text;
+  while (clean.includes(BRACKETED_PASTE_END)) {
+    clean = clean.replaceAll(BRACKETED_PASTE_END, "");
+  }
+  return clean;
+}

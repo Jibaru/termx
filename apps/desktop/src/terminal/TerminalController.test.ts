@@ -548,6 +548,57 @@ describe("the Option key on macOS", () => {
   });
 });
 
+describe("pasting", () => {
+  /** A paste performed by the webview: Cmd+V, the Edit menu, the context menu. */
+  function pasteEvent(text: string): ClipboardEvent {
+    const event = new Event("paste", { bubbles: true, cancelable: true }) as ClipboardEvent;
+    Object.defineProperty(event, "clipboardData", {
+      value: { getData: (type: string) => (type === "text/plain" ? text : "") },
+    });
+    return event;
+  }
+
+  it("takes the webview's own paste before xterm.js and removes the end marker", async () => {
+    const { terminal } = await attached({ platform: "macos" });
+    const reachedXterm = vi.fn();
+    terminal.element?.addEventListener("paste", reachedXterm);
+
+    const event = pasteEvent("echo safe\x1b[201~; rm -rf ~\r");
+    terminal.element?.dispatchEvent(event);
+
+    expect(terminal.pasted).toEqual(["echo safe; rm -rf ~\r"]);
+    expect(event.defaultPrevented).toBe(true);
+    expect(reachedXterm).not.toHaveBeenCalled();
+  });
+
+  it("removes the end marker from a paste made with the keyboard shortcut too", async () => {
+    const { terminal, clipboard } = await attached({ platform: "linux" });
+    clipboard.text = "a\x1b[20\x1b[201~1~b";
+
+    terminal.key("keydown", { key: "V", code: "KeyV", ctrlKey: true, shiftKey: true });
+    await settle();
+
+    expect(terminal.pasted).toEqual(["ab"]);
+  });
+
+  it("pastes nothing when only the marker was on the clipboard", async () => {
+    const { terminal } = await attached();
+
+    terminal.element?.dispatchEvent(pasteEvent("\x1b[201~"));
+
+    expect(terminal.pasted).toEqual([]);
+  });
+
+  it("stops listening when the terminal leaves the pane", async () => {
+    const { controller, container, terminal } = await attached();
+    controller.detach();
+
+    container.dispatchEvent(pasteEvent("late"));
+
+    expect(terminal.pasted).toEqual([]);
+  });
+});
+
 describe("resizing", () => {
   beforeEach(() => {
     vi.useFakeTimers();

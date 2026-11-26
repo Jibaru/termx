@@ -230,3 +230,49 @@ describe("the keys programs depend on, against xterm.js", () => {
     expect((await mac.settled()).join("")).toBe("\x03\x04\x1a\x1b\r\x1b[A\x1b[1;2A\x1b[1;5C");
   });
 });
+
+describe("pasting, against xterm.js", () => {
+  function pasteEvent(text: string): Event {
+    const event = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "clipboardData", {
+      value: { getData: (type: string) => (type === "text/plain" ? text : "") },
+    });
+    return event;
+  }
+
+  /** Writes to the terminal and waits until xterm.js has parsed it. */
+  function write(controller: Controller, data: string): Promise<void> {
+    return new Promise((resolve) => {
+      controller.terminal.write(data, resolve);
+    });
+  }
+
+  it("turns line endings into carriage returns and keeps the other bytes", async () => {
+    const mac = await terminalOnMac();
+
+    mac.textarea.dispatchEvent(pasteEvent("one\r\ntwo\nthree\ttab \x1b[31m é ✓"));
+
+    expect((await mac.settled()).join("")).toBe("one\rtwo\rthree\ttab \x1b[31m é ✓");
+  });
+
+  it("cannot be made to leave a bracketed paste early", async () => {
+    const mac = await terminalOnMac();
+    // The program asks for bracketed paste, as shells and Claude Code do.
+    await write(mac.controller, "\x1b[?2004h");
+
+    mac.textarea.dispatchEvent(pasteEvent("harmless\x1b[201~\rrm -rf ~\r"));
+
+    const pasted = (await mac.settled()).join("");
+    expect(pasted).toBe("\x1b[200~harmless\rrm -rf ~\r\x1b[201~");
+    // The only end marker is the one xterm.js puts at the very end.
+    expect(pasted.indexOf("\x1b[201~")).toBe(pasted.length - "\x1b[201~".length);
+  });
+
+  it("is sent once, not a second time by xterm.js itself", async () => {
+    const mac = await terminalOnMac();
+
+    mac.textarea.dispatchEvent(pasteEvent("once"));
+
+    expect((await mac.settled()).join("")).toBe("once");
+  });
+});
