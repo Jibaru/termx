@@ -1,3 +1,4 @@
+import { DiagnosticsActions } from "./DiagnosticsActions";
 import { type CoreVersionState, useCoreVersion } from "../lib/useCoreVersion";
 
 function describeCoreVersion(state: CoreVersionState): string {
@@ -21,6 +22,7 @@ export function MainPane() {
       <p className="core-version" data-status={coreVersion.status}>
         {describeCoreVersion(coreVersion)}
       </p>
+      <DiagnosticsActions />
     </main>
   );
 }
