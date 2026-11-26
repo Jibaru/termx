@@ -53,7 +53,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Check that the pull request adds a change file when it needs one
+      - name: Check the change files of the pull request
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
           SKIP_LABEL_SET: ${{ contains(github.event.pull_request.labels.*.name, 'no-changelog') }}
