@@ -114,13 +114,18 @@ impl OutputSink {
 
     /// Marks the end of the stream. Buffered bytes can still be received.
     pub(super) fn finish(&self) {
-        let callback = {
+        let (callback, shut_down) = {
             let mut state = lock(&self.channel.state);
             state.finished = true;
-            state.on_readable.clone()
+            (state.on_readable.clone(), state.shut_down)
         };
         self.channel.readable.notify_all();
-        if let Some(callback) = callback {
+        // Not called when the `Pty` is being dropped: the dropping thread is
+        // waiting for this one, so a slow callback would delay it and one
+        // needing a lock held by that thread would deadlock.
+        if let Some(callback) = callback
+            && !shut_down
+        {
             self.notify(&callback);
         }
     }
@@ -216,6 +221,11 @@ impl PtyOutput {
     /// output stays in the bounded buffer until it is received.
     ///
     /// Registering a callback replaces the previous one.
+    ///
+    /// The end of the stream is **not** announced when it is caused by the
+    /// [`Pty`](super::Pty) being dropped, because the dropping thread is
+    /// waiting for the reader thread; whoever drops the `Pty` knows the
+    /// session is over.
     ///
     /// If the callback panics, the panic is contained so that the session
     /// keeps working, and the callback is unregistered: it is never called
@@ -537,6 +547,22 @@ mod tests {
 
         sink.finish();
 
+        assert_eq!(output.recv(), None);
+    }
+
+    #[test]
+    fn callback_is_not_called_once_shut_down() {
+        use std::sync::atomic::Ordering::SeqCst;
+
+        let (sink, mut output) = channel();
+        let calls = count_calls(&mut output);
+
+        // What dropping a `Pty` does: shut down, then the reader finishes.
+        sink.shut_down();
+        sink.push(b"discarded");
+        sink.finish();
+
+        assert_eq!(calls.load(SeqCst), 0);
         assert_eq!(output.recv(), None);
     }
 
