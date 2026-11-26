@@ -7,21 +7,30 @@
 //! - **Every severity has its own budget**, so a flood of low-level records
 //!   cannot use up the room for errors.
 //! - **The first occurrence of an error is not dropped in favour of
-//!   repeats.** An error whose key was not seen before draws on a second
-//!   budget when the error budget is used up by repeats.
+//!   repeats.** An error that was not seen before draws on a second budget
+//!   when the error budget is used up. Two errors are the same when they
+//!   have the same source and the same [message key](super::message_key),
+//!   so numbering the messages does not make each of them new.
+//! - **That second budget is per source**, so one source that produces an
+//!   endless stream of different errors only exhausts its own, and a new
+//!   error from elsewhere still gets through.
 //! - **Every dropped record is counted**, per severity, and the counts are
 //!   handed out with the next admitted record so that they can be logged.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasher, RandomState};
 use std::time::{Duration, Instant};
 
+use super::normalise::message_key;
 use super::rate_limit::{Decision, RateLimiter};
 
 /// Shortest time between two reports of dropped records. During a flood the
 /// counts add up and are reported together, instead of in a record of their
 /// own for every record that gets through.
 pub const REPORT_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Sources that get a budget of their own. Any others share one.
+const MAX_SOURCES: usize = 32;
 
 /// Distinct error keys remembered before the memory starts over.
 const MAX_REMEMBERED_ERRORS: usize = 1_024;
@@ -55,15 +64,15 @@ pub struct GateConfig {
     pub warnings: Budget,
     /// Budget for everything else.
     pub infos: Budget,
-    /// Extra budget for errors that were not seen before, used when
-    /// `errors` is exhausted.
-    pub new_errors: Budget,
+    /// Extra budget each source has for errors that were not seen before,
+    /// used when `errors` is exhausted.
+    pub new_errors_per_source: Budget,
 }
 
 impl Default for GateConfig {
     /// 20 errors, 10 warnings and 10 other records at once, then one per
-    /// second, per two seconds and per two seconds; and 50 more errors at
-    /// once, then one per second, for errors not seen before.
+    /// second, per two seconds and per two seconds; and for every source 10
+    /// more errors at once, then one per second, for errors not seen before.
     fn default() -> Self {
         let second = Duration::from_secs(1);
         Self {
@@ -79,8 +88,8 @@ impl Default for GateConfig {
                 burst: 10,
                 interval: 2 * second,
             },
-            new_errors: Budget {
-                burst: 50,
+            new_errors_per_source: Budget {
+                burst: 10,
                 interval: second,
             },
         }
@@ -121,7 +130,11 @@ pub struct RecordGate {
     errors: RateLimiter,
     warnings: RateLimiter,
     infos: RateLimiter,
-    new_errors: RateLimiter,
+    new_errors_budget: Budget,
+    /// The budget for new errors of each source, and one for the sources
+    /// that came after the first [`MAX_SOURCES`].
+    new_errors: HashMap<String, RateLimiter>,
+    new_errors_of_other_sources: RateLimiter,
     /// Hashes of the error keys seen so far.
     seen_errors: HashSet<u64>,
     hasher: RandomState,
@@ -138,7 +151,9 @@ impl RecordGate {
             errors: limiter(config.errors),
             warnings: limiter(config.warnings),
             infos: limiter(config.infos),
-            new_errors: limiter(config.new_errors),
+            new_errors_budget: config.new_errors_per_source,
+            new_errors: HashMap::new(),
+            new_errors_of_other_sources: limiter(config.new_errors_per_source),
             seen_errors: HashSet::new(),
             hasher: RandomState::new(),
             dropped: Dropped::default(),
@@ -148,20 +163,26 @@ impl RecordGate {
 
     /// Asks whether a record may be written now.
     ///
-    /// `key` identifies what the record is about (for an error, its source
-    /// and message), to tell a new error from a repeat.
+    /// `source` says where the record comes from and `message` what it is
+    /// about. Together they tell a new error from a repeat.
     ///
     /// Returns `None` when the record must be dropped. Otherwise returns the
     /// dropped records the caller should log now: usually none, and at most
     /// once per [`REPORT_INTERVAL`] the counts since the last report, which
     /// are then reset.
-    pub fn admit(&mut self, severity: Severity, key: &str) -> Option<Dropped> {
-        self.admit_at(severity, key, Instant::now())
+    pub fn admit(&mut self, severity: Severity, source: &str, message: &str) -> Option<Dropped> {
+        self.admit_at(severity, source, message, Instant::now())
     }
 
     /// [`RecordGate::admit`] at a given time. Time must not go backwards
     /// between calls.
-    pub fn admit_at(&mut self, severity: Severity, key: &str, now: Instant) -> Option<Dropped> {
+    pub fn admit_at(
+        &mut self,
+        severity: Severity,
+        source: &str,
+        message: &str,
+        now: Instant,
+    ) -> Option<Dropped> {
         let allowed = |limiter: &mut RateLimiter| limiter.check_at(now) != Decision::Denied;
         let admitted = match severity {
             Severity::Warn => allowed(&mut self.warnings),
@@ -170,9 +191,11 @@ impl RecordGate {
                 if self.seen_errors.len() >= MAX_REMEMBERED_ERRORS {
                     self.seen_errors.clear();
                 }
-                let new = self.seen_errors.insert(self.hasher.hash_one(key));
-                // A new error falls back on its own budget; a repeat cannot.
-                allowed(&mut self.errors) || (new && allowed(&mut self.new_errors))
+                let key = self.hasher.hash_one((source, message_key(message)));
+                let new = self.seen_errors.insert(key);
+                // A new error falls back on the budget of its source; a
+                // repeat cannot.
+                allowed(&mut self.errors) || (new && allowed(self.new_errors_of(source)))
             }
         };
 
@@ -194,6 +217,17 @@ impl RecordGate {
         };
         *counter = counter.saturating_add(1);
         None
+    }
+
+    /// The budget for new errors of `source`.
+    fn new_errors_of(&mut self, source: &str) -> &mut RateLimiter {
+        if !self.new_errors.contains_key(source) && self.new_errors.len() >= MAX_SOURCES {
+            return &mut self.new_errors_of_other_sources;
+        }
+        let budget = self.new_errors_budget;
+        self.new_errors
+            .entry(source.to_owned())
+            .or_insert_with(|| RateLimiter::new(budget.burst, budget.interval))
     }
 
     /// Returns the records dropped since they were last handed out, and
@@ -227,7 +261,7 @@ mod tests {
             errors: budget(errors),
             warnings: budget(others),
             infos: budget(others),
-            new_errors: budget(new_errors),
+            new_errors_per_source: budget(new_errors),
         })
     }
 
@@ -237,15 +271,15 @@ mod tests {
         let mut gate = gate(2, 0, 3);
 
         let infos = (0..1_000)
-            .filter(|_| gate.admit_at(Severity::Info, "noise", now).is_some())
+            .filter(|_| gate.admit_at(Severity::Info, "ui", "noise", now).is_some())
             .count();
         let warnings = (0..1_000)
-            .filter(|_| gate.admit_at(Severity::Warn, "noise", now).is_some())
+            .filter(|_| gate.admit_at(Severity::Warn, "ui", "noise", now).is_some())
             .count();
 
         assert_eq!((infos, warnings), (3, 3));
         assert!(
-            gate.admit_at(Severity::Error, "real problem", now)
+            gate.admit_at(Severity::Error, "ui", "real problem", now)
                 .is_some()
         );
     }
@@ -256,12 +290,15 @@ mod tests {
         let mut gate = gate(5, 10, 1);
 
         let repeats = (0..1_000)
-            .filter(|_| gate.admit_at(Severity::Error, "render loop", now).is_some())
+            .filter(|_| {
+                gate.admit_at(Severity::Error, "ui", "render loop", now)
+                    .is_some()
+            })
             .count();
         assert_eq!(repeats, 5, "repeats only have the error budget");
 
         // The error budget is gone, and a different error still gets in.
-        let dropped = gate.admit_at(Severity::Error, "disk full", now);
+        let dropped = gate.admit_at(Severity::Error, "ui", "disk full", now);
         assert_eq!(
             dropped,
             Some(Dropped {
@@ -270,23 +307,84 @@ mod tests {
             })
         );
         // Its own repeats do not.
-        assert_eq!(gate.admit_at(Severity::Error, "disk full", now), None);
+        assert_eq!(gate.admit_at(Severity::Error, "ui", "disk full", now), None);
+    }
+
+    /// A message that stays different after numbers are ignored.
+    fn unique(index: u32) -> String {
+        let letters: String = index
+            .to_string()
+            .bytes()
+            .map(|digit| char::from(b'a' + digit - b'0'))
+            .collect();
+        format!("failure {letters}")
     }
 
     #[test]
-    fn distinct_errors_are_bounded_too() {
+    fn numbered_variants_of_one_error_are_repeats_not_new_errors() {
         let now = Instant::now();
         let mut gate = gate(5, 10, 1);
 
         let admitted = (0..10_000)
             .filter(|index| {
-                gate.admit_at(Severity::Error, &format!("error {index}"), now)
+                let message = format!("request {index} failed for session 7f3a{index:04x}");
+                gate.admit_at(Severity::Error, "loop", &message, now)
+                    .is_some()
+            })
+            .count();
+        assert_eq!(admitted, 5, "the variants only have the error budget");
+
+        // The budget for new errors is untouched: a real one gets through,
+        // even from the same source.
+        assert!(
+            gate.admit_at(Severity::Error, "loop", "the disk is full", now)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn a_source_that_floods_with_different_errors_only_exhausts_its_own_budget() {
+        let now = Instant::now();
+        let mut gate = gate(5, 10, 1);
+
+        let admitted = (0..10_000)
+            .filter(|index| {
+                gate.admit_at(Severity::Error, "loop", &unique(*index), now)
+                    .is_some()
+            })
+            .count();
+        assert_eq!(
+            admitted, 15,
+            "the error budget plus the budget of the source"
+        );
+        assert!(
+            gate.admit_at(Severity::Error, "loop", "one more", now)
+                .is_none()
+        );
+
+        // Another source has its own, and its record brings the count.
+        let dropped = gate
+            .admit_at(Severity::Error, "disk", "the disk is full", now)
+            .unwrap();
+        assert_eq!(dropped.errors, 9_986);
+    }
+
+    #[test]
+    fn the_number_of_sources_with_a_budget_is_bounded() {
+        let now = Instant::now();
+        let mut gate = gate(1, 2, 1);
+        gate.admit_at(Severity::Error, "first", "uses up the error budget", now);
+
+        let admitted = (0..1_000u32)
+            .filter(|index| {
+                gate.admit_at(Severity::Error, &unique(*index), &unique(*index), now)
                     .is_some()
             })
             .count();
 
-        assert_eq!(admitted, 15);
-        assert_eq!(gate.take_dropped().errors, 9_985);
+        // One from each of the sources that fit, which is all they sent, and
+        // the two that all the other sources share.
+        assert_eq!(admitted, super::MAX_SOURCES + 2);
     }
 
     #[test]
@@ -294,31 +392,31 @@ mod tests {
         let now = Instant::now();
         let mut gate = gate(1, 0, 1);
         assert_eq!(
-            gate.admit_at(Severity::Error, "e", now),
+            gate.admit_at(Severity::Error, "ui", "e", now),
             Some(Dropped::default())
         );
         assert_eq!(
-            gate.admit_at(Severity::Warn, "w", now),
+            gate.admit_at(Severity::Warn, "ui", "w", now),
             Some(Dropped::default())
         );
         assert_eq!(
-            gate.admit_at(Severity::Info, "i", now),
+            gate.admit_at(Severity::Info, "ui", "i", now),
             Some(Dropped::default())
         );
 
         for _ in 0..3 {
-            assert_eq!(gate.admit_at(Severity::Error, "e", now), None);
+            assert_eq!(gate.admit_at(Severity::Error, "ui", "e", now), None);
         }
         for _ in 0..4 {
-            assert_eq!(gate.admit_at(Severity::Warn, "w", now), None);
+            assert_eq!(gate.admit_at(Severity::Warn, "ui", "w", now), None);
         }
         for _ in 0..5 {
-            assert_eq!(gate.admit_at(Severity::Info, "i", now), None);
+            assert_eq!(gate.admit_at(Severity::Info, "ui", "i", now), None);
         }
 
         // The pressure ends: the next admitted record carries the counts.
         let later = now + SECOND;
-        let dropped = gate.admit_at(Severity::Info, "i", later).unwrap();
+        let dropped = gate.admit_at(Severity::Info, "ui", "i", later).unwrap();
         assert_eq!(
             dropped,
             Dropped {
@@ -330,7 +428,7 @@ mod tests {
         assert_eq!(dropped.total(), 12);
         // And only that one.
         assert!(
-            gate.admit_at(Severity::Error, "e", later)
+            gate.admit_at(Severity::Error, "ui", "e", later)
                 .unwrap()
                 .is_empty()
         );
@@ -341,30 +439,38 @@ mod tests {
     fn budgets_refill_with_time() {
         let now = Instant::now();
         let mut gate = gate(1, 0, 1);
-        assert!(gate.admit_at(Severity::Error, "e", now).is_some());
-        assert!(gate.admit_at(Severity::Error, "e", now).is_none());
+        assert!(gate.admit_at(Severity::Error, "ui", "e", now).is_some());
+        assert!(gate.admit_at(Severity::Error, "ui", "e", now).is_none());
 
-        assert!(gate.admit_at(Severity::Error, "e", now + SECOND).is_some());
+        assert!(
+            gate.admit_at(Severity::Error, "ui", "e", now + SECOND)
+                .is_some()
+        );
     }
 
     #[test]
     fn drops_are_reported_together_at_most_once_per_interval() {
         let now = Instant::now();
         let mut gate = gate(1, 0, 1);
-        gate.admit_at(Severity::Info, "i", now);
-        gate.admit_at(Severity::Info, "i", now);
-        let first = gate.admit_at(Severity::Info, "i", now + SECOND).unwrap();
+        gate.admit_at(Severity::Info, "ui", "i", now);
+        gate.admit_at(Severity::Info, "ui", "i", now);
+        let first = gate
+            .admit_at(Severity::Info, "ui", "i", now + SECOND)
+            .unwrap();
         assert_eq!(first.infos, 1);
 
         // More drops right after a report wait for the interval to pass.
-        gate.admit_at(Severity::Info, "i", now + SECOND);
+        gate.admit_at(Severity::Info, "ui", "i", now + SECOND);
         let soon = gate
-            .admit_at(Severity::Info, "i", now + 2 * SECOND)
+            .admit_at(Severity::Info, "ui", "i", now + 2 * SECOND)
             .unwrap();
         assert!(soon.is_empty());
-        gate.admit_at(Severity::Info, "i", now + 2 * SECOND);
+        gate.admit_at(Severity::Info, "ui", "i", now + 2 * SECOND);
 
         let due = now + SECOND + super::REPORT_INTERVAL;
-        assert_eq!(gate.admit_at(Severity::Info, "i", due).unwrap().infos, 2);
+        assert_eq!(
+            gate.admit_at(Severity::Info, "ui", "i", due).unwrap().infos,
+            2
+        );
     }
 }
