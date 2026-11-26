@@ -891,6 +891,30 @@ fn background_job_holding_the_terminal_does_not_keep_the_session_open() {
     });
 }
 
+#[cfg(unix)]
+#[test]
+fn background_job_that_keeps_printing_does_not_keep_the_session_open() {
+    guarded(|| {
+        // The job survives the shell and prints every 20 ms for 20 seconds,
+        // so the terminal is never silent for long.
+        let command = PtyCommand::new("/bin/sh").args([
+            "-c",
+            "(trap '' HUP; i=0; while [ $i -lt 1000 ]; do echo spam; sleep 0.02; i=$((i+1)); done) & \
+             sleep 0.2; echo shell-is-done",
+        ]);
+        let started = Instant::now();
+        let (text, status) = Session::spawn(&command).finish();
+
+        assert!(text.contains("shell-is-done"), "got: {text:?}");
+        assert!(status.success(), "{status}");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the session followed the background job for {:?}",
+            started.elapsed()
+        );
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Shells
 // ---------------------------------------------------------------------------
