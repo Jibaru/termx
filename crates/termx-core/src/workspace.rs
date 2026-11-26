@@ -11,11 +11,14 @@
 //!   shell so that it has the user's environment.
 //! - [`project`]: which project a folder belongs to, and its Git branch.
 //! - [`layout`]: the split tree of panes of the main area.
+//! - [`store`]: the state file, written atomically and owned by one
+//!   instance.
 
 pub mod launch;
 pub mod layout;
 mod model;
 pub mod project;
+pub mod store;
 
 pub use launch::{LaunchFailure, LaunchMode, Launcher};
 pub use layout::{Direction, Edge, Layout, LayoutError, Node, PaneId, Placement, SplitId};
@@ -24,6 +27,7 @@ pub use model::{
     SessionKey, SessionKind, SessionState, clean_title, default_title, now_ms,
 };
 pub use project::{GitInfo, Project, ProjectKind};
+pub use store::{PersistenceMode, WindowGeometry};
 
 use std::path::{Path, PathBuf};
 
