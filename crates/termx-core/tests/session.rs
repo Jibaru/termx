@@ -585,6 +585,167 @@ fn shutting_down_kills_every_session() {
     });
 }
 
+/// How long the processes of [`stubborn`] sessions resist being closed.
+#[cfg(unix)]
+const STUBBORN_GRACE: Duration = Duration::from_secs(1);
+
+/// Starts sessions whose processes ignore the hang-up signal a close sends,
+/// and are only stopped by the forced kill at the end of their grace period.
+/// Returns their identifiers and process identifiers.
+#[cfg(unix)]
+fn stubborn(manager: &SessionManager, count: usize) -> (Vec<SessionId>, Vec<u32>) {
+    let command = PtyCommand::new("/bin/sh")
+        .args(["-c", "trap '' HUP; echo ready; while :; do sleep 1; done"])
+        .kill_grace(STUBBORN_GRACE);
+    let mut ids = Vec::new();
+    let mut frontends = Vec::new();
+    for _ in 0..count {
+        let (id, frontend) = start_command(manager, command.clone(), PtySize::default());
+        ids.push(id);
+        frontends.push(frontend);
+    }
+    // The trap is in place once the shell has printed.
+    for frontend in &frontends {
+        frontend.wait_for("ready");
+    }
+    let process_ids = ids
+        .iter()
+        .map(|&id| manager.process_id(id).expect("no process id"))
+        .collect();
+    (ids, process_ids)
+}
+
+/// Whether a process with this identifier exists.
+#[cfg(unix)]
+fn is_running(process_id: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", &process_id.to_string()])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("cannot run kill")
+        .success()
+}
+
+#[cfg(unix)]
+fn survivors(process_ids: &[u32]) -> Vec<u32> {
+    process_ids
+        .iter()
+        .copied()
+        .filter(|&process_id| is_running(process_id))
+        .collect()
+}
+
+#[cfg(unix)]
+#[test]
+fn shutting_down_kills_processes_that_ignore_the_hang_up_together() {
+    guarded(|| {
+        const SESSIONS: usize = 30;
+        termx_core::pty::raise_open_file_limit().expect("cannot raise the open file limit");
+        let manager = SessionManager::new().unwrap();
+        let (_, process_ids) = stubborn(&manager, SESSIONS);
+        assert_eq!(survivors(&process_ids).len(), SESSIONS);
+
+        let started = Instant::now();
+        manager.shutdown();
+        let elapsed = started.elapsed();
+        println!("shut {SESSIONS} stubborn sessions down in {elapsed:?}");
+
+        assert_eq!(
+            survivors(&process_ids),
+            Vec::<u32>::new(),
+            "processes survived"
+        );
+        // They resisted for their whole grace period, but all at once: one
+        // grace period, not thirty.
+        assert!(elapsed >= STUBBORN_GRACE, "killed early: {elapsed:?}");
+        assert!(
+            elapsed < STUBBORN_GRACE * 3,
+            "shutting down took {elapsed:?}"
+        );
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn closing_several_sessions_takes_one_grace_period_in_total() {
+    guarded(|| {
+        const SESSIONS: usize = 6;
+        let manager = SessionManager::new().unwrap();
+        let (ids, process_ids) = stubborn(&manager, SESSIONS);
+        let (bystander, _frontend) = start(&manager, &["sleep"]);
+
+        let started = Instant::now();
+        let closed = manager.close_all(&ids);
+        let elapsed = started.elapsed();
+
+        assert_eq!(closed, SESSIONS);
+        // Closing returns only once the processes are gone.
+        assert_eq!(
+            survivors(&process_ids),
+            Vec::<u32>::new(),
+            "processes survived"
+        );
+        assert!(
+            elapsed < STUBBORN_GRACE * 3,
+            "closing {SESSIONS} sessions took {elapsed:?}"
+        );
+        assert_eq!(manager.ids(), [bystander], "another session was closed");
+        assert_eq!(manager.close_all(&ids), 0, "closing twice is harmless");
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn a_session_being_closed_stays_registered_until_its_process_is_gone() {
+    guarded(|| {
+        let manager = Arc::new(SessionManager::new().unwrap());
+        let (ids, process_ids) = stubborn(&manager, 1);
+
+        let closing = thread::spawn({
+            let manager = Arc::clone(&manager);
+            let id = ids[0];
+            move || manager.close(id)
+        });
+        // The close is waiting for the process, which resists.
+        thread::sleep(STUBBORN_GRACE / 4);
+        assert_eq!(survivors(&process_ids), process_ids);
+        assert_eq!(manager.ids(), ids, "forgotten while its process is alive");
+
+        assert!(closing.join().unwrap());
+        assert!(manager.is_empty());
+        assert_eq!(survivors(&process_ids), Vec::<u32>::new());
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn shutting_down_waits_for_a_close_that_is_in_progress() {
+    guarded(|| {
+        // What happens when a window is closed and the application exits
+        // right after: the close runs on its own thread, and the exit must
+        // not overtake it, or the process would outlive the application.
+        let manager = Arc::new(SessionManager::new().unwrap());
+        let (ids, process_ids) = stubborn(&manager, 3);
+
+        let closing = thread::spawn({
+            let manager = Arc::clone(&manager);
+            move || manager.close_all(&ids)
+        });
+        thread::sleep(STUBBORN_GRACE / 4);
+        assert_eq!(survivors(&process_ids), process_ids);
+
+        manager.shutdown();
+
+        // No waiting here: the processes are gone when shutdown returns.
+        assert_eq!(
+            survivors(&process_ids),
+            Vec::<u32>::new(),
+            "processes survived"
+        );
+        closing.join().unwrap();
+    });
+}
+
 #[test]
 fn dropping_the_manager_kills_its_sessions() {
     guarded(|| {

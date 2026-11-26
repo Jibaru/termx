@@ -99,8 +99,9 @@ fn raise_open_file_limit() {
 
 /// Closes the sessions of the window `label` without blocking the event
 /// loop: a process that resists being killed is waited for on another
-/// thread. Sessions still running when the application exits are killed
-/// there, whatever this thread got done.
+/// thread. If the application exits in the meantime, shutting the sessions
+/// down waits for this thread to be done with its processes, and kills the
+/// sessions it had not reached yet.
 fn close_sessions_of(app: &tauri::AppHandle, label: &str) {
     let app = app.clone();
     let label = label.to_owned();

@@ -113,7 +113,7 @@ mod pump;
 
 pub use batch::{BATCH_MAX_BYTES, BATCH_WINDOW, BOUNDARY_HOLD_MAX};
 pub use flow::{ACK_BATCH_BYTES, HIGH_WATERMARK_BYTES, LOW_WATERMARK_BYTES};
-pub use manager::{SessionManager, SessionOptions};
+pub use manager::{SHUTDOWN_CLOSE_WAIT, SessionManager, SessionOptions};
 pub use pump::PTY_BUFFER_BYTES;
 
 use crate::pty::ExitStatus;
