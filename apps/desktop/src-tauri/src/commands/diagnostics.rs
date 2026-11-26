@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::PoisonError;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Manager, Runtime, State};
 use termx_core::diagnostics::{Diagnostics, Severity, tracing};
 
 use super::error::{CommandResult, logged};
@@ -107,8 +107,8 @@ pub fn open_log_folder(state: State<'_, DiagnosticsState>) -> CommandResult<()> 
 /// Fails when logging is not running, there is no Downloads folder, or the
 /// bundle cannot be written.
 #[tauri::command(async)]
-pub fn export_diagnostics(
-    app: AppHandle,
+pub fn export_diagnostics<R: Runtime>(
+    app: AppHandle<R>,
     state: State<'_, DiagnosticsState>,
 ) -> CommandResult<ExportedBundle> {
     let bundle = logged("export_diagnostics", || {

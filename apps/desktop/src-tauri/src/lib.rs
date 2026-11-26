@@ -8,9 +8,49 @@ use tauri::webview::PageLoadEvent;
 use tauri::{Manager, WindowEvent};
 use termx_core::diagnostics::tracing;
 
+/// The commands exposed to the frontend. Register every command here.
+///
+/// A macro, so that the tests which call the commands as the webview does
+/// (`ipc_tests`) register exactly the same list as the application.
+macro_rules! command_handlers {
+    () => {
+        tauri::generate_handler![
+            crate::commands::app::core_version,
+            crate::commands::diagnostics::log_frontend_event,
+            crate::commands::diagnostics::open_log_folder,
+            crate::commands::diagnostics::export_diagnostics,
+            crate::commands::workspace::workspace_subscribe,
+            crate::commands::workspace::workspace_snapshot,
+            crate::commands::workspace::workspace_refresh_git,
+            crate::commands::workspace::folder_pick,
+            crate::commands::workspace::recent_folder_forget,
+            crate::commands::session::session_create,
+            crate::commands::session::session_create_sibling,
+            crate::commands::session::session_rename,
+            crate::commands::session::session_reorder,
+            crate::commands::session::project_reorder,
+            crate::commands::session::session_start,
+            crate::commands::session::session_close,
+            crate::commands::session::session_report_title,
+            crate::commands::session::session_report_cwd,
+            crate::commands::session::session_write,
+            crate::commands::session::session_resize,
+            crate::commands::session::session_ack,
+            crate::commands::layout::layout_split,
+            crate::commands::layout::layout_close_pane,
+            crate::commands::layout::layout_move_pane,
+            crate::commands::layout::layout_resize_split,
+            crate::commands::layout::layout_focus_pane,
+            crate::commands::layout::layout_show_session,
+        ]
+    };
+}
+
 pub mod commands;
 #[cfg(test)]
 mod contract;
+#[cfg(test)]
+mod ipc_tests;
 pub mod logging;
 pub mod terminal;
 #[cfg(test)]
@@ -39,36 +79,7 @@ pub fn run() {
         .manage(state)
         .manage(terminal::TerminalState::start())
         .manage(workspace::WorkspaceState::start())
-        // Register every command exposed to the frontend here.
-        .invoke_handler(tauri::generate_handler![
-            commands::app::core_version,
-            commands::diagnostics::log_frontend_event,
-            commands::diagnostics::open_log_folder,
-            commands::diagnostics::export_diagnostics,
-            commands::workspace::workspace_subscribe,
-            commands::workspace::workspace_snapshot,
-            commands::workspace::workspace_refresh_git,
-            commands::workspace::folder_pick,
-            commands::workspace::recent_folder_forget,
-            commands::session::session_create,
-            commands::session::session_create_sibling,
-            commands::session::session_rename,
-            commands::session::session_reorder,
-            commands::session::project_reorder,
-            commands::session::session_start,
-            commands::session::session_close,
-            commands::session::session_report_title,
-            commands::session::session_report_cwd,
-            commands::session::session_write,
-            commands::session::session_resize,
-            commands::session::session_ack,
-            commands::layout::layout_split,
-            commands::layout::layout_close_pane,
-            commands::layout::layout_move_pane,
-            commands::layout::layout_resize_split,
-            commands::layout::layout_focus_pane,
-            commands::layout::layout_show_session,
-        ])
+        .invoke_handler(command_handlers!())
         .setup(|app| {
             // Before the window shows anything, so that it does not jump.
             if let (Some(window), Some(state)) = (
