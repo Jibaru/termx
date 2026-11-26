@@ -114,10 +114,12 @@ impl OutputSink {
 
     /// Marks the end of the stream. Buffered bytes can still be received.
     pub(super) fn finish(&self) {
+        // The callback is unregistered: there is nothing left to announce
+        // after the end, and releasing it frees whatever it captured.
         let (callback, shut_down) = {
             let mut state = lock(&self.channel.state);
             state.finished = true;
-            (state.on_readable.clone(), state.shut_down)
+            (state.on_readable.take(), state.shut_down)
         };
         self.channel.readable.notify_all();
         // Not called when the `Pty` is being dropped: the dropping thread is
@@ -133,8 +135,14 @@ impl OutputSink {
     /// Tells the reader thread to stop forwarding output and to stop as soon
     /// as it can. Called when the [`Pty`](super::Pty) is dropped.
     pub(super) fn shut_down(&self) {
-        lock(&self.channel.state).shut_down = true;
+        let callback = {
+            let mut state = lock(&self.channel.state);
+            state.shut_down = true;
+            state.on_readable.take()
+        };
         self.channel.writable.notify_all();
+        // Dropped outside the lock: its captures may do anything.
+        drop(callback);
     }
 
     /// Whether [`shut_down`](Self::shut_down) was called. Only the Unix
@@ -220,17 +228,23 @@ impl PtyOutput {
     /// task, which then does the draining. Backpressure is unaffected: the
     /// output stays in the bounded buffer until it is received.
     ///
-    /// Registering a callback replaces the previous one.
+    /// Registering a callback replaces the previous one. The callback is
+    /// released, and never called again:
     ///
-    /// The end of the stream is **not** announced when it is caused by the
-    /// [`Pty`](super::Pty) being dropped, because the dropping thread is
-    /// waiting for the reader thread; whoever drops the `Pty` knows the
-    /// session is over.
+    /// - after the call announcing the end of the stream;
+    /// - when the [`Pty`](super::Pty) is dropped. The end of the stream is
+    ///   then **not** announced, because the dropping thread is waiting for
+    ///   the reader thread; whoever drops the `Pty` knows the session is
+    ///   over;
+    /// - if it panics. The panic is contained so that the session keeps
+    ///   working, and the stream must then be read with
+    ///   [`recv`](Self::recv) or after registering a new callback.
     ///
-    /// If the callback panics, the panic is contained so that the session
-    /// keeps working, and the callback is unregistered: it is never called
-    /// again. The stream must then be read with [`recv`](Self::recv) or
-    /// after registering a new callback.
+    /// **Do not capture the `Pty` (or an `Arc` of it) in the callback.** The
+    /// `Pty` keeps the callback alive, so the two would keep each other
+    /// alive: the `Pty` would never be dropped and its process never killed.
+    /// Capture a [`Weak`](std::sync::Weak) reference, or better, only what
+    /// is needed to wake the consumer up.
     ///
     /// # Examples
     ///
@@ -263,11 +277,18 @@ impl PtyOutput {
     /// ```
     pub fn on_readable(&mut self, callback: impl Fn() + Send + Sync + 'static) {
         let callback: ReadyCallback = Arc::new(callback);
-        let ready_now = {
+        let (ready_now, previous) = {
             let mut state = lock(&self.channel.state);
-            state.on_readable = Some(Arc::clone(&callback));
-            !state.buffer.is_empty() || state.finished
+            // Nothing will ever arrive on a stream that has ended or whose
+            // `Pty` is gone, so the callback is not kept.
+            let previous = if state.finished || state.shut_down {
+                state.on_readable.take()
+            } else {
+                state.on_readable.replace(Arc::clone(&callback))
+            };
+            (!state.buffer.is_empty() || state.finished, previous)
         };
+        drop(previous);
         if ready_now {
             callback();
         }
@@ -559,11 +580,31 @@ mod tests {
 
         // What dropping a `Pty` does: shut down, then the reader finishes.
         sink.shut_down();
+        assert_eq!(Arc::strong_count(&calls), 1, "the callback was kept");
         sink.push(b"discarded");
         sink.finish();
 
         assert_eq!(calls.load(SeqCst), 0);
         assert_eq!(output.recv(), None);
+    }
+
+    #[test]
+    fn callback_is_released_at_the_end_of_the_stream() {
+        use std::sync::atomic::Ordering::SeqCst;
+
+        let (sink, mut output) = channel();
+        let calls = count_calls(&mut output);
+        assert_eq!(Arc::strong_count(&calls), 2);
+
+        sink.finish();
+        assert_eq!(calls.load(SeqCst), 1, "the end is announced");
+        assert_eq!(Arc::strong_count(&calls), 1, "the callback was kept");
+
+        // Registering on an ended stream announces the end but keeps
+        // nothing either.
+        let late = count_calls(&mut output);
+        assert_eq!(late.load(SeqCst), 1);
+        assert_eq!(Arc::strong_count(&late), 1);
     }
 
     #[test]

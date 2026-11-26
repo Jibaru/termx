@@ -400,6 +400,39 @@ fn dropping_the_handle_does_not_run_the_readable_callback() {
 }
 
 #[test]
+fn readable_callback_holding_the_handle_is_released_when_the_stream_ends() {
+    guarded(|| {
+        // The pitfall the documentation warns about: the callback keeps the
+        // handle alive, and the handle keeps the callback. The cycle is
+        // broken when the stream ends.
+        let (pty, mut output) = Pty::spawn(&helper(&["print", "bye"]), PtySize::default()).unwrap();
+        let pty = Arc::new(pty);
+        output.on_readable({
+            let pty = Arc::clone(&pty);
+            move || drop(pty.try_wait())
+        });
+
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            match output.recv_timeout(Duration::from_millis(100)) {
+                Err(RecvTimeoutError::Closed) => break,
+                _ => assert!(Instant::now() < deadline, "the stream never ended"),
+            }
+        }
+
+        // The reader thread releases the callback just after announcing the
+        // end, so give it a moment.
+        while Arc::strong_count(&pty) > 1 {
+            assert!(
+                Instant::now() < deadline,
+                "the callback still holds the handle"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    });
+}
+
+#[test]
 fn utf8_output_survives_chunking() {
     guarded(|| {
         // Two, three and four byte characters, without spaces (ConPTY may
