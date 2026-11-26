@@ -12,3 +12,4 @@
 pub mod app;
 pub mod diagnostics;
 pub mod error;
+pub mod session;
