@@ -40,9 +40,9 @@ impl std::fmt::Display for SessionId {
 /// It only owns the PTYs. Everything else the application knows about a
 /// session (title, status, ...) is deliberately kept out of it.
 ///
-/// Removing a PTY from the manager, or dropping the manager, drops the PTY
-/// and therefore kills its process, unless a handle obtained from
-/// [`get`](Self::get) is still alive.
+/// Removing a PTY from the manager drops it and therefore kills its process,
+/// unless a handle obtained from [`get`](Self::get) is still alive. Dropping
+/// the manager [shuts it down](Self::shutdown).
 ///
 /// # Examples
 ///
@@ -134,6 +134,21 @@ impl PtyManager {
         lock(&self.sessions).remove(&id)
     }
 
+    /// Kills every registered PTY and unregisters them all.
+    ///
+    /// Every process is asked to terminate before any of them is waited for,
+    /// so closing many terminals takes about as long as closing the slowest
+    /// one, not the sum of them all. Called automatically when the manager
+    /// is dropped.
+    pub fn shutdown(&self) {
+        let sessions = std::mem::take(&mut *lock(&self.sessions));
+        for pty in sessions.values() {
+            let _ = pty.kill();
+        }
+        // Dropping the handles reaps the processes and joins their threads.
+        drop(sessions);
+    }
+
     /// The identifiers of the registered PTYs, in creation order.
     #[must_use]
     pub fn ids(&self) -> Vec<SessionId> {
@@ -158,6 +173,12 @@ impl PtyManager {
     /// slow operation on one PTY never blocks the others.
     fn require(&self, id: SessionId) -> Result<Arc<Pty>, PtyError> {
         self.get(id).ok_or(PtyError::UnknownSession(id))
+    }
+}
+
+impl Drop for PtyManager {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 

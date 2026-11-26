@@ -77,14 +77,24 @@ struct Terminal {
 /// how each one lets the exit of a process be observed.
 ///
 /// On Unix a process is addressed by its id, which the system may reuse as
-/// soon as the process is reaped. Killing must therefore be serialised with
-/// reaping: both happen under this mutex, and the waiter thread polls instead
-/// of blocking in `wait`.
+/// soon as the process is reaped. Signalling must therefore be serialised
+/// with reaping: both happen under this mutex, and the waiter thread polls
+/// instead of blocking in `wait`.
 #[cfg(unix)]
 struct ChildControl {
-    child: Arc<Mutex<Child>>,
+    state: Arc<Mutex<ChildState>>,
     /// Wakes the waiter thread up for an immediate check.
     poke: std::sync::mpsc::Sender<()>,
+}
+
+#[cfg(unix)]
+struct ChildState {
+    child: std::process::Child,
+    /// Sends `SIGHUP` to the child.
+    hangup: Box<dyn portable_pty::ChildKiller + Send + Sync>,
+    /// Set by `kill`: when the waiter thread must send `SIGKILL` if the
+    /// process is still alive.
+    force_kill_at: Option<Instant>,
 }
 
 /// On Windows a process is addressed by a handle, which stays valid after the
@@ -95,12 +105,19 @@ struct ChildControl {
     killer: Mutex<Box<dyn portable_pty::ChildKiller + Send + Sync>>,
 }
 
+/// How long a process is given to exit after `SIGHUP` before it is sent
+/// `SIGKILL` (Unix only).
+#[cfg(unix)]
+const KILL_GRACE: Duration = Duration::from_millis(250);
+
 /// Shortest and longest pause between two checks of whether the process has
-/// exited (Unix only). The pause starts short, doubles up to the maximum
-/// while nothing happens, and is reset whenever the reader thread reaches end
-/// of file or the process is killed. In the usual case an exit is therefore
-/// noticed immediately, and an idle session costs four cheap wake-ups per
-/// second.
+/// exited (Unix only).
+///
+/// The waiter thread does not rely on this polling in the cases that matter:
+/// it is woken up at once when the reader thread reaches end of file, which
+/// is what a process exiting normally causes, and when the process is killed.
+/// The pause starts short so that those wake-ups, and short-lived commands,
+/// are followed by a few quick checks, then doubles up to the maximum.
 #[cfg(unix)]
 const EXIT_POLL_MIN: Duration = Duration::from_millis(1);
 #[cfg(unix)]
@@ -158,7 +175,28 @@ impl Pty {
             }
         };
 
+        // On Unix the child is a plain `std::process::Child`. Having the
+        // concrete type gives access to an immediate `SIGKILL`, where the
+        // trait object only offers a blocking "hang up, wait, then kill".
+        #[cfg(unix)]
+        let child = {
+            let child: Box<dyn portable_pty::Child> = child;
+            match child.downcast::<std::process::Child>() {
+                Ok(child) => *child,
+                Err(mut child) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(PtyError::Setup(
+                        "the pseudo-terminal returned an unexpected kind of process".to_owned(),
+                    ));
+                }
+            }
+        };
+
         let (sink, output) = output::channel();
+        #[cfg(unix)]
+        let process_id = Some(child.id());
+        #[cfg(windows)]
         let process_id = child.process_id();
         let shared = Arc::new(Shared {
             exit: Mutex::new(None),
@@ -175,7 +213,11 @@ impl Pty {
         #[cfg(unix)]
         let (control, reader_task, waiter_task) = {
             let (poke, pokes) = std::sync::mpsc::channel();
-            let child = Arc::new(Mutex::new(child));
+            let state = Arc::new(Mutex::new(ChildState {
+                hangup: portable_pty::ChildKiller::clone_killer(&child),
+                child,
+                force_kill_at: None,
+            }));
             let reader_task = {
                 let (sink, poke) = (sink.clone(), poke.clone());
                 let (master, stop) = (streams.master, streams.stop_reader);
@@ -187,10 +229,10 @@ impl Pty {
                 }
             };
             let waiter_task = {
-                let (child, shared) = (Arc::clone(&child), Arc::clone(&shared));
-                move || shared.finish(poll_exit(&child, &pokes))
+                let (state, shared) = (Arc::clone(&state), Arc::clone(&shared));
+                move || shared.finish(poll_exit(&state, &pokes))
             };
-            (ChildControl { child, poke }, reader_task, waiter_task)
+            (ChildControl { state, poke }, reader_task, waiter_task)
         };
 
         #[cfg(windows)]
@@ -289,14 +331,15 @@ impl Pty {
 
     /// Kills the process. Does nothing if it has already exited.
     ///
-    /// On Unix the process is first sent `SIGHUP`, as when a terminal window
-    /// is closed, and `SIGKILL` if it is still alive after a short grace
-    /// period (at most 250 ms, during which this call blocks). On Windows
-    /// the process is terminated immediately, and the remaining processes
-    /// attached to the console are terminated when the console is closed.
-    ///
-    /// Killing is asynchronous: use [`wait`](Self::wait) or
+    /// This never blocks: it only requests the termination, so it is safe to
+    /// call from an asynchronous context. Use [`wait`](Self::wait) or
     /// [`wait_timeout`](Self::wait_timeout) to observe the exit.
+    ///
+    /// On Unix the process is sent `SIGHUP`, as when a terminal window is
+    /// closed. If it is still alive 250 ms later, it is sent `SIGKILL` in the
+    /// background. On Windows the process is terminated immediately, and the
+    /// remaining processes attached to the console are terminated when the
+    /// console is closed.
     ///
     /// # Errors
     ///
@@ -307,15 +350,25 @@ impl Pty {
         }
         #[cfg(unix)]
         {
-            let mut child = lock(&self.control.child);
+            let mut state = lock(&self.control.state);
             // Holding the lock, the process cannot be reaped by the waiter
             // thread. Checking here guarantees that the signal goes to our
             // child and never to an unrelated process reusing its id.
-            let result = match child.try_wait() {
-                Ok(None) => child.kill().map_err(PtyError::Kill),
-                Ok(Some(_)) | Err(_) => Ok(()),
+            let result = match state.child.try_wait() {
+                // A second call neither repeats the signal nor postpones the
+                // forced kill.
+                Ok(None) if state.force_kill_at.is_none() => {
+                    let sent = state.hangup.kill().map_err(PtyError::Kill);
+                    if sent.is_ok() {
+                        state.force_kill_at = Instant::now().checked_add(KILL_GRACE);
+                    }
+                    sent
+                }
+                Ok(_) | Err(_) => Ok(()),
             };
-            drop(child);
+            drop(state);
+            // The waiter thread takes it from here: it notices the exit, or
+            // forces it once the grace period is over.
             let _ = self.control.poke.send(());
             result
         }
@@ -420,7 +473,9 @@ impl Drop for Pty {
             {
                 #[cfg(unix)]
                 if killed {
-                    let _ = lock(&self.control.child).wait();
+                    let mut state = lock(&self.control.state);
+                    let _ = state.child.kill();
+                    let _ = state.child.wait();
                 }
             }
         }
@@ -581,29 +636,45 @@ fn spawn_thread(
         .map_err(|error| PtyError::Setup(format!("cannot start the {name} thread: {error}")))
 }
 
-/// Waits for the child to exit by polling it, and returns its status.
+/// Waits for the child to exit by polling it, and returns its status. Also
+/// carries out the forced kill requested by [`Pty::kill`].
 #[cfg(unix)]
-fn poll_exit(child: &Mutex<Child>, pokes: &std::sync::mpsc::Receiver<()>) -> ExitStatus {
+fn poll_exit(state: &Mutex<ChildState>, pokes: &std::sync::mpsc::Receiver<()>) -> ExitStatus {
     use std::sync::mpsc::RecvTimeoutError;
 
     let mut pause = EXIT_POLL_MIN;
     loop {
         // The lock is released before pausing, so that `kill` can run.
-        let polled = lock(child).try_wait();
-        match polled {
-            Ok(Some(status)) => return status.into(),
-            Ok(None) => {}
-            // Something else reaped the process, for example a host
-            // application ignoring `SIGCHLD`. Its status is lost.
-            Err(_) => return ExitStatus::unknown(),
-        }
-        match pokes.recv_timeout(pause) {
+        let until_forced_kill = {
+            let mut state = lock(state);
+            match state.child.try_wait() {
+                Ok(Some(status)) => return portable_pty::ExitStatus::from(status).into(),
+                Ok(None) => {}
+                // Something else reaped the process, for example a host
+                // application ignoring `SIGCHLD`. Its status is lost.
+                Err(_) => return ExitStatus::unknown(),
+            }
+            let now = Instant::now();
+            if state.force_kill_at.is_some_and(|at| at <= now) {
+                // The grace period is over: `SIGKILL`. The process was just
+                // seen alive under the lock, so its id is still ours.
+                let _ = state.child.kill();
+                state.force_kill_at = None;
+                pause = EXIT_POLL_MIN;
+            }
+            state
+                .force_kill_at
+                .map(|at| at.saturating_duration_since(now))
+        };
+
+        let timeout = until_forced_kill.map_or(pause, |until| until.min(pause));
+        match pokes.recv_timeout(timeout) {
             Ok(()) => pause = EXIT_POLL_MIN,
             Err(RecvTimeoutError::Timeout) => pause = (pause * 2).min(EXIT_POLL_MAX),
-            // Only when the handle was dropped without being able to kill the
-            // process: keep polling at the slowest pace.
+            // Only when the handle was dropped without being able to signal
+            // the process: keep polling at the slowest pace.
             Err(RecvTimeoutError::Disconnected) => {
-                thread::sleep(EXIT_POLL_MAX);
+                thread::sleep(timeout);
                 pause = EXIT_POLL_MAX;
             }
         }

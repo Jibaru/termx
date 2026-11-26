@@ -690,6 +690,82 @@ fn kill_terminates_a_long_running_process() {
     });
 }
 
+/// A command that prints `ready` and then runs until it is forcibly killed.
+/// On Unix it ignores the hang-up signal a polite kill sends.
+fn stubborn_process() -> PtyCommand {
+    if cfg!(unix) {
+        PtyCommand::new("/bin/sh")
+            .args(["-c", "trap '' HUP; echo ready; while :; do sleep 1; done"])
+    } else {
+        helper(&["sleep"])
+    }
+}
+
+#[test]
+fn kill_returns_at_once_even_when_the_process_resists() {
+    guarded(|| {
+        const PROCESSES: usize = 20;
+        let mut sessions: Vec<Session> = (0..PROCESSES)
+            .map(|_| Session::spawn(&stubborn_process()))
+            .collect();
+        for session in &mut sessions {
+            session.wait_for("ready");
+        }
+
+        // Killing used to block for the whole grace period of each process:
+        // five seconds for these twenty.
+        let started = Instant::now();
+        for session in &sessions {
+            session.pty.kill().unwrap();
+        }
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "killing {PROCESSES} processes blocked for {elapsed:?}"
+        );
+
+        // The processes are still terminated, forcibly if they have to be.
+        for session in &sessions {
+            let status = session.exit_status();
+            assert!(!status.success(), "{status}");
+            if cfg!(unix) {
+                let signal = status.signal().unwrap_or_default();
+                assert!(signal.contains("Kill"), "expected SIGKILL, got {status}");
+            }
+        }
+    });
+}
+
+#[test]
+fn shutting_down_many_sessions_does_not_add_up() {
+    guarded(|| {
+        const SESSIONS: usize = 40;
+        termx_core::pty::raise_open_file_limit().expect("cannot raise the open file limit");
+        let manager = PtyManager::new();
+        for _ in 0..SESSIONS {
+            let (id, mut output) = manager
+                .spawn(&stubborn_process(), PtySize::default())
+                .unwrap();
+            read_until(&manager.get(id).unwrap(), &mut output, "ready");
+        }
+        assert_eq!(manager.len(), SESSIONS);
+
+        // One after the other, these would take a grace period each: ten
+        // seconds on Unix. Signalled together they take about one.
+        let started = Instant::now();
+        manager.shutdown();
+        let elapsed = started.elapsed();
+
+        assert!(manager.is_empty());
+        let limit = Duration::from_secs(if cfg!(unix) { 5 } else { 30 });
+        assert!(
+            elapsed < limit,
+            "shutting {SESSIONS} sessions down took {elapsed:?}"
+        );
+        println!("shut {SESSIONS} sessions down in {elapsed:?}");
+    });
+}
+
 /// Reads the counter the helper's `heartbeat` mode keeps writing.
 fn read_heartbeat(file: &Path) -> Option<u64> {
     std::fs::read_to_string(file).ok()?.trim().parse().ok()
