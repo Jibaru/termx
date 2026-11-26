@@ -32,8 +32,12 @@ const LOCK_EXTENSION: &str = ".lock";
 /// a panic record when the log file itself cannot be written.
 pub(crate) const CRASH_FILE: &str = "crash";
 
+/// Takes the place of the sequence number in the name of the file that keeps
+/// a copy of the first warnings and errors of a launch.
+pub(crate) const FIRST_ERRORS_FILE: &str = "errors";
+
 /// The names that can take the place of the sequence number.
-const SIDE_FILES: &[&str] = &[CRASH_FILE];
+const SIDE_FILES: &[&str] = &[CRASH_FILE, FIRST_ERRORS_FILE];
 
 /// How far in the future a file may be dated before its date is distrusted.
 const CLOCK_TOLERANCE: Duration = Duration::from_secs(60);
@@ -337,8 +341,19 @@ pub fn prune(
     for (index, file) in files.into_iter().enumerate() {
         let is_current = current.is_some_and(|current| current == file.path);
         let protected_as_recent = index >= first_protected && !from_the_future(&file);
-        let deletable =
-            !protected_as_recent && !is_current && !belongs_to_another_live_process(&file.name);
+        // The side files of the calling process are small and hold what
+        // matters most: its first errors, and its panics.
+        let is_own_side_file = own_run.is_some()
+            && run_id_of(&file.name) == own_run
+            && SIDE_FILES.iter().any(|kind| {
+                file.name
+                    .strip_suffix(EXTENSION)
+                    .is_some_and(|stem| stem.ends_with(&format!("-{kind}")))
+            });
+        let deletable = !protected_as_recent
+            && !is_current
+            && !is_own_side_file
+            && !belongs_to_another_live_process(&file.name);
         let age = now.duration_since(file.modified).unwrap_or(Duration::ZERO);
         if deletable && age > retention.max_age && fs::remove_file(&file.path).is_ok() {
             removed.push(file.path);

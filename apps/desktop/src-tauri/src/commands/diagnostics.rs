@@ -344,11 +344,17 @@ mod tests {
                 .any(|record| record["msg"] == "the disk is full")
         );
 
-        // Every record that was not written is accounted for.
-        let written = records
+        // Every record that was not written is accounted for: dropped by the
+        // rate limit, or counted by the log as a repeat.
+        let repeated: u64 = records
             .iter()
-            .filter(|record| record["fields"].get("source").is_some())
-            .count() as u64;
+            .filter_map(|record| record["fields"]["repeated"].as_u64())
+            .sum();
+        let written = repeated
+            + records
+                .iter()
+                .filter(|record| record["fields"].get("source").is_some())
+                .count() as u64;
         let dropped: u64 = records
             .iter()
             .filter(|record| record["msg"] == "frontend records were dropped by the rate limit")

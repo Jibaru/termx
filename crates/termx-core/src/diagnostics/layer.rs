@@ -1,7 +1,9 @@
 //! The `tracing` layer that turns events into log lines.
 
 use std::fmt;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
+use std::time::Instant;
 
 use serde_json::{Map, Value};
 use time::OffsetDateTime;
@@ -11,7 +13,9 @@ use tracing_log::NormalizeEvent;
 use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::registry::LookupSpan;
 
+use super::normalise::message_key;
 use super::record::{LineContext, Record};
+use super::suppress::Verdict;
 use super::writer::LogWriter;
 
 /// Turns every event into one JSON line and hands it to the writer.
@@ -39,6 +43,28 @@ where
         let mut visitor = FieldVisitor::default();
         event.record(&mut visitor);
 
+        // Warnings and errors are waited for until they are written, and
+        // their repeats are counted instead of written; see the `writer` and
+        // `suppress` modules.
+        let urgent = *metadata.level() <= Level::WARN;
+        if urgent {
+            let mut hasher = DefaultHasher::new();
+            metadata.callsite().hash(&mut hasher);
+            message_key(&visitor.message).hash(&mut hasher);
+            let verdict = self.writer.suppressor().check(
+                hasher.finish(),
+                metadata.level().as_str(),
+                metadata.target(),
+                &visitor.message,
+                Instant::now(),
+            );
+            match verdict {
+                Verdict::Suppress => return,
+                Verdict::Write(Some(summary)) => self.writer.submit_summary(&summary),
+                Verdict::Write(None) => {}
+            }
+        }
+
         let span = ctx.event_scope(event).map(|scope| {
             scope
                 .from_root()
@@ -55,10 +81,6 @@ where
             span: span.as_deref(),
             fields: visitor.fields,
         });
-
-        // Warnings and errors go to the disk before this returns; see the
-        // `writer` module.
-        let urgent = *metadata.level() <= Level::WARN;
         self.writer.submit(line, urgent);
     }
 }

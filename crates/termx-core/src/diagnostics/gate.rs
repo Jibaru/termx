@@ -18,6 +18,11 @@ use std::time::{Duration, Instant};
 
 use super::rate_limit::{Decision, RateLimiter};
 
+/// Shortest time between two reports of dropped records. During a flood the
+/// counts add up and are reported together, instead of in a record of their
+/// own for every record that gets through.
+pub const REPORT_INTERVAL: Duration = Duration::from_secs(5);
+
 /// Distinct error keys remembered before the memory starts over.
 const MAX_REMEMBERED_ERRORS: usize = 1_024;
 
@@ -121,6 +126,7 @@ pub struct RecordGate {
     seen_errors: HashSet<u64>,
     hasher: RandomState,
     dropped: Dropped,
+    last_report: Option<Instant>,
 }
 
 impl RecordGate {
@@ -136,6 +142,7 @@ impl RecordGate {
             seen_errors: HashSet::new(),
             hasher: RandomState::new(),
             dropped: Dropped::default(),
+            last_report: None,
         }
     }
 
@@ -145,8 +152,9 @@ impl RecordGate {
     /// and message), to tell a new error from a repeat.
     ///
     /// Returns `None` when the record must be dropped. Otherwise returns the
-    /// records dropped since the last call that returned them, which the
-    /// caller should log; the counts are reset.
+    /// dropped records the caller should log now: usually none, and at most
+    /// once per [`REPORT_INTERVAL`] the counts since the last report, which
+    /// are then reset.
     pub fn admit(&mut self, severity: Severity, key: &str) -> Option<Dropped> {
         self.admit_at(severity, key, Instant::now())
     }
@@ -169,6 +177,14 @@ impl RecordGate {
         };
 
         if admitted {
+            let report_due = !self.dropped.is_empty()
+                && self
+                    .last_report
+                    .is_none_or(|last| now.saturating_duration_since(last) >= REPORT_INTERVAL);
+            if !report_due {
+                return Some(Dropped::default());
+            }
+            self.last_report = Some(now);
             return Some(std::mem::take(&mut self.dropped));
         }
         let counter = match severity {
@@ -329,5 +345,26 @@ mod tests {
         assert!(gate.admit_at(Severity::Error, "e", now).is_none());
 
         assert!(gate.admit_at(Severity::Error, "e", now + SECOND).is_some());
+    }
+
+    #[test]
+    fn drops_are_reported_together_at_most_once_per_interval() {
+        let now = Instant::now();
+        let mut gate = gate(1, 0, 1);
+        gate.admit_at(Severity::Info, "i", now);
+        gate.admit_at(Severity::Info, "i", now);
+        let first = gate.admit_at(Severity::Info, "i", now + SECOND).unwrap();
+        assert_eq!(first.infos, 1);
+
+        // More drops right after a report wait for the interval to pass.
+        gate.admit_at(Severity::Info, "i", now + SECOND);
+        let soon = gate
+            .admit_at(Severity::Info, "i", now + 2 * SECOND)
+            .unwrap();
+        assert!(soon.is_empty());
+        gate.admit_at(Severity::Info, "i", now + 2 * SECOND);
+
+        let due = now + SECOND + super::REPORT_INTERVAL;
+        assert_eq!(gate.admit_at(Severity::Info, "i", due).unwrap().infos, 2);
     }
 }

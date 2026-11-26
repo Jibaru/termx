@@ -29,7 +29,7 @@
 //!   themselves and ask the operating system to flush the file to the disk.
 
 use std::collections::VecDeque;
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, TryLockError};
@@ -40,7 +40,8 @@ use serde_json::{Map, Value};
 use time::OffsetDateTime;
 
 use super::record::{LineContext, Record};
-use super::rotate::{CRASH_FILE, RotatingFile, eligible_metadata};
+use super::rotate::{CRASH_FILE, FIRST_ERRORS_FILE, RotatingFile, eligible_metadata};
+use super::suppress::{Summary, Suppressor};
 
 /// Target of the records the logger writes about itself.
 pub const LOG_TARGET: &str = "termx::log";
@@ -58,6 +59,15 @@ pub(crate) const QUEUE_CAPACITY: usize = 8 * 1024;
 /// they are dropped too, and counted: memory is bounded whatever happens.
 const URGENT_CAPACITY_FACTOR: usize = 4;
 
+/// Warnings and errors of a launch that are also copied to its first-errors
+/// file, and the size at which the copying stops whatever their number.
+pub const FIRST_ERRORS_RECORDS: u32 = 200;
+const FIRST_ERRORS_BYTES: u64 = 512 * 1024;
+
+/// How often the background thread looks for repeat counts to report when
+/// nothing else wakes it.
+const SUMMARY_INTERVAL: Duration = Duration::from_secs(1);
+
 /// How long the panic hook waits for the log file when another thread is
 /// writing.
 const PANIC_LOCK_ATTEMPTS: u32 = 60;
@@ -65,7 +75,8 @@ const PANIC_LOCK_RETRY_DELAY: Duration = Duration::from_millis(5);
 
 #[derive(Debug, Default)]
 struct Pending {
-    queue: VecDeque<String>,
+    /// The lines to write, and whether each is a warning or an error.
+    queue: VecDeque<(String, bool)>,
     /// Ticket of the last `WARN` or `ERROR` record that was queued.
     last_ticket: u64,
     /// Ticket of the last `WARN` or `ERROR` record that was written.
@@ -88,11 +99,57 @@ struct Pending {
 
 /// What `take` removed from [`Pending`].
 struct Batch {
-    lines: VecDeque<String>,
+    lines: VecDeque<(String, bool)>,
     last_ticket: u64,
     dropped: u64,
     dropped_urgent: u64,
     deferred: u64,
+}
+
+/// A copy of the first warnings and errors of a launch, in a file of its own
+/// that the launch never deletes. However much is logged afterwards, and
+/// however many files that pushes out, what went wrong first is still there.
+#[derive(Debug)]
+struct FirstErrors {
+    path: PathBuf,
+    file: Option<File>,
+    records: u32,
+    bytes: u64,
+    /// The file could not be created, or the limits were reached.
+    closed: bool,
+}
+
+impl FirstErrors {
+    fn write(&mut self, line: &str) {
+        if self.closed {
+            return;
+        }
+        if self.file.is_none() {
+            // Created exclusively, like every log file, so that nothing
+            // planted under the name is written through.
+            match OpenOptions::new()
+                .append(true)
+                .create_new(true)
+                .open(&self.path)
+            {
+                Ok(file) => self.file = Some(file),
+                Err(_) => {
+                    self.closed = true;
+                    return;
+                }
+            }
+        }
+        if let Some(file) = self.file.as_mut()
+            && file.write_all(line.as_bytes()).is_ok()
+        {
+            self.records += 1;
+            self.bytes += line.len() as u64;
+        }
+        if self.records >= FIRST_ERRORS_RECORDS || self.bytes >= FIRST_ERRORS_BYTES {
+            self.closed = true;
+            self.file = None;
+        }
+    }
 }
 
 /// Writes formatted lines to the log file.
@@ -108,6 +165,8 @@ pub(crate) struct LogWriter {
     capacity: usize,
     /// Where a panic record goes when the log file cannot be had.
     crash_file: PathBuf,
+    first_errors: Mutex<FirstErrors>,
+    suppressor: Suppressor,
     worker: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -118,6 +177,14 @@ impl LogWriter {
     pub fn new(file: RotatingFile, context: Arc<LineContext>, capacity: usize) -> Arc<Self> {
         Arc::new(Self {
             crash_file: file.side_file_path(CRASH_FILE),
+            first_errors: Mutex::new(FirstErrors {
+                path: file.side_file_path(FIRST_ERRORS_FILE),
+                file: None,
+                records: 0,
+                bytes: 0,
+                closed: false,
+            }),
+            suppressor: Suppressor::default(),
             file: Mutex::new(file),
             pending: Mutex::new(Pending::default()),
             wake: Condvar::new(),
@@ -147,6 +214,53 @@ impl LogWriter {
         }
     }
 
+    /// Counts repeated warnings and errors; see the `suppress` module.
+    pub fn suppressor(&self) -> &Suppressor {
+        &self.suppressor
+    }
+
+    /// Queues the record that says how many repeats were not written.
+    pub fn submit_summary(&self, summary: &Summary) {
+        self.submit(self.summary_line(summary), false);
+    }
+
+    fn summary_line(&self, summary: &Summary) -> String {
+        let mut fields = Map::new();
+        fields.insert("repeated".to_owned(), Value::from(summary.repeated));
+        fields.insert("message".to_owned(), Value::from(summary.message.as_str()));
+        self.context.format(Record {
+            timestamp: OffsetDateTime::now_utc(),
+            level: summary.level,
+            target: &summary.target,
+            message: "the same record was repeated and not written again",
+            span: None,
+            fields,
+        })
+    }
+
+    /// Queues the summaries that are due: all of them, or those whose window
+    /// is over. They are not subject to the queue limit, being bounded by the
+    /// number of records the suppressor tracks.
+    fn queue_summaries(&self, all: bool) {
+        let summaries = if all {
+            self.suppressor.take_all()
+        } else {
+            self.suppressor.take_expired(Instant::now())
+        };
+        if summaries.is_empty() {
+            return;
+        }
+        let lines: Vec<String> = summaries
+            .iter()
+            .map(|summary| self.summary_line(summary))
+            .collect();
+        let mut pending = lock(&self.pending);
+        pending
+            .queue
+            .extend(lines.into_iter().map(|line| (line, false)));
+        self.wake.notify_one();
+    }
+
     /// Hands over one finished line.
     ///
     /// An `urgent` line has been written when this returns, unless the disk
@@ -155,11 +269,16 @@ impl LogWriter {
     pub fn submit(&self, line: String, urgent: bool) {
         let mut pending = lock(&self.pending);
         if !pending.worker_running || pending.stopped {
-            if urgent || pending.stopped {
+            if urgent {
                 // Nobody else will write it: do it here.
                 drop(pending);
                 let mut file = lock(&self.file);
                 self.write_pending(&mut file, Some(&line));
+            } else if pending.stopped {
+                pending.queue.push_back((line, false));
+                drop(pending);
+                let mut file = lock(&self.file);
+                self.write_pending(&mut file, None);
             } else {
                 self.enqueue(&mut pending, line);
             }
@@ -176,7 +295,7 @@ impl LogWriter {
         }
         pending.last_ticket += 1;
         let ticket = pending.last_ticket;
-        pending.queue.push_back(line);
+        pending.queue.push_back((line, true));
         self.wake.notify_one();
 
         let deadline = Instant::now() + URGENT_WAIT;
@@ -207,7 +326,7 @@ impl LogWriter {
         if pending.queue.len() >= self.capacity {
             pending.dropped = pending.dropped.saturating_add(1);
         } else {
-            pending.queue.push_back(line);
+            pending.queue.push_back((line, false));
             self.wake.notify_one();
         }
     }
@@ -215,6 +334,7 @@ impl LogWriter {
     /// Writes everything that is queued and asks the operating system to
     /// flush the file to the disk. Waits for the disk as long as it takes.
     pub fn flush(&self) {
+        self.queue_summaries(true);
         let mut file = lock(&self.file);
         self.write_pending(&mut file, None);
         let _ = file.sync();
@@ -238,6 +358,7 @@ impl LogWriter {
                     continue;
                 }
             };
+            self.queue_summaries(true);
             self.write_pending(&mut file, Some(line));
             let _ = file.sync();
             return;
@@ -322,12 +443,24 @@ impl LogWriter {
         let lines = batch
             .lines
             .iter()
-            .map(String::as_str)
+            .map(|(line, _)| line.as_str())
             .chain(notes.iter().map(String::as_str))
             .chain(extra);
         // A logger has nowhere to report its own failures: a record that
         // cannot be written is lost.
         let _ = file.write_batch(lines.map(str::as_bytes));
+
+        let mut first_errors = lock(&self.first_errors);
+        let urgent = batch
+            .lines
+            .iter()
+            .filter(|(_, urgent)| *urgent)
+            .map(|(line, _)| line.as_str());
+        // `extra` is only ever a warning, an error or a panic.
+        for line in urgent.chain(extra) {
+            first_errors.write(line);
+        }
+        drop(first_errors);
 
         let mut pending = lock(&self.pending);
         pending.written_ticket = pending.written_ticket.max(batch.last_ticket);
@@ -365,15 +498,20 @@ impl LogWriter {
         loop {
             {
                 let mut pending = lock(&self.pending);
-                while pending.queue.is_empty() && !pending.stopped {
+                if pending.queue.is_empty() && !pending.stopped {
                     pending = self
                         .wake
-                        .wait(pending)
-                        .unwrap_or_else(PoisonError::into_inner);
+                        .wait_timeout(pending, SUMMARY_INTERVAL)
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .0;
                 }
                 if pending.stopped {
                     return;
                 }
+            }
+            self.queue_summaries(false);
+            if lock(&self.pending).queue.is_empty() {
+                continue;
             }
             let mut file = lock(&self.file);
             self.write_pending(&mut file, None);
@@ -426,6 +564,7 @@ mod tests {
         log_files(dir)
             .unwrap()
             .iter()
+            .filter(|file| !file.name.ends_with("-errors.log"))
             .flat_map(|file| {
                 fs::read_to_string(&file.path)
                     .unwrap()
@@ -687,5 +826,74 @@ mod tests {
                 "the panic\n"
             );
         });
+    }
+
+    fn first_errors(dir: &Path) -> Vec<String> {
+        log_files(dir)
+            .unwrap()
+            .iter()
+            .filter(|file| file.name.ends_with("-errors.log"))
+            .flat_map(|file| {
+                fs::read_to_string(&file.path)
+                    .unwrap()
+                    .lines()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_first_warnings_and_errors_are_copied_to_a_file_of_their_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let writer = writer(dir.path(), 16);
+
+        writer.submit("info\n".to_owned(), false);
+        assert!(
+            first_errors(dir.path()).is_empty(),
+            "no file without an error"
+        );
+        writer.submit("error 0\n".to_owned(), true);
+        for index in 1..(super::FIRST_ERRORS_RECORDS * 2) {
+            writer.submit(format!("error {index}\n"), true);
+        }
+        writer.write_from_panic_hook("panic\n");
+
+        let copied = first_errors(dir.path());
+        assert_eq!(copied.len(), super::FIRST_ERRORS_RECORDS as usize);
+        assert_eq!(copied[0], "error 0");
+        assert!(!copied.contains(&"info".to_owned()));
+    }
+
+    #[test]
+    fn the_first_errors_survive_when_the_log_itself_has_rotated_away() {
+        let dir = tempfile::tempdir().unwrap();
+        let run_id = "5f0c2a9be771";
+        let limits = Retention {
+            max_file_bytes: 1_000,
+            max_total_bytes: 4_000,
+            min_files_kept: 0,
+            ..Retention::default()
+        };
+        let file = RotatingFile::open(dir.path(), limits, run_id).unwrap();
+        let context = Arc::new(LineContext {
+            run_id: run_id.to_owned(),
+            redactor: Redactor::disabled(),
+        });
+        let writer = LogWriter::new(file, context, 16);
+
+        writer.submit("the error that started it\n".to_owned(), true);
+        for index in 0..5_000 {
+            writer.submit(format!("a later, different error {index}\n"), true);
+        }
+
+        let main_log: Vec<String> = log_files(dir.path())
+            .unwrap()
+            .iter()
+            .filter(|file| !file.name.ends_with("-errors.log"))
+            .map(|file| fs::read_to_string(&file.path).unwrap())
+            .collect();
+        assert!(main_log.iter().all(|text| !text.contains("started it")));
+        assert_eq!(first_errors(dir.path())[0], "the error that started it");
     }
 }
