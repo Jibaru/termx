@@ -10,8 +10,9 @@ use std::time::{Duration, Instant};
 
 use termx_core::pty::{Pty, PtyCommand, PtyOutput, PtySize, raise_open_file_limit};
 
-/// Number of descriptors a PTY is documented to use.
-const DESCRIPTORS_PER_PTY: usize = 4;
+/// Number of descriptors a PTY is documented to use: one more on macOS,
+/// where the terminal is kept open on our side so that no output is lost.
+const DESCRIPTORS_PER_PTY: usize = if cfg!(target_os = "macos") { 5 } else { 4 };
 
 fn open_descriptors() -> usize {
     std::fs::read_dir("/dev/fd")
