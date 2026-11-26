@@ -127,8 +127,11 @@ pub enum RecvTimeoutError {
 /// consumer automatically receives fewer, larger chunks.
 ///
 /// The stream ends when the process has exited and its remaining output has
-/// been delivered, or when the [`Pty`](super::Pty) is dropped. Dropping the
-/// `PtyOutput` does not affect the process: its output is then discarded.
+/// been delivered, or when the [`Pty`](super::Pty) is dropped. The exit
+/// status is published before the stream ends, so it can be read with
+/// [`Pty::wait`](super::Pty::wait) as soon as `recv` returns `None` (see
+/// [`Pty::try_wait`](super::Pty::try_wait) for the one exception). Dropping
+/// the `PtyOutput` does not affect the process: its output is then discarded.
 ///
 /// `PtyOutput` is also an [`Iterator`] over the chunks.
 pub struct PtyOutput {
