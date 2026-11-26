@@ -13,7 +13,7 @@ use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
 use super::record::{compact_timestamp, rfc3339_millis};
-use super::rotate::{LogFile, log_files};
+use super::rotate::{LogFile, eligible_metadata, log_files};
 use super::{DiagnosticsError, LogLevel, SystemInfo};
 
 /// Name of the file inside the bundle that describes the environment.
@@ -107,17 +107,15 @@ fn write(
 
     for log in logs {
         let name = &log.name;
-        // A file can disappear between the listing and now if it is pruned;
-        // the bundle is still useful without it. The listing only has
-        // regular files; check again that no link was swapped in since.
-        let still_regular =
-            fs::symlink_metadata(&log.path).is_ok_and(|metadata| metadata.file_type().is_file());
+        // The listing is a moment old. A file can have been pruned since,
+        // which is fine, or swapped for a link, which must not be followed:
+        // check again right before opening.
+        if eligible_metadata(&log.path).is_none() {
+            continue;
+        }
         let Ok(source) = File::open(&log.path) else {
             continue;
         };
-        if !still_regular {
-            continue;
-        }
         zip.start_file(format!("{LOGS_DIR_NAME}/{name}"), options)?;
         // The current file keeps growing: stop at the size it had when listed.
         let bytes = io::copy(&mut source.take(log.size), &mut zip)?;
@@ -302,6 +300,63 @@ mod tests {
 
         let entries = read_zip(&path);
         assert_eq!(entries.keys().collect::<Vec<_>>(), ["system-info.json"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_swapped_for_a_link_after_the_listing_is_not_exported() {
+        let logs = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let private = outside.path().join("private.txt");
+        fs::write(&private, "do not export\n").unwrap();
+        fs::write(logs.path().join(OLDER), "older\n").unwrap();
+        fs::write(logs.path().join(CURRENT), "current\n").unwrap();
+        let listing = crate::diagnostics::log_files(logs.path()).unwrap();
+        assert_eq!(listing.len(), 2);
+
+        // Between the listing and the export, one file becomes a link.
+        fs::remove_file(logs.path().join(CURRENT)).unwrap();
+        std::os::unix::fs::symlink(&private, logs.path().join(CURRENT)).unwrap();
+        let path = dest.path().join("bundle.zip");
+        let system = system();
+        super::write(
+            File::create_new(&path).unwrap(),
+            &listing,
+            context(&system),
+            time::OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+
+        let entries = read_zip(&path);
+        assert_eq!(
+            entries.keys().collect::<Vec<_>>(),
+            [&format!("logs/{OLDER}"), "system-info.json"]
+        );
+        assert!(
+            entries
+                .values()
+                .all(|content| !content.contains("do not export"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hard_link_in_the_log_directory_is_not_exported() {
+        let logs = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir_in(logs.path()).unwrap();
+        let private = outside.path().join("private.txt");
+        fs::write(&private, "do not export\n").unwrap();
+        fs::hard_link(&private, logs.path().join(CURRENT)).unwrap();
+        let system = system();
+
+        let path = export(logs.path(), dest.path(), context(&system)).unwrap();
+
+        assert_eq!(
+            read_zip(&path).keys().collect::<Vec<_>>(),
+            ["system-info.json"]
+        );
     }
 
     #[test]

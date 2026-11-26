@@ -3751,6 +3751,7 @@ dependencies = [
  "os_info",
  "portable-pty",
  "rlimit",
+ "rustix",
  "same-file",
  "serde",
  "serde_json",

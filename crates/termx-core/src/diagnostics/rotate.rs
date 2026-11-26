@@ -13,7 +13,7 @@
 //! exactly this name pattern are ever listed, exported or deleted; symbolic
 //! links are ignored.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -125,16 +125,86 @@ pub fn is_log_file_name(name: &str) -> bool {
     stamp_ok && run_id_ok && sequence_ok
 }
 
-/// Lists the log files in `dir`, oldest first.
+/// The metadata of `path` if it may be treated as one of our log files: a
+/// regular file, not a link of any kind, that belongs to the current user.
 ///
-/// Only regular files whose name matches [`is_log_file_name`] are returned.
-/// Symbolic links are never followed, so nothing outside the directory can be
-/// exported or deleted through it.
+/// - A symbolic link is not followed, so it cannot point the export or the
+///   clean-up at a file elsewhere.
+/// - A file with more than one hard link is refused where the platform says
+///   how many there are (not on Windows): the same content is reachable under
+///   another name, so it is not ours alone.
+/// - A file of another user is refused where the platform has file owners
+///   (not on Windows).
+pub(crate) fn eligible_metadata(path: &Path) -> Option<Metadata> {
+    let metadata = fs::symlink_metadata(path).ok()?;
+    (metadata.file_type().is_file() && has_single_link(&metadata) && is_owned_by_us(&metadata))
+        .then_some(metadata)
+}
+
+#[cfg(unix)]
+fn has_single_link(metadata: &Metadata) -> bool {
+    std::os::unix::fs::MetadataExt::nlink(metadata) == 1
+}
+
+#[cfg(not(unix))]
+fn has_single_link(_metadata: &Metadata) -> bool {
+    true
+}
+
+#[cfg(unix)]
+fn is_owned_by_us(metadata: &Metadata) -> bool {
+    is_owned_by(metadata, rustix::process::geteuid().as_raw())
+}
+
+#[cfg(unix)]
+fn is_owned_by(metadata: &Metadata, user_id: u32) -> bool {
+    std::os::unix::fs::MetadataExt::uid(metadata) == user_id
+}
+
+#[cfg(not(unix))]
+fn is_owned_by_us(_metadata: &Metadata) -> bool {
+    true
+}
+
+/// Checks that `dir` is a real directory of the current user.
+///
+/// A log directory that is a symbolic link would make termx write, export
+/// and delete files wherever the link points.
 ///
 /// # Errors
 ///
-/// Fails when the directory cannot be read.
+/// Fails when `dir` cannot be read, is a link or another kind of file, or
+/// belongs to another user.
+pub fn verify_log_dir(dir: &Path) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(dir)?;
+    if !metadata.file_type().is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the log directory is a link or not a directory",
+        ));
+    }
+    if !is_owned_by_us(&metadata) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "the log directory belongs to another user",
+        ));
+    }
+    Ok(())
+}
+
+/// Lists the log files in `dir`, oldest first.
+///
+/// Only regular files whose name matches [`is_log_file_name`], that have a
+/// single hard link and belong to the current user are returned. Symbolic
+/// links are never followed, so nothing outside the directory can be exported
+/// or deleted through it.
+///
+/// # Errors
+///
+/// Fails when the directory cannot be read or does not pass
+/// [`verify_log_dir`].
 pub fn log_files(dir: &Path) -> io::Result<Vec<LogFile>> {
+    verify_log_dir(dir)?;
     let mut files = Vec::new();
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
@@ -142,16 +212,12 @@ pub fn log_files(dir: &Path) -> io::Result<Vec<LogFile>> {
         let Some(name) = name.to_str().filter(|name| is_log_file_name(name)) else {
             continue;
         };
-        // `symlink_metadata` does not follow links. It is also read from the
-        // file rather than from the directory listing, which on Windows lags
-        // behind for a file that is open for writing.
+        // Read from the file rather than from the directory listing, which on
+        // Windows lags behind for a file that is open for writing.
         let path = entry.path();
-        let Ok(metadata) = fs::symlink_metadata(&path) else {
+        let Some(metadata) = eligible_metadata(&path) else {
             continue;
         };
-        if !metadata.file_type().is_file() {
-            continue;
-        }
         files.push(LogFile {
             path,
             name: name.to_owned(),
@@ -394,6 +460,7 @@ impl RotatingFile {
         }
 
         fs::create_dir_all(&self.dir)?;
+        verify_log_dir(&self.dir)?;
         let mut last_error = None;
         for _ in 0..NAME_ATTEMPTS {
             let path = self
@@ -809,6 +876,54 @@ mod tests {
         assert!(removed.is_empty());
         assert!(names(dir.path()).is_empty());
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 5);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hard_link_to_another_file_is_not_a_log_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let private = dir.path().join("private.txt");
+        fs::write(&private, "private").unwrap();
+        fs::hard_link(&private, dir.path().join(name(1))).unwrap();
+        create(dir.path(), &name(2), 10, DAY);
+
+        assert_eq!(names(dir.path()), [name(2)]);
+        prune(dir.path(), &retention(1, 1), SystemTime::now(), None).unwrap();
+        assert_eq!(fs::read_to_string(&private).unwrap(), "private");
+        assert!(dir.path().join(name(1)).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_of_another_user_is_not_ours() {
+        let dir = tempfile::tempdir().unwrap();
+        create(dir.path(), &name(1), 10, DAY);
+        let metadata = fs::symlink_metadata(dir.path().join(name(1))).unwrap();
+        let us = rustix::process::geteuid().as_raw();
+
+        assert!(super::is_owned_by(&metadata, us));
+        assert!(!super::is_owned_by(&metadata, us.wrapping_add(1)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_log_directory_that_is_a_link_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let elsewhere = root.path().join("elsewhere");
+        fs::create_dir(&elsewhere).unwrap();
+        create(&elsewhere, &name(1), 10, DAY);
+        let link = root.path().join("logs");
+        std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
+
+        assert!(log_files(&link).is_err());
+        assert!(RotatingFile::open(&link, Retention::default(), RUN).is_err());
+        assert_eq!(
+            fs::read_dir(&elsewhere).unwrap().count(),
+            1,
+            "nothing was written there"
+        );
+        // The real directory is fine.
+        assert_eq!(names(&elsewhere), [name(1)]);
     }
 
     #[cfg(unix)]
