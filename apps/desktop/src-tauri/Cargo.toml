@@ -15,6 +15,12 @@ workspace = true
 # Windows.
 name = "termx_desktop_lib"
 
+[features]
+# Test-only automation for the end-to-end suite in `e2e/`: see `src/e2e.rs`.
+# Never part of a release: enabling it in a build without debug assertions is
+# a compile error.
+e2e = ["dep:tauri-plugin-wdio-webdriver"]
+
 [build-dependencies]
 tauri-build = { version = "2.7.6", features = [] }
 
@@ -32,6 +38,9 @@ tauri-plugin-clipboard-manager = "2.5.0"
 tauri-plugin-dialog = "2.8.4"
 # Opens the links of the terminal in the system browser.
 tauri-plugin-opener = "2.7.3"
+# The WebDriver server the end-to-end suite drives the application through.
+# Only compiled with the `e2e` feature.
+tauri-plugin-wdio-webdriver = { version = "=1.5.1", optional = true }
 termx-core = { workspace = true }
 
 [dev-dependencies]

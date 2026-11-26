@@ -252,6 +252,21 @@ impl PtyCommand {
         self
     }
 
+    /// The same command running another program, with `args` as its only
+    /// arguments, and not as a login shell. The working directory, the
+    /// environment and everything else are kept.
+    #[must_use]
+    pub fn with_program<I, S>(mut self, program: impl AsRef<OsStr>, args: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        program.as_ref().clone_into(&mut self.program);
+        self.args.clear();
+        self.login_shell = false;
+        self.args(args)
+    }
+
     /// Sets the working directory of the process.
     ///
     /// When no directory is set, the process starts in the user's home
@@ -489,6 +504,19 @@ mod tests {
             .unwrap();
 
         assert_eq!(builder.get_argv(), &["prog", "one", "two", "three"]);
+    }
+
+    #[test]
+    fn another_program_keeps_everything_but_the_program_and_arguments() {
+        let command = PtyCommand::login_shell("/bin/zsh")
+            .env("KEPT", "yes")
+            .with_program("prog", ["one"]);
+
+        assert_eq!(command.program(), "prog");
+        assert!(!command.is_login_shell());
+        let builder = command.to_builder().unwrap();
+        assert_eq!(builder.get_argv(), &["prog", "one"]);
+        assert_eq!(env_of(&builder, "KEPT"), Some("yes"));
     }
 
     #[test]

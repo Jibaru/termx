@@ -190,6 +190,10 @@ impl TerminalState {
         // Takes the markers of the launch script out of the output, and
         // tells the workspace what they say.
         let filter = workspace.output_filter(key, &launch);
+        // Builds for the end-to-end suite can name the program a shell
+        // session runs.
+        #[cfg(feature = "e2e")]
+        let launch = crate::e2e::override_shell(launch);
         let options = SessionOptions::new(launch.command).size(size);
         let id = match self.spawn(owner, &options, filter, channel, Some(link)) {
             Ok(id) => id,
