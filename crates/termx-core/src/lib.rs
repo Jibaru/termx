@@ -10,10 +10,12 @@
 //! - [`pty`]: spawning and driving pseudo-terminals.
 //! - [`session`]: the model of a running terminal session.
 //! - [`config`]: user configuration.
+//! - [`diagnostics`]: persistent logging and the diagnostics bundle.
 
 #![warn(missing_docs)]
 
 pub mod config;
+pub mod diagnostics;
 pub mod pty;
 pub mod session;
 
