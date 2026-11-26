@@ -86,29 +86,25 @@ pub fn open_log_folder(state: State<'_, DiagnosticsState>) -> CommandResult<()> 
 }
 
 /// Writes a diagnostics bundle (a zip with the log files and
-/// `system-info.json`) and opens its folder in the file manager.
+/// `system-info.json`) to the Downloads folder, opens that folder in the file
+/// manager and returns the path of the bundle.
 ///
-/// The bundle goes into `destination` when given, and into the Downloads
-/// folder otherwise.
+/// The destination is deliberately not an argument: the webview must not be
+/// able to make the application create files at a path of its choosing.
 ///
 /// # Errors
 ///
-/// Fails when logging is not running or the bundle cannot be written.
+/// Fails when logging is not running, there is no Downloads folder, or the
+/// bundle cannot be written.
 #[tauri::command(async)]
 pub fn export_diagnostics(
     app: AppHandle,
     state: State<'_, DiagnosticsState>,
-    destination: Option<String>,
 ) -> CommandResult<ExportedBundle> {
-    let destination = destination
-        .filter(|destination| !destination.trim().is_empty())
-        .map(PathBuf::from)
-        .or_else(|| app.path().download_dir().ok())
-        .or_else(|| app.path().home_dir().ok());
-
+    let downloads = app.path().download_dir().ok();
     let bundle = logged(
         "export_diagnostics",
-        export_bundle(&state, destination.as_deref()),
+        export_bundle(&state, downloads.as_deref()),
     )?;
 
     // Showing the folder is a convenience; the path is returned either way.
@@ -133,7 +129,7 @@ fn running(state: &DiagnosticsState) -> Result<&Diagnostics, String> {
 
 fn export_bundle(state: &DiagnosticsState, destination: Option<&Path>) -> Result<PathBuf, String> {
     let diagnostics = running(state)?;
-    let destination = destination.ok_or("no folder to write the bundle to was found")?;
+    let destination = destination.ok_or("the Downloads folder could not be found")?;
     let bundle = diagnostics
         .export_bundle(destination)
         .map_err(|error| error.to_string())?;

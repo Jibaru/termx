@@ -24,7 +24,7 @@ describe("DiagnosticsActions", () => {
     expect(await screen.findByRole("status")).toHaveTextContent(
       "Saved /downloads/termx-diagnostics-1.zip",
     );
-    expect(ipc.calls).toEqual([{ command: "export_diagnostics", args: { destination: null } }]);
+    expect(ipc.calls.map((call) => call.command)).toEqual(["export_diagnostics"]);
   });
 
   it("shows the reason when an action fails", async () => {
