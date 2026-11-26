@@ -63,7 +63,9 @@
 //! something to receive, so one event loop or async runtime can drain every
 //! terminal with non-blocking calls.
 //!
-//! Bytes are passed through **unmodified**. Chunk boundaries are arbitrary
+//! Bytes are passed through **unmodified** (with one exception at the very
+//! start of a Windows session, described in the platform notes below). Chunk
+//! boundaries are arbitrary
 //! and can fall in the middle of a UTF-8 character or of an escape sequence,
 //! so chunks must be fed to a stateful decoder, never interpreted one by one.
 //!
@@ -92,12 +94,17 @@
 //!   bytes of the process but a rendering of the console's screen: escape
 //!   sequences are added, runs of spaces may become cursor movements, and
 //!   text may be repainted. Compare the visible content, not the bytes.
-//! - **ConPTY asks questions.** When it starts, the Windows console sends
-//!   terminal queries (such as `ESC [ 6 n`, "where is the cursor?") in the
-//!   output and may hold further output back until the answer is written to
-//!   the PTY. A terminal emulator such as xterm.js answers them on its own;
-//!   a consumer that does not emulate a terminal must reply itself
-//!   (`ESC [ 1 ; 1 R`).
+//! - **The ConPTY start-up query is answered here.** portable-pty creates
+//!   the pseudo-console in a mode where it first asks its terminal where the
+//!   cursor is (`ESC [ 6 n`) and, on Windows 10, prints nothing until it is
+//!   told. So that a session never stalls when no terminal emulator is
+//!   attached yet, this module answers that one question itself ("top-left
+//!   corner", which is where a new terminal's cursor is) and removes it from
+//!   the output. Because the terminal emulator never sees the question, it
+//!   cannot answer it a second time. This is the only alteration ever made
+//!   to the output, it is limited to the first few bytes of a Windows
+//!   session, and every later query is passed through for the terminal
+//!   emulator to answer by writing to the PTY.
 
 mod command;
 mod error;

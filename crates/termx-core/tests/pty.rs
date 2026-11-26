@@ -14,6 +14,10 @@
 //!   instead of passing bytes through, so assertions search the visible text
 //!   (escape sequences stripped). Exact byte comparisons are made on Unix,
 //!   where the PTY is transparent.
+//!
+//! The tests never answer the queries the Windows console sends when it
+//! starts: the whole suite doubles as a check that output flows when no
+//! terminal emulator is attached.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -215,39 +219,11 @@ impl Session {
         match self.output.recv_timeout(timeout) {
             Ok(chunk) => {
                 assert!(!chunk.is_empty(), "received an empty chunk");
-                let previous = self.raw.len();
                 self.raw.extend_from_slice(&chunk);
-                self.answer_terminal_queries(previous);
                 true
             }
             Err(RecvTimeoutError::Timeout) => true,
             Err(RecvTimeoutError::Closed) => false,
-        }
-    }
-
-    /// Plays the part of the terminal emulator for the queries ConPTY sends
-    /// when it starts, which it may wait on before producing any output.
-    fn answer_terminal_queries(&mut self, previous: usize) {
-        if !cfg!(windows) {
-            return;
-        }
-        // (query, answer): cursor position report and primary device
-        // attributes.
-        for (query, answer) in [
-            (&b"\x1b[6n"[..], &b"\x1b[1;1R"[..]),
-            (&b"\x1b[c"[..], &b"\x1b[?1;2c"[..]),
-        ] {
-            // Start early enough to catch a query split across two chunks,
-            // but late enough that every match contains new bytes.
-            let start = previous.saturating_sub(query.len() - 1);
-            let queries = self.raw[start..]
-                .windows(query.len())
-                .filter(|window| *window == query)
-                .count();
-            for _ in 0..queries {
-                // The process may be gone already; that is not an error.
-                let _ = self.pty.write(answer);
-            }
         }
     }
 
@@ -466,6 +442,98 @@ fn large_burst_is_fully_delivered_to_a_slow_consumer() {
             session.raw.len(),
             LINES * 102 + "END-OF-OUTPUT\r\n".len(),
             "the number of bytes delivered is wrong"
+        );
+    });
+}
+
+/// Whether the pseudo-console of this version of Windows sends the cursor
+/// position query when it starts, observed on a PTY that bypasses
+/// `termx_core` so that nothing answers or removes it.
+#[cfg(windows)]
+fn console_sends_startup_query() -> bool {
+    use std::io::Read;
+
+    let pair = portable_pty::native_pty_system()
+        .openpty(portable_pty::PtySize::default())
+        .expect("cannot open a raw pseudo-console");
+    let mut command = portable_pty::CommandBuilder::new(helper_path());
+    command.arg("sleep");
+    let mut child = pair
+        .slave
+        .spawn_command(command)
+        .expect("cannot spawn in the raw pseudo-console");
+    let mut reader = pair
+        .master
+        .try_clone_reader()
+        .expect("cannot read the console");
+
+    let (chunks_tx, chunks_rx) = mpsc::channel();
+    let reading = thread::spawn(move || {
+        let mut buffer = [0u8; 4096];
+        while let Ok(n) = reader.read(&mut buffer) {
+            if n == 0 || chunks_tx.send(buffer[..n].to_vec()).is_err() {
+                break;
+            }
+        }
+    });
+
+    // The query comes first, so a few seconds of output are plenty.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut raw = Vec::new();
+    let found = loop {
+        if raw.windows(4).any(|window| window == b"\x1b[6n") {
+            break true;
+        }
+        match chunks_rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(chunk) => raw.extend_from_slice(&chunk),
+            Err(_) => break false,
+        }
+    };
+
+    let _ = child.kill();
+    let _ = child.wait();
+    // Closing the console ends the read.
+    drop(pair);
+    drop(chunks_rx);
+    let _ = reading.join();
+    found
+}
+
+#[cfg(windows)]
+#[test]
+fn console_startup_query_is_answered_without_a_terminal() {
+    use std::io::Write;
+
+    guarded(|| {
+        let console_asks = console_sends_startup_query();
+
+        // Nobody plays the terminal emulator here: nothing is ever written
+        // to the PTY. The output must flow all the same.
+        let started = Instant::now();
+        let mut session = Session::spawn(&helper(&["print", "nobody-answers"]));
+        session.wait_for("nobody-answers");
+        let first_output = started.elapsed();
+        session.read_to_end();
+        assert!(session.exit_status().success());
+
+        // The question was answered by the PTY layer, so it must not reach
+        // the consumer, whose terminal emulator would answer it again.
+        assert!(
+            !session.raw.windows(4).any(|window| window == b"\x1b[6n"),
+            "the start-up query was delivered: {:?}",
+            String::from_utf8_lossy(&session.raw)
+        );
+        assert!(
+            first_output < Duration::from_secs(20),
+            "the output stalled for {first_output:?}"
+        );
+
+        // Written straight to stderr so that it shows in the CI log: whether
+        // this console asks decides how much the assertions above prove.
+        let _ = writeln!(
+            std::io::stderr(),
+            "note: this console sends the start-up query: {console_asks}; \
+             first output without a terminal after {first_output:?}"
         );
     });
 }
@@ -879,10 +947,10 @@ fn shutting_down_many_sessions_does_not_add_up() {
         termx_core::pty::raise_open_file_limit().expect("cannot raise the open file limit");
         let manager = PtyManager::new();
         for _ in 0..SESSIONS {
-            let (id, mut output) = manager
+            let (_, mut output) = manager
                 .spawn(&stubborn_process(), PtySize::default())
                 .unwrap();
-            read_until(&manager.get(id).unwrap(), &mut output, "ready");
+            read_until(&mut output, "ready");
         }
         assert_eq!(manager.len(), SESSIONS);
 
@@ -1139,9 +1207,8 @@ fn invalid_requests_are_rejected_before_spawning() {
 // Manager
 // ---------------------------------------------------------------------------
 
-/// Reads from `output` until `needle` is visible, answering nothing: only
-/// suitable for output that does not depend on terminal queries.
-fn read_until(pty: &Pty, output: &mut PtyOutput, needle: &str) -> String {
+/// Reads from `output` until `needle` is visible.
+fn read_until(output: &mut PtyOutput, needle: &str) -> String {
     let mut raw = Vec::new();
     let deadline = Instant::now() + TIMEOUT;
     loop {
@@ -1154,12 +1221,7 @@ fn read_until(pty: &Pty, output: &mut PtyOutput, needle: &str) -> String {
             "timed out waiting for {needle:?}; got: {text:?}"
         );
         match output.recv_timeout(Duration::from_millis(100)) {
-            Ok(chunk) => {
-                if cfg!(windows) && chunk.windows(4).any(|window| window == b"\x1b[6n") {
-                    let _ = pty.write(b"\x1b[1;1R");
-                }
-                raw.extend_from_slice(&chunk);
-            }
+            Ok(chunk) => raw.extend_from_slice(&chunk),
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Closed) => {
                 panic!("the output ended before {needle:?}; got: {text:?}")
@@ -1185,14 +1247,14 @@ fn manager_drives_independent_sessions() {
 
         let first_pty = manager.get(first).unwrap();
         let second_pty = manager.get(second).unwrap();
-        read_until(&first_pty, &mut first_output, "ready");
-        read_until(&second_pty, &mut second_output, "ready");
+        read_until(&mut first_output, "ready");
+        read_until(&mut second_output, "ready");
 
         // Input goes to the session it was addressed to, and only there.
         manager.write(first, b"for-first\r").unwrap();
         manager.write(second, b"for-second\r").unwrap();
-        let first_text = read_until(&first_pty, &mut first_output, "got:for-first");
-        let second_text = read_until(&second_pty, &mut second_output, "got:for-second");
+        let first_text = read_until(&mut first_output, "got:for-first");
+        let second_text = read_until(&mut second_output, "got:for-second");
         assert!(!first_text.contains("for-second"), "got: {first_text:?}");
         assert!(!second_text.contains("for-first"), "got: {second_text:?}");
 
@@ -1235,13 +1297,13 @@ fn dropping_the_manager_kills_its_sessions() {
     guarded(|| {
         let file = scratch_dir("manager-heartbeat").join("beat");
         let manager = PtyManager::new();
-        let (id, mut output) = manager
+        let (_, mut output) = manager
             .spawn(
                 &helper(&["heartbeat", &file.to_string_lossy()]),
                 PtySize::default(),
             )
             .unwrap();
-        read_until(&manager.get(id).unwrap(), &mut output, "ready");
+        read_until(&mut output, "ready");
         let deadline = Instant::now() + TIMEOUT;
         while read_heartbeat(&file).is_none() {
             assert!(

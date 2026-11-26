@@ -14,15 +14,140 @@ pub const READ_BUFFER_SIZE: usize = 64 * 1024;
 /// Any read error other than an interruption ends the stream: a PTY reports
 /// the terminal going away as an error (`EIO` on Linux, a broken pipe on
 /// Windows) rather than as a zero-length read.
-pub(super) fn pump_blocking(mut reader: impl Read, sink: &OutputSink) {
+#[cfg(any(unix, test))]
+pub(super) fn pump_blocking(reader: impl Read, sink: &OutputSink) {
+    pump_blocking_with(reader, |bytes| sink.push(bytes));
+}
+
+/// Like [`pump_blocking`], handing each read to `forward`.
+fn pump_blocking_with(mut reader: impl Read, mut forward: impl FnMut(&[u8])) {
     let mut buffer = vec![0u8; READ_BUFFER_SIZE];
     loop {
         match reader.read(&mut buffer) {
             Ok(0) => break,
-            Ok(n) => sink.push(&buffer[..n]),
+            Ok(n) => forward(&buffer[..n]),
             Err(error) if error.kind() == ErrorKind::Interrupted => {}
             Err(_) => break,
         }
+    }
+}
+
+/// Reads until end of file like [`pump_blocking`], taking care of the cursor
+/// position query the Windows console sends when it starts.
+///
+/// `answer` is called once, when the query is seen, and must write
+/// [`CURSOR_POSITION_REPORT`] to the PTY. See [`StartupQueryFilter`].
+#[cfg(windows)]
+pub(super) fn pump_console(reader: impl Read, sink: &OutputSink, mut answer: impl FnMut()) {
+    let mut filter = StartupQueryFilter::default();
+    pump_blocking_with(reader, |bytes| {
+        let (output, query_seen) = filter.filter(bytes);
+        if query_seen {
+            answer();
+        }
+        if !output.is_empty() {
+            sink.push(&output);
+        }
+    });
+    let rest = filter.finish();
+    if !rest.is_empty() {
+        sink.push(&rest);
+    }
+}
+
+/// The query the Windows console sends when it starts: "where is the
+/// cursor?" (DSR 6).
+#[cfg(any(windows, test))]
+const CURSOR_POSITION_QUERY: &[u8] = b"\x1b[6n";
+
+/// The answer to [`CURSOR_POSITION_QUERY`] for a terminal whose cursor is in
+/// the top-left corner, which is where a new terminal starts.
+#[cfg(any(windows, test))]
+pub(super) const CURSOR_POSITION_REPORT: &[u8] = b"\x1b[1;1R";
+
+/// How far into the output the start-up query is looked for. The console
+/// sends it before anything the process prints, after at most a few mode
+/// settings.
+#[cfg(any(windows, test))]
+const STARTUP_SCAN_LIMIT: usize = 256;
+
+/// Removes the start-up cursor position query from the output of a Windows
+/// pseudo-console, so that this module can answer it itself.
+///
+/// portable-pty creates the pseudo-console with `PSEUDOCONSOLE_INHERIT_CURSOR`.
+/// The console then asks its terminal for the cursor position before doing
+/// anything else and, on Windows 10, produces no output at all until it gets
+/// the answer. A session nobody is looking at yet, or a consumer that is not
+/// a terminal emulator, would stall forever.
+///
+/// The query is therefore answered here, immediately and unconditionally,
+/// and removed from the stream. Removing it is what guarantees that it is
+/// never answered twice: a terminal emulator attached to the output never
+/// sees the question. Answering "top-left corner" is correct because the
+/// question is asked before any output, when a new terminal's cursor has not
+/// moved yet.
+///
+/// Only the first query within the first [`STARTUP_SCAN_LIMIT`] bytes is
+/// treated this way. Everything else, including later queries made by the
+/// programs running in the terminal, is passed through untouched for the
+/// terminal emulator to answer.
+#[cfg(any(windows, test))]
+#[derive(Default)]
+struct StartupQueryFilter {
+    /// Bytes delivered so far while looking for the query.
+    scanned: usize,
+    /// Trailing bytes that may be the beginning of the query, held back
+    /// until the next read tells.
+    held: Vec<u8>,
+    done: bool,
+}
+
+#[cfg(any(windows, test))]
+impl StartupQueryFilter {
+    /// Returns the bytes to deliver for one read, and whether the query was
+    /// found in it.
+    fn filter<'a>(&mut self, bytes: &'a [u8]) -> (std::borrow::Cow<'a, [u8]>, bool) {
+        use std::borrow::Cow;
+
+        if self.done {
+            return (Cow::Borrowed(bytes), false);
+        }
+
+        let mut data = std::mem::take(&mut self.held);
+        data.extend_from_slice(bytes);
+
+        // Only a query starting inside the start-up window is the console's.
+        let window_left = STARTUP_SCAN_LIMIT - self.scanned;
+        if let Some(position) = data
+            .windows(CURSOR_POSITION_QUERY.len())
+            .position(|window| window == CURSOR_POSITION_QUERY)
+            .filter(|&position| position < window_left)
+        {
+            data.drain(position..position + CURSOR_POSITION_QUERY.len());
+            self.done = true;
+            return (Cow::Owned(data), true);
+        }
+
+        // Keep back a tail that could be the start of a query cut in two.
+        let tail = (1..CURSOR_POSITION_QUERY.len())
+            .rev()
+            .find(|&length| data.ends_with(&CURSOR_POSITION_QUERY[..length]))
+            .unwrap_or(0);
+        let scanned = self.scanned + data.len() - tail;
+        if scanned >= STARTUP_SCAN_LIMIT {
+            // Past the start-up window: nothing is held back any more.
+            self.done = true;
+            return (Cow::Owned(data), false);
+        }
+        self.scanned = scanned;
+        self.held = data.split_off(data.len() - tail);
+        (Cow::Owned(data), false)
+    }
+
+    /// Returns the bytes still held back, at the end of the stream.
+    fn finish(&mut self) -> Vec<u8> {
+        self.done = true;
+        std::mem::take(&mut self.held)
     }
 }
 
@@ -217,6 +342,104 @@ mod tests {
         // chunks must give back the exact bytes.
         let received: Vec<u8> = output.by_ref().flatten().collect();
         assert_eq!(String::from_utf8(received).unwrap(), text);
+    }
+
+    /// Feeds `chunks` to a new filter and returns everything delivered and
+    /// how many times the query was reported.
+    fn run_filter(chunks: &[&[u8]]) -> (Vec<u8>, usize) {
+        let mut filter = StartupQueryFilter::default();
+        let mut delivered = Vec::new();
+        let mut queries = 0;
+        for chunk in chunks {
+            let (output, query_seen) = filter.filter(chunk);
+            delivered.extend_from_slice(&output);
+            queries += usize::from(query_seen);
+        }
+        delivered.extend_from_slice(&filter.finish());
+        (delivered, queries)
+    }
+
+    #[test]
+    fn startup_query_is_removed_and_reported_once() {
+        let (delivered, queries) = run_filter(&[b"\x1b[?9001h\x1b[6n\x1b[?1004hhello"]);
+
+        assert_eq!(delivered, b"\x1b[?9001h\x1b[?1004hhello");
+        assert_eq!(queries, 1);
+    }
+
+    #[test]
+    fn startup_query_is_found_wherever_the_reads_cut_it() {
+        let stream = b"\x1b[?25l\x1b[6n\x1b[2Jprompt> ";
+        let expected = b"\x1b[?25l\x1b[2Jprompt> ";
+
+        // Every way of cutting the stream in two, then byte by byte.
+        for cut in 0..=stream.len() {
+            let (delivered, queries) = run_filter(&[&stream[..cut], &stream[cut..]]);
+            assert_eq!(delivered, expected, "cut at {cut}");
+            assert_eq!(queries, 1, "cut at {cut}");
+        }
+        let bytes: Vec<&[u8]> = stream.chunks(1).collect();
+        let (delivered, queries) = run_filter(&bytes);
+        assert_eq!(delivered, expected);
+        assert_eq!(queries, 1);
+    }
+
+    #[test]
+    fn only_the_first_query_belongs_to_the_console() {
+        // A later query comes from a program and is for the terminal
+        // emulator to answer: it must be delivered.
+        let (delivered, queries) = run_filter(&[b"\x1b[6n", b"$ \x1b[6n", b"\x1b[6n"]);
+
+        assert_eq!(delivered, b"$ \x1b[6n\x1b[6n");
+        assert_eq!(queries, 1);
+    }
+
+    #[test]
+    fn output_without_a_startup_query_is_untouched() {
+        // Sequences that merely start like the query, with awkward cuts.
+        let chunks: [&[u8]; 6] = [
+            b"\x1b",
+            b"[6",
+            b"m colour \x1b[",
+            b"60n \x1b",
+            b"[",
+            b"0m end\x1b[6",
+        ];
+        let (delivered, queries) = run_filter(&chunks);
+
+        assert_eq!(delivered, chunks.concat());
+        assert_eq!(queries, 0);
+    }
+
+    #[test]
+    fn queries_after_the_startup_window_are_untouched() {
+        let mut stream = vec![b'x'; STARTUP_SCAN_LIMIT];
+        stream.extend_from_slice(CURSOR_POSITION_QUERY);
+        stream.extend_from_slice(b" tail");
+
+        for size in [1, 3, 7, 64, stream.len()] {
+            let chunks: Vec<&[u8]> = stream.chunks(size).collect();
+            let (delivered, queries) = run_filter(&chunks);
+            assert_eq!(delivered, stream, "chunks of {size}");
+            assert_eq!(queries, 0, "chunks of {size}");
+        }
+    }
+
+    #[test]
+    fn filter_is_transparent_once_done() {
+        let mut filter = StartupQueryFilter::default();
+        assert!(filter.filter(b"\x1b[6n").1);
+
+        // No copy and no holding back afterwards, even for a lone escape.
+        let (output, query_seen) = filter.filter(b"text\x1b");
+        assert!(matches!(output, std::borrow::Cow::Borrowed(b"text\x1b")));
+        assert!(!query_seen);
+        assert!(filter.finish().is_empty());
+    }
+
+    #[test]
+    fn cursor_position_report_is_well_formed() {
+        assert_eq!(CURSOR_POSITION_REPORT, b"\x1b[1;1R");
     }
 
     #[test]

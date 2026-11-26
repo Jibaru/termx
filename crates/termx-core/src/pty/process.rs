@@ -263,10 +263,19 @@ impl Pty {
                 killer: Mutex::new(child.clone_killer()),
             };
             let reader_task = {
-                let sink = sink.clone();
+                let (sink, shared) = (sink.clone(), Arc::clone(&shared));
                 let reader = streams.reader;
                 move || {
-                    reader::pump_blocking(reader, &sink);
+                    // The console's start-up question is answered here, so
+                    // that output flows even when no terminal emulator is
+                    // attached to answer it (see `StartupQueryFilter`).
+                    reader::pump_console(reader, &sink, || {
+                        if let Some(writer) = lock(&shared.writer).as_mut() {
+                            let _ = writer
+                                .write_all(reader::CURSOR_POSITION_REPORT)
+                                .and_then(|()| writer.flush());
+                        }
+                    });
                     sink.finish();
                 }
             };
