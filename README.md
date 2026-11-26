@@ -10,8 +10,9 @@ sessions at once.
 ## Status
 
 **Early development.** termx opens your login shell in a working terminal:
-one session per window for now. There are no releases yet; see
-[Build, run and test](#build-run-and-test) to try it.
+one session per window for now. It remembers that session and its window
+between runs ([what termx remembers](docs/state.md)). There are no releases
+yet; see [Build, run and test](#build-run-and-test) to try it.
 
 ## Using the terminal
 
@@ -156,6 +157,13 @@ diagnostics** in the termx window and attach the zip file it saves to a
 
 [Logging and diagnostics](docs/logging.md) explains where the logs are, what
 they contain and what they never contain.
+
+## What termx remembers
+
+termx keeps its sessions, their layout and its window in a state file on
+your machine, and nothing that was printed or typed in a terminal.
+[What termx remembers](docs/state.md) says where the file is, what is in it
+and what happens when two termx run at once.
 
 ## Contributing
 
