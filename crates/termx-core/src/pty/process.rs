@@ -110,6 +110,11 @@ struct ChildControl {
 #[cfg(unix)]
 const KILL_GRACE: Duration = Duration::from_millis(250);
 
+/// How long the end of the output stream is held back for the exit status
+/// to be published, once the terminal reports end of file (Unix only).
+#[cfg(unix)]
+const STREAM_END_GRACE: Duration = Duration::from_secs(1);
+
 /// Shortest and longest pause between two checks of whether the process has
 /// exited (Unix only).
 ///
@@ -226,13 +231,23 @@ impl Pty {
                 force_kill_at: None,
             }));
             let reader_task = {
-                let (sink, poke) = (sink.clone(), poke.clone());
+                let (sink, poke, shared) = (sink.clone(), poke.clone(), Arc::clone(&shared));
                 let (master, stop) = (streams.master, streams.stop_reader);
                 move || {
                     reader::pump_until_stopped(&master, &stop, &sink);
-                    sink.finish();
-                    // End of file usually means the process is gone.
+                    // End of file usually means the process is gone: have the
+                    // waiter thread check now, and give it a moment to publish
+                    // the exit status before the stream ends, so that a
+                    // consumer reaching the end of the stream finds the
+                    // status. The wait is bounded because a process may close
+                    // its terminal and keep running.
                     let _ = poke.send(());
+                    if !sink.is_shut_down()
+                        && let Some(deadline) = Instant::now().checked_add(STREAM_END_GRACE)
+                    {
+                        let _ = shared.wait_until(deadline);
+                    }
+                    sink.finish();
                 }
             };
             let waiter_task = {
@@ -391,6 +406,13 @@ impl Pty {
     }
 
     /// Returns the exit status if the process has exited, without blocking.
+    ///
+    /// Once the [`PtyOutput`] has ended, this returns the status right away
+    /// in every ordinary case. The one exception is a process that closes
+    /// its terminal and keeps running: its output ends while it is alive.
+    /// Code that needs the status should therefore call
+    /// [`wait`](Self::wait) or [`wait_timeout`](Self::wait_timeout) rather
+    /// than assume it is there.
     #[must_use]
     pub fn try_wait(&self) -> Option<ExitStatus> {
         lock(&self.shared.exit).clone()
@@ -419,27 +441,10 @@ impl Pty {
     /// `None` if the process is still running.
     #[must_use]
     pub fn wait_timeout(&self, timeout: Duration) -> Option<ExitStatus> {
-        let deadline = Instant::now().checked_add(timeout);
-        let mut exit = lock(&self.shared.exit);
-        loop {
-            if let Some(status) = exit.as_ref() {
-                return Some(status.clone());
-            }
-            let Some(deadline) = deadline else {
-                // The timeout is too large to be represented: wait forever.
-                drop(exit);
-                return Some(self.wait());
-            };
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return None;
-            }
-            exit = self
-                .shared
-                .exited
-                .wait_timeout(exit, remaining)
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .0;
+        match Instant::now().checked_add(timeout) {
+            Some(deadline) => self.shared.wait_until(deadline),
+            // The timeout is too large to be represented: wait forever.
+            None => Some(self.wait()),
         }
     }
 }
@@ -503,6 +508,25 @@ impl std::fmt::Debug for Pty {
 }
 
 impl Shared {
+    /// Waits for the exit status until `deadline`.
+    fn wait_until(&self, deadline: Instant) -> Option<ExitStatus> {
+        let mut exit = lock(&self.exit);
+        loop {
+            if let Some(status) = exit.as_ref() {
+                return Some(status.clone());
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return None;
+            }
+            exit = self
+                .exited
+                .wait_timeout(exit, remaining)
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
+        }
+    }
+
     /// Publishes the exit status, then closes the terminal.
     fn finish(&self, status: ExitStatus) {
         *lock(&self.exit) = Some(status);

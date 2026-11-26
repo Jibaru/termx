@@ -522,6 +522,25 @@ fn exit_code_is_propagated() {
 }
 
 #[test]
+fn exit_status_is_available_when_the_output_ends() {
+    guarded(|| {
+        // The end of the stream and the exit status come from two threads;
+        // the stream must not win the race.
+        for round in 0..100 {
+            let mut session = Session::spawn(&helper(&["exit", "9"]));
+            session.read_to_end();
+
+            let status = session.pty.try_wait();
+            assert_eq!(
+                status.as_ref().and_then(ExitStatus::code),
+                Some(9),
+                "round {round}: the stream ended before the exit status was known"
+            );
+        }
+    });
+}
+
+#[test]
 fn waiting_times_out_while_the_process_runs() {
     guarded(|| {
         let mut session = Session::spawn(&helper(&["sleep"]));
