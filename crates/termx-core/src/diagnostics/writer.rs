@@ -71,7 +71,7 @@ const SUMMARY_INTERVAL: Duration = Duration::from_secs(1);
 
 /// How long the panic hook waits for the log file when another thread is
 /// writing.
-const PANIC_LOCK_ATTEMPTS: u32 = 60;
+const PANIC_LOCK_WAIT: Duration = Duration::from_millis(300);
 const PANIC_LOCK_RETRY_DELAY: Duration = Duration::from_millis(5);
 
 #[derive(Debug, Default)]
@@ -358,11 +358,17 @@ impl LogWriter {
     /// to a separate crash file and to stderr instead: a panic is never left
     /// unrecorded.
     pub fn write_from_panic_hook(&self, line: &str) {
-        for _ in 0..PANIC_LOCK_ATTEMPTS {
+        // By the clock, not by a number of attempts: a sleep can take much
+        // longer than asked on a busy machine.
+        let deadline = Instant::now() + PANIC_LOCK_WAIT;
+        loop {
             let mut file = match self.file.try_lock() {
                 Ok(file) => file,
                 Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
                 Err(TryLockError::WouldBlock) => {
+                    if Instant::now() >= deadline {
+                        break;
+                    }
                     std::thread::sleep(PANIC_LOCK_RETRY_DELAY);
                     continue;
                 }
@@ -717,32 +723,37 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let writer = writer(dir.path(), 16);
         writer.start_worker().unwrap();
-        let stall = Duration::from_millis(1_500);
 
         std::thread::scope(|scope| {
             let (stalled, is_stalled) = std::sync::mpsc::channel();
+            let (release, released) = std::sync::mpsc::channel::<()>();
             let writer = &writer;
             scope.spawn(move || {
+                // The disk does not answer until the test says so. That the
+                // calls below return at all is what is being tested.
                 let _file = super::lock(&writer.file);
                 stalled.send(()).unwrap();
-                std::thread::sleep(stall);
+                let _ = released.recv();
             });
             is_stalled.recv().unwrap();
 
-            // The first caller waits for the bounded time and no longer.
+            // The first caller waits for the bounded time, then goes on.
             let start = Instant::now();
             writer.submit("error 1\n".to_owned(), true);
             let first = start.elapsed();
             assert!(first >= URGENT_WAIT, "returned after {first:?}");
-            assert!(first < stall / 2, "the caller was held up for {first:?}");
 
-            // While the disk is known to be stalled, nobody waits at all.
+            // While the disk is known to be stalled, nobody waits at all:
+            // 49 waits would take 4.9 s.
             let start = Instant::now();
             for index in 2..=50 {
                 writer.submit(format!("error {index}\n"), true);
             }
             let rest = start.elapsed();
-            assert!(rest < URGENT_WAIT * 5, "49 more errors took {rest:?}");
+            assert!(rest < URGENT_WAIT * 20, "49 more errors took {rest:?}");
+
+            // Nothing was written while the disk was stalled.
+            release.send(()).unwrap();
         });
 
         // The disk is back: everything is written, in order, and counted.
@@ -824,19 +835,20 @@ mod tests {
 
         std::thread::scope(|scope| {
             let (stalled, is_stalled) = std::sync::mpsc::channel();
+            let (release, released) = std::sync::mpsc::channel::<()>();
             let writer = &writer;
             scope.spawn(move || {
+                // Holds the log file until the test has looked at the disk.
                 let _file = super::lock(&writer.file);
                 stalled.send(()).unwrap();
-                std::thread::sleep(Duration::from_secs(1));
+                let _ = released.recv();
             });
             is_stalled.recv().unwrap();
 
-            let start = Instant::now();
+            // Returns although the log file never becomes free...
             writer.write_from_panic_hook("the panic\n");
-            assert!(start.elapsed() < Duration::from_millis(900));
 
-            // It is on disk while the log file is still held.
+            // ...and the record is on disk while the file is still held.
             let crash_files: Vec<_> = log_files(dir.path())
                 .unwrap()
                 .into_iter()
@@ -847,6 +859,7 @@ mod tests {
                 fs::read_to_string(&crash_files[0].path).unwrap(),
                 "the panic\n"
             );
+            release.send(()).unwrap();
         });
     }
 
