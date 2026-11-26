@@ -31,6 +31,7 @@ crates/
     src/pty.rs             Pseudo-terminal handling
     src/session.rs         Terminal session model
     src/config.rs          User configuration
+    src/diagnostics/       Logging, panic capture, redaction, diagnostics bundle
 apps/
   desktop/                 The desktop application
     src/                   Frontend (React, TypeScript, Vite)
@@ -39,8 +40,10 @@ apps/
     src-tauri/             Tauri shell (Rust), depends on termx-core
       src/lib.rs           Application builder and command registration
       src/commands/        Tauri commands, one module per feature area
+      src/logging.rs       Log directory per platform, logging start and stop
       capabilities/        Tauri permissions granted to the windows
       tauri.conf.json      Tauri configuration
+docs/                      User documentation
 plugin/                    Placeholder for the future Claude Code plugin
 ```
 
@@ -53,7 +56,8 @@ plugin/                    Placeholder for the future Claude Code plugin
   `apps/desktop/src-tauri/src/commands/`. Declare new modules in
   `commands/mod.rs`, register the command in the `generate_handler!` list in
   `src-tauri/src/lib.rs`, and add a typed wrapper in
-  `apps/desktop/src/lib/ipc.ts`.
+  `apps/desktop/src/lib/ipc.ts`. A command that can fail follows the pattern
+  in [Logging conventions](#logging-conventions).
 - **A new crate** goes in `crates/`. It is picked up by the workspace
   automatically. Inherit the shared metadata and lints with
   `version.workspace = true` (and so on) and `[lints] workspace = true`.
@@ -84,6 +88,85 @@ formats the Rust code.
   with Prettier.
 - New behaviour comes with tests: Rust unit tests next to the code, and
   Vitest tests next to the frontend modules (`*.test.ts` or `*.test.tsx`).
+
+## Logging conventions
+
+termx writes a log file on the user's machine, which users attach to bug
+reports. [docs/logging.md](docs/logging.md) describes it from the user's side;
+this section is what to do in the code.
+
+### What must never be logged
+
+The log is shared in public issues. These rules have no exceptions, at any
+level, including `debug` and `trace`:
+
+- **No terminal output**: nothing read from a PTY, in whole or in part.
+- **No keystrokes or input**: nothing written to a PTY, no clipboard content.
+- **No environment variable values.** Names are fine.
+- **No file contents.**
+- **No user or machine identifiers**: user name, host name, addresses.
+
+Log sizes, counts, identifiers, durations, exit codes and error kinds instead:
+`bytes = chunk.len()`, never `chunk`.
+
+Paths are safe to log. Every record passes through a filter that replaces the
+home directory with `~` in the message and in every text field. For a path
+that leaves the application some other way (an error returned to the
+interface, a file you write), use `termx_core::diagnostics::redact::path`.
+
+### In Rust
+
+Use the `tracing` macros, re-exported as `termx_core::diagnostics::tracing`.
+Do not use `println!`, `eprintln!` or the `log` crate. Put details in fields
+instead of formatting them into the message, and keep the message a constant,
+lower-case phrase:
+
+```rust
+use termx_core::diagnostics::tracing::{debug, error, info, warn};
+
+info!(session_id, shell = %shell.display(), "session started");
+error!(session_id, error = %source, "could not resize the terminal");
+```
+
+| Macro    | Use it for                                                               |
+| -------- | ------------------------------------------------------------------------ |
+| `error!` | An operation failed and the user is affected.                            |
+| `warn!`  | Something unexpected that termx recovered from, such as a fallback.      |
+| `info!`  | Lifecycle events that happen a few times per run: start, session opened. |
+| `debug!` | Details for investigating a problem. Off by default.                     |
+| `trace!` | Very frequent events, such as one per chunk read. Off by default.        |
+
+Log an error once, where it is handled, not at every level it passes through.
+Panics are recorded automatically by the panic hook.
+
+A Tauri command that can fail returns `CommandResult` and wraps its result in
+`logged`, which writes one `ERROR` record with the command name and gives the
+frontend a `CommandError`:
+
+```rust
+use super::error::{CommandResult, logged};
+
+#[tauri::command]
+pub fn rename_session(id: u32, title: String) -> CommandResult<()> {
+    logged("rename_session", sessions::rename(id, &title))
+}
+```
+
+Run the app with `TERMX_LOG=debug` to see the more verbose levels. Debug
+builds also print the records to stderr. In tests, build a logger with
+`Diagnostics::build` and run the code under `tracing::dispatcher::with_default`
+to assert on what was written.
+
+### In the frontend
+
+- Call commands through the wrappers in `src/lib/ipc.ts`. They use `call`,
+  which logs a failed call once.
+- Uncaught errors, unhandled rejections and rendering errors are logged
+  automatically. For an error you catch and handle yourself, call
+  `reportError("where-it-happened", error)` from `src/lib/errorReporting.ts`
+  if it is worth knowing about.
+- `console.log` and friends do not reach the log file.
+- The same privacy rules apply to everything passed to these functions.
 
 ## Changelog and commits
 
