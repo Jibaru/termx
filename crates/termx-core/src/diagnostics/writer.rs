@@ -29,7 +29,9 @@
 //!   themselves and ask the operating system to flush the file to the disk.
 
 use std::collections::VecDeque;
-use std::io;
+use std::fs::OpenOptions;
+use std::io::{self, Write};
+use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -38,7 +40,7 @@ use serde_json::{Map, Value};
 use time::OffsetDateTime;
 
 use super::record::{LineContext, Record};
-use super::rotate::RotatingFile;
+use super::rotate::{CRASH_FILE, RotatingFile, eligible_metadata};
 
 /// Target of the records the logger writes about itself.
 pub const LOG_TARGET: &str = "termx::log";
@@ -104,6 +106,8 @@ pub(crate) struct LogWriter {
     written: Condvar,
     context: Arc<LineContext>,
     capacity: usize,
+    /// Where a panic record goes when the log file cannot be had.
+    crash_file: PathBuf,
     worker: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -113,6 +117,7 @@ impl LogWriter {
     /// it or by [`LogWriter::flush`].
     pub fn new(file: RotatingFile, context: Arc<LineContext>, capacity: usize) -> Arc<Self> {
         Arc::new(Self {
+            crash_file: file.side_file_path(CRASH_FILE),
             file: Mutex::new(file),
             pending: Mutex::new(Pending::default()),
             wake: Condvar::new(),
@@ -219,7 +224,10 @@ impl LogWriter {
     ///
     /// The panic may have happened while this very thread or another one
     /// holds the file, so the lock is only tried for a bounded time, and a
-    /// poisoned lock is used anyway.
+    /// poisoned lock is used anyway. If the file cannot be had in that time
+    /// (a stalled disk, or a panic inside the logger itself) the record goes
+    /// to a separate crash file and to stderr instead: a panic is never left
+    /// unrecorded.
     pub fn write_from_panic_hook(&self, line: &str) {
         for _ in 0..PANIC_LOCK_ATTEMPTS {
             let mut file = match self.file.try_lock() {
@@ -233,6 +241,27 @@ impl LogWriter {
             self.write_pending(&mut file, Some(line));
             let _ = file.sync();
             return;
+        }
+        self.write_crash_file(line);
+        // The default hook prints the message; this is the whole record.
+        let _ = io::stderr().write_all(line.as_bytes());
+    }
+
+    /// Appends `line` to the crash file of this launch, without taking any
+    /// lock. Best effort: the disk that kept the log file busy may be the
+    /// same one.
+    fn write_crash_file(&self, line: &str) {
+        // Never write through something planted under the name.
+        if self.crash_file.exists() && eligible_metadata(&self.crash_file).is_none() {
+            return;
+        }
+        if let Ok(mut file) = OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&self.crash_file)
+        {
+            let _ = file.write_all(line.as_bytes());
+            let _ = file.sync_all();
         }
     }
 
@@ -625,5 +654,38 @@ mod tests {
             .sum();
         assert!(dropped > 0);
         assert_eq!(written + dropped, 100);
+    }
+
+    #[test]
+    fn a_panic_record_goes_to_the_crash_file_when_the_log_file_is_busy() {
+        let dir = tempfile::tempdir().unwrap();
+        let writer = writer(dir.path(), 16);
+
+        std::thread::scope(|scope| {
+            let (stalled, is_stalled) = std::sync::mpsc::channel();
+            let writer = &writer;
+            scope.spawn(move || {
+                let _file = super::lock(&writer.file);
+                stalled.send(()).unwrap();
+                std::thread::sleep(Duration::from_secs(1));
+            });
+            is_stalled.recv().unwrap();
+
+            let start = Instant::now();
+            writer.write_from_panic_hook("the panic\n");
+            assert!(start.elapsed() < Duration::from_millis(900));
+
+            // It is on disk while the log file is still held.
+            let crash_files: Vec<_> = log_files(dir.path())
+                .unwrap()
+                .into_iter()
+                .filter(|file| file.name.ends_with("-crash.log"))
+                .collect();
+            assert_eq!(crash_files.len(), 1);
+            assert_eq!(
+                fs::read_to_string(&crash_files[0].path).unwrap(),
+                "the panic\n"
+            );
+        });
     }
 }
