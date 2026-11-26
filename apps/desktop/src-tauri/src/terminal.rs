@@ -174,7 +174,8 @@ impl TerminalState {
         let Ok(manager) = self.manager() else {
             return 0;
         };
-        let closed = ids.into_iter().filter(|&id| manager.close(id)).count();
+        // All at once: processes that resist are waited for together.
+        let closed = manager.close_all(&ids);
         if closed > 0 {
             info!(closed, "closed the sessions of a window");
         }

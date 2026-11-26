@@ -1,14 +1,70 @@
 //! The registry of running sessions.
 
 use std::sync::mpsc::{self, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use super::driver::{self, Event};
 use super::pump::{PtySource, Pump};
 use super::{SessionId, SessionSink};
-use crate::diagnostics::tracing::{debug, info};
-use crate::pty::{PtyCommand, PtyError, PtyManager, PtySize, lock};
+use crate::diagnostics::tracing::{debug, info, warn};
+use crate::pty::{DEFAULT_KILL_GRACE, Pty, PtyCommand, PtyError, PtyManager, PtySize, lock};
+
+/// Longest time [`SessionManager::shutdown`] waits for the closes that are
+/// in progress on other threads when it is called.
+///
+/// Such a close has already asked its processes to terminate, and they are
+/// killed by force when their grace period is over, so the wait normally
+/// ends within [`DEFAULT_KILL_GRACE`]. Twice that leaves room for a busy
+/// machine without letting a close that is stuck hold up the exit of the
+/// application for ever.
+pub const SHUTDOWN_CLOSE_WAIT: Duration = DEFAULT_KILL_GRACE.saturating_mul(2);
+
+/// Counts the closes in progress, so that a shutdown can wait for them.
+#[derive(Default)]
+struct ClosesInProgress {
+    count: Mutex<usize>,
+    finished: Condvar,
+}
+
+impl ClosesInProgress {
+    /// Registers a close for as long as the returned guard lives.
+    fn begin(&self) -> CloseInProgress<'_> {
+        *lock(&self.count) += 1;
+        CloseInProgress(self)
+    }
+
+    /// Waits until no close is in progress, for at most `timeout`. Returns
+    /// how many still were when it gave up.
+    fn wait(&self, timeout: Duration) -> usize {
+        let deadline = Instant::now().checked_add(timeout);
+        let mut count = lock(&self.count);
+        while *count > 0 {
+            let remaining = deadline.map_or(Duration::MAX, |d| {
+                d.saturating_duration_since(Instant::now())
+            });
+            if remaining.is_zero() {
+                break;
+            }
+            count = self
+                .finished
+                .wait_timeout(count, remaining)
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
+        }
+        *count
+    }
+}
+
+struct CloseInProgress<'a>(&'a ClosesInProgress);
+
+impl Drop for CloseInProgress<'_> {
+    fn drop(&mut self) {
+        *lock(&self.0.count) -= 1;
+        self.0.finished.notify_all();
+    }
+}
 
 /// What a new session runs, and in a terminal of which size.
 ///
@@ -77,6 +133,7 @@ pub struct SessionManager {
     ptys: Arc<PtyManager>,
     events: Sender<Event>,
     driver: Mutex<Option<JoinHandle<()>>>,
+    closes: ClosesInProgress,
 }
 
 impl SessionManager {
@@ -108,6 +165,7 @@ impl SessionManager {
             ptys,
             events,
             driver: Mutex::new(Some(thread)),
+            closes: ClosesInProgress::default(),
         })
     }
 
@@ -206,25 +264,68 @@ impl SessionManager {
     /// without [`SessionSink::exited`] being called. Returns whether the
     /// session existed.
     ///
-    /// Once this returns, the sink is not called again. The process is
-    /// asked to terminate first and killed by force if it has not exited
-    /// after its grace period ([`PtyCommand::kill_grace`]); this function
-    /// waits for it to be gone, so it returns at once for a process that
-    /// exits when asked and after the grace period for one that does not.
+    /// Once this returns, the sink is not called again and the process is
+    /// gone. The process is asked to terminate first and killed by force if
+    /// it has not exited after its grace period
+    /// ([`PtyCommand::kill_grace`]), so this returns at once for a process
+    /// that exits when asked and after the grace period for one that does
+    /// not. Use [`close_all`](Self::close_all) for several sessions.
     pub fn close(&self, id: SessionId) -> bool {
-        // The pump goes first, and with it the output stream, so that no
+        self.close_all(&[id]) == 1
+    }
+
+    /// Ends several sessions at once, as [`close`](Self::close) does for
+    /// one, and returns how many of them existed.
+    ///
+    /// Every process is asked to terminate before any of them is waited
+    /// for, so closing many sessions takes about as long as closing the
+    /// slowest one, not the sum of them all.
+    ///
+    /// A session stays registered until its process is gone. If the
+    /// manager is shut down while this is waiting, for instance because the
+    /// application exits, the shutdown waits for this call: no process is
+    /// left behind half-killed.
+    pub fn close_all(&self, ids: &[SessionId]) -> usize {
+        let _in_progress = self.closes.begin();
+
+        // The pumps go first, and with them the output streams, so that no
         // more output is delivered and a process that is busy printing can
         // exit.
         let (done_tx, done_rx) = mpsc::channel();
-        if self.events.send(Event::Remove(id, Some(done_tx))).is_ok() {
-            // An error means that the driver is gone, and the pump with it.
-            let _ = done_rx.recv();
+        let pumps = ids
+            .iter()
+            .filter(|&&id| {
+                self.events
+                    .send(Event::Remove(id, Some(done_tx.clone())))
+                    .is_ok()
+            })
+            .count();
+        drop(done_tx);
+        for _ in 0..pumps {
+            // An error means that the driver is gone, and the pumps with it.
+            if done_rx.recv().is_err() {
+                break;
+            }
         }
-        let existed = self.kill_and_remove(id);
-        if existed {
+
+        let sessions: Vec<(SessionId, Arc<Pty>)> = ids
+            .iter()
+            .filter_map(|&id| Some((id, self.ptys.get(id)?)))
+            .collect();
+        // Killing never blocks: every process is signalled before the
+        // first one is waited for.
+        let signalled: Vec<bool> = sessions.iter().map(|(_, pty)| pty.kill().is_ok()).collect();
+        for ((id, pty), signalled) in sessions.iter().zip(signalled) {
+            // A process that could not be signalled may never exit: waiting
+            // for it would block for ever.
+            if signalled {
+                pty.wait();
+            }
+            // Only now, with the process gone, is the session forgotten.
+            drop(self.ptys.remove(*id));
             info!(session_id = id.as_u64(), "session closed");
         }
-        existed
+        sessions.len()
     }
 
     /// Ends every session and closes the manager for good: from then on
@@ -233,9 +334,10 @@ impl SessionManager {
     /// No sink is called once this returns, and none is told about an exit.
     /// Every process is asked to terminate before any of them is waited
     /// for, so this takes about as long as the slowest of them, not the sum
-    /// (see [`PtyManager::shutdown`]). Call it before the application exits:
-    /// no process started here outlives it. Called automatically when the
-    /// manager is dropped.
+    /// (see [`PtyManager::shutdown`]). Closes in progress on other threads
+    /// are waited for as well, for at most [`SHUTDOWN_CLOSE_WAIT`]. Call it
+    /// before the application exits: no process started here outlives it.
+    /// Called automatically when the manager is dropped.
     pub fn shutdown(&self) {
         let _ = self.events.send(Event::Shutdown);
         let driver = lock(&self.driver).take();
@@ -246,6 +348,18 @@ impl SessionManager {
             info!(sessions = self.ptys.len(), "session manager shut down");
         }
         self.ptys.shutdown();
+
+        // A session being closed on another thread was signalled, but its
+        // process may still be within its grace period, and it is that
+        // thread which holds it now. Returning before it is done would let
+        // the application exit with the process alive.
+        let unfinished = self.closes.wait(SHUTDOWN_CLOSE_WAIT);
+        if unfinished > 0 {
+            warn!(
+                unfinished,
+                "gave up waiting for sessions that are being closed"
+            );
+        }
     }
 
     /// The operating system's identifier of the process of a session, if
