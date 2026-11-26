@@ -49,7 +49,7 @@
 //!
 //! ```text
 //! process -> PTY -> reader thread -> bounded buffer -> pump -> SessionSink
-//!                                       (1 MiB)       batches   frontend
+//!                                       (64 KiB)      batches   frontend
 //!                                                        ^         |
 //!                                                        +-- acks -+
 //! ```
@@ -84,8 +84,13 @@
 //! A frontend that never acknowledges therefore stalls its session and
 //! nothing else. The memory a session can hold is bounded whatever the
 //! process prints: about [`HIGH_WATERMARK_BYTES`] plus one batch in flight to
-//! the frontend, at most one PTY buffer plus one batch in the pump, and the
-//! PTY buffer itself ([`OUTPUT_BUFFER_CAPACITY`](crate::pty::OUTPUT_BUFFER_CAPACITY)).
+//! the frontend, at most one batch in the pump, and the buffer of the PTY,
+//! which a session shrinks to [`PTY_BUFFER_BYTES`].
+//!
+//! The pump never takes more from the PTY than it may pass on. That keeps
+//! the output still to come after the user interrupts a program that floods
+//! the terminal to about what was already on its way, instead of megabytes
+//! parked in buffers.
 //!
 //! # The end of a session
 //!
@@ -109,6 +114,7 @@ mod pump;
 pub use batch::{BATCH_MAX_BYTES, BATCH_WINDOW, BOUNDARY_HOLD_MAX};
 pub use flow::{ACK_BATCH_BYTES, HIGH_WATERMARK_BYTES, LOW_WATERMARK_BYTES};
 pub use manager::{SessionManager, SessionOptions};
+pub use pump::PTY_BUFFER_BYTES;
 
 use crate::pty::ExitStatus;
 pub use crate::pty::SessionId;

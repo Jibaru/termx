@@ -17,10 +17,11 @@ pub const OUTPUT_BUFFER_CAPACITY: usize = 1024 * 1024;
 
 type ReadyCallback = Arc<dyn Fn() + Send + Sync>;
 
-#[derive(Default)]
 struct State {
     /// Bytes read from the PTY and not yet taken by the consumer.
     buffer: Vec<u8>,
+    /// Number of buffered bytes at which the reader thread stops reading.
+    capacity: usize,
     /// The reader thread is done: no more bytes will ever be pushed.
     finished: bool,
     /// The [`PtyOutput`] was dropped: nobody will take the bytes.
@@ -29,6 +30,19 @@ struct State {
     shut_down: bool,
     /// Called when there is something new to receive.
     on_readable: Option<ReadyCallback>,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            buffer: Vec::new(),
+            capacity: OUTPUT_BUFFER_CAPACITY,
+            finished: false,
+            receiver_dropped: false,
+            shut_down: false,
+            on_readable: None,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -66,10 +80,7 @@ impl OutputSink {
     /// never blocks on a consumer that went away.
     pub(super) fn push(&self, bytes: &[u8]) {
         let mut state = lock(&self.channel.state);
-        while state.buffer.len() >= OUTPUT_BUFFER_CAPACITY
-            && !state.receiver_dropped
-            && !state.shut_down
-        {
+        while state.buffer.len() >= state.capacity && !state.receiver_dropped && !state.shut_down {
             state = self
                 .channel
                 .writable
@@ -294,6 +305,57 @@ impl PtyOutput {
         }
     }
 
+    /// Takes at most `max` bytes of the buffered output, without blocking,
+    /// and leaves the rest for the next call.
+    ///
+    /// This is for a consumer that must not take more than it can pass on,
+    /// so that the output it has not asked for stays here, where it holds
+    /// the process back. Note that the callback of
+    /// [`on_readable`](Self::on_readable) only fires when the buffer stops
+    /// being empty: after a call that left bytes behind, it is up to the
+    /// consumer to come back for them.
+    ///
+    /// # Errors
+    ///
+    /// [`RecvTimeoutError::Timeout`] if nothing is buffered (or `max` is
+    /// zero), and [`RecvTimeoutError::Closed`] once the stream has ended.
+    pub fn try_recv_up_to(&mut self, max: usize) -> Result<Vec<u8>, RecvTimeoutError> {
+        let mut state = lock(&self.channel.state);
+        if state.buffer.is_empty() {
+            return Err(if state.finished {
+                RecvTimeoutError::Closed
+            } else {
+                RecvTimeoutError::Timeout
+            });
+        }
+        if max == 0 {
+            return Err(RecvTimeoutError::Timeout);
+        }
+        let chunk = if state.buffer.len() <= max {
+            std::mem::take(&mut state.buffer)
+        } else {
+            let rest = state.buffer.split_off(max);
+            std::mem::replace(&mut state.buffer, rest)
+        };
+        drop(state);
+        self.channel.writable.notify_one();
+        Ok(chunk)
+    }
+
+    /// Changes how many bytes are buffered before the reader thread stops
+    /// reading from the PTY. The default is [`OUTPUT_BUFFER_CAPACITY`].
+    ///
+    /// A smaller buffer makes backpressure reach the process sooner, and
+    /// leaves less output to be delivered after the process was
+    /// interrupted. The buffer may exceed the capacity by at most one read
+    /// ([`READ_BUFFER_SIZE`](super::READ_BUFFER_SIZE) bytes). A capacity of
+    /// zero is treated as one byte.
+    pub fn set_capacity(&mut self, bytes: usize) {
+        lock(&self.channel.state).capacity = bytes.max(1);
+        // A reader blocked on the old capacity checks the new one.
+        self.channel.writable.notify_all();
+    }
+
     /// Waits for output until `deadline`, or forever if it is `None`.
     fn recv_until(&mut self, deadline: Option<Instant>) -> Result<Vec<u8>, RecvTimeoutError> {
         let mut state = lock(&self.channel.state);
@@ -462,6 +524,80 @@ mod tests {
         assert_eq!(progress_rx.recv_timeout(SOON).unwrap(), "second");
         assert_eq!(output.recv_timeout(SOON).unwrap(), b"second");
         assert_eq!(output.recv(), None);
+        producer.join().unwrap();
+    }
+
+    #[test]
+    fn output_can_be_taken_a_bounded_piece_at_a_time() {
+        let (sink, mut output) = channel();
+        sink.push(b"0123456789");
+
+        assert_eq!(
+            output.try_recv_up_to(0),
+            Err(RecvTimeoutError::Timeout),
+            "nothing was asked for"
+        );
+        assert_eq!(output.try_recv_up_to(4).unwrap(), b"0123");
+        assert_eq!(output.try_recv_up_to(4).unwrap(), b"4567");
+        // Fewer bytes than asked for are left: all of them are returned.
+        assert_eq!(output.try_recv_up_to(4).unwrap(), b"89");
+        assert_eq!(output.try_recv_up_to(4), Err(RecvTimeoutError::Timeout));
+
+        sink.push(b"end");
+        sink.finish();
+        assert_eq!(output.try_recv_up_to(usize::MAX).unwrap(), b"end");
+        assert_eq!(output.try_recv_up_to(4), Err(RecvTimeoutError::Closed));
+    }
+
+    #[test]
+    fn a_smaller_capacity_blocks_the_producer_sooner() {
+        let (sink, mut output) = channel();
+        output.set_capacity(8);
+        let (progress_tx, progress_rx) = mpsc::channel();
+
+        let producer = thread::spawn(move || {
+            // Accepted whole although it is larger than the capacity: the
+            // limit is on when to stop, not on the size of one read.
+            sink.push(b"0123456789");
+            progress_tx.send("first").unwrap();
+            sink.push(b"more");
+            progress_tx.send("second").unwrap();
+            sink.finish();
+        });
+
+        assert_eq!(progress_rx.recv_timeout(SOON).unwrap(), "first");
+        assert!(
+            progress_rx
+                .recv_timeout(Duration::from_millis(200))
+                .is_err(),
+            "the second push must wait: the buffer is over its capacity"
+        );
+
+        // Taking a piece that leaves the buffer under its capacity lets
+        // the producer continue.
+        assert_eq!(output.try_recv_up_to(6).unwrap(), b"012345");
+        assert_eq!(progress_rx.recv_timeout(SOON).unwrap(), "second");
+        assert_eq!(output.recv().unwrap(), b"6789more");
+        assert_eq!(output.recv(), None);
+        producer.join().unwrap();
+    }
+
+    #[test]
+    fn raising_the_capacity_unblocks_the_producer() {
+        let (sink, mut output) = channel();
+        output.set_capacity(4);
+        sink.push(b"full");
+        let (done_tx, done_rx) = mpsc::channel();
+        let producer = thread::spawn(move || {
+            sink.push(b"blocked");
+            done_tx.send(()).unwrap();
+        });
+        assert!(done_rx.recv_timeout(Duration::from_millis(200)).is_err());
+
+        output.set_capacity(1024);
+
+        done_rx.recv_timeout(SOON).unwrap();
+        assert_eq!(output.recv().unwrap(), b"fullblocked");
         producer.join().unwrap();
     }
 
