@@ -9,6 +9,9 @@ name: Release
 # 2. `release` tags that commit `v<version>` and creates the GitHub Release
 #    with the new CHANGELOG.md section as its notes.
 #
+# If an earlier run pushed the release commit but failed before tagging it,
+# the next run skips step 1 and finishes that release.
+#
 # Third-party actions are pinned to a commit because these jobs can write to
 # the repository. GitHub's own `actions/*` use major version tags, as in CI.
 #
@@ -41,7 +44,9 @@ jobs:
     permissions:
       contents: write # push the release commit to main
     outputs:
-      sha: ${{ steps.push.outputs.sha }}
+      # The commit to tag: an untagged release commit from an earlier run, or
+      # the one pushed by this run.
+      sha: ${{ steps.state.outputs.sha || steps.push.outputs.sha }}
     steps:
       - name: Check out the repository
         uses: actions/checkout@v7
@@ -49,13 +54,23 @@ jobs:
           # Knope finds the previous release through the Git tags.
           fetch-depth: 0
 
+      # Sets `mode` to `finish` when the current version was pushed but never
+      # tagged, and to `prepare` otherwise. Fails when there is nothing to
+      # release.
+      - name: Check what there is to release
+        id: state
+        env:
+          VERSION_INPUT: ${{ inputs.version }}
+        run: .github/scripts/release-preflight.sh
+
       - name: Install Knope
+        if: steps.state.outputs.mode == 'prepare'
         uses: knope-dev/action@19617851f9f13ab2f27a05989c55efb18aca3675 # v2.1.2
         with:
           version: 0.24.0
 
       - name: Dry-run the release
-        if: inputs.dry-run
+        if: inputs.dry-run && steps.state.outputs.mode == 'prepare'
         env:
           VERSION: ${{ inputs.version }}
         run: |
@@ -64,13 +79,13 @@ jobs:
           knope prepare-release "${args[@]}"
 
       - name: Configure Git
-        if: ${{ !inputs.dry-run }}
+        if: ${{ !inputs.dry-run && steps.state.outputs.mode == 'prepare' }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       - name: Update the changelog and the versions
-        if: ${{ !inputs.dry-run }}
+        if: ${{ !inputs.dry-run && steps.state.outputs.mode == 'prepare' }}
         env:
           VERSION: ${{ inputs.version }}
         run: |
@@ -80,18 +95,18 @@ jobs:
 
       # The toolchain comes from rust-toolchain.toml.
       - name: Set up Rust
-        if: ${{ !inputs.dry-run }}
+        if: ${{ !inputs.dry-run && steps.state.outputs.mode == 'prepare' }}
         run: rustup toolchain install
 
       # CI builds with `--locked`. Refuse to push a release commit whose
       # Cargo.lock no longer matches the manifests.
       - name: Check that Cargo.lock is in sync
-        if: ${{ !inputs.dry-run }}
+        if: ${{ !inputs.dry-run && steps.state.outputs.mode == 'prepare' }}
         run: cargo metadata --locked --format-version 1 > /dev/null
 
       - name: Push the release commit
         id: push
-        if: ${{ !inputs.dry-run }}
+        if: ${{ !inputs.dry-run && steps.state.outputs.mode == 'prepare' }}
         run: |
           git push origin HEAD:main
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
