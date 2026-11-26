@@ -3,15 +3,15 @@ import { describe, expect, it, vi } from "vitest";
 import { recordIPC } from "../test/ipcRecorder";
 import {
   type CommandError,
-  LOG_LIMIT,
-  LOG_WINDOW_MS,
   describeError,
   exportDiagnostics,
   getCoreVersion,
   isCommandError,
   logFrontendEvent,
   openLogFolder,
+  resetFrontendLogLimit,
 } from "./ipc";
+import { DEFAULT_LOG_LIMITS } from "./logLimiter";
 
 describe("command wrappers", () => {
   it("opens the log folder through the open_log_folder command", async () => {
@@ -95,27 +95,43 @@ describe("logFrontendEvent", () => {
     ).resolves.toBeUndefined();
   });
 
-  it("drops records over the limit so an error loop cannot flood the log", async () => {
-    vi.useFakeTimers();
-    try {
-      const ipc = recordIPC();
+  it("drops repeats over the limit, then logs how many were dropped", async () => {
+    const clock = { now: 0 };
+    resetFrontendLogLimit(DEFAULT_LOG_LIMITS, () => clock.now);
+    const ipc = recordIPC();
+    const limit = DEFAULT_LOG_LIMITS.perLevel.error;
 
-      for (let index = 0; index < LOG_LIMIT * 10; index += 1) {
-        await logFrontendEvent({
-          level: "error",
-          source: "loop",
-          message: `error ${String(index)}`,
-        });
-      }
-      expect(ipc.logged()).toHaveLength(LOG_LIMIT);
-
-      // A new window lets records through again.
-      vi.advanceTimersByTime(LOG_WINDOW_MS);
-      await logFrontendEvent({ level: "error", source: "loop", message: "later" });
-      expect(ipc.logged()).toHaveLength(LOG_LIMIT + 1);
-    } finally {
-      vi.useRealTimers();
+    for (let index = 0; index < limit * 10; index += 1) {
+      await logFrontendEvent({ level: "error", source: "loop", message: "the same error" });
     }
+    expect(ipc.logged()).toHaveLength(limit);
+
+    // A different error still gets through, and brings the count with it.
+    await logFrontendEvent({ level: "error", source: "disk", message: "disk full" });
+    const logged = ipc.logged();
+    expect(logged).toHaveLength(limit + 2);
+    expect(logged[limit]).toMatchObject({ level: "warn", source: "frontend-limit" });
+    expect(logged[limit]?.message).toContain(`${String(limit * 9)} records were dropped`);
+    expect(logged[limit + 1]).toMatchObject({ source: "disk", message: "disk full" });
+
+    // A new window lets repeats through again.
+    clock.now = DEFAULT_LOG_LIMITS.windowMs;
+    await logFrontendEvent({ level: "error", source: "loop", message: "the same error" });
+    expect(ipc.logged()).toHaveLength(limit + 3);
+  });
+
+  it("does not let low-level noise use up the room for errors", async () => {
+    const ipc = recordIPC();
+
+    for (let index = 0; index < 1_000; index += 1) {
+      await logFrontendEvent({ level: "info", source: "noise", message: "tick" });
+    }
+    await logFrontendEvent({ level: "error", source: "test", message: "a real error" });
+
+    expect(ipc.logged().filter((event) => event.level === "info")).toHaveLength(
+      DEFAULT_LOG_LIMITS.perLevel.info,
+    );
+    expect(ipc.logged().some((event) => event.message === "a real error")).toBe(true);
   });
 });
 

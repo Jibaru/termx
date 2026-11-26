@@ -6,13 +6,10 @@ use std::sync::PoisonError;
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
-use termx_core::diagnostics::{Decision, Diagnostics, tracing};
+use termx_core::diagnostics::{Diagnostics, Severity, tracing};
 
 use super::error::{CommandResult, logged};
-use crate::logging::DiagnosticsState;
-
-/// Target of the records that come from the frontend.
-pub const FRONTEND_TARGET: &str = "termx::frontend";
+use crate::logging::{DiagnosticsState, FRONTEND_TARGET, log_dropped_frontend_records};
 
 /// Longest `source` kept from a frontend event, in characters.
 const MAX_SOURCE_CHARS: usize = 64;
@@ -147,22 +144,27 @@ fn export_bundle(state: &DiagnosticsState, destination: Option<&Path>) -> Result
 
 /// Writes `event` to the log unless the frontend is over its rate limit.
 /// Returns whether it was written.
+///
+/// Each level has its own budget, and an error that was not seen before
+/// gets through even when repeats of another error used up the error budget.
+/// Dropped records are counted and the count is logged with the next record
+/// that is written.
 fn record_frontend_event(state: &DiagnosticsState, event: FrontendEvent) -> bool {
-    let decision = state
-        .frontend_limiter
+    let severity = match event.level {
+        FrontendLevel::Error => Severity::Error,
+        FrontendLevel::Warn => Severity::Warn,
+        FrontendLevel::Info => Severity::Info,
+    };
+    let key = format!("{}\n{}", event.source, event.message);
+    let admitted = state
+        .frontend_gate
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
-        .check();
-    let Decision::Allowed { suppressed } = decision else {
+        .admit(severity, &key);
+    let Some(dropped) = admitted else {
         return false;
     };
-    if suppressed > 0 {
-        tracing::warn!(
-            target: FRONTEND_TARGET,
-            suppressed,
-            "frontend records were dropped by the rate limit"
-        );
-    }
+    log_dropped_frontend_records(dropped);
 
     let source = cut(&event.source, MAX_SOURCE_CHARS);
     let message = cut(&event.message, MAX_MESSAGE_CHARS);
@@ -213,10 +215,10 @@ mod tests {
     use termx_core::diagnostics::tracing;
 
     use super::{
-        FRONTEND_TARGET, FrontendEvent, FrontendLevel, MAX_MESSAGE_CHARS, MAX_STACK_CHARS, cut,
-        export_bundle, record_frontend_event, running,
+        FrontendEvent, FrontendLevel, MAX_MESSAGE_CHARS, MAX_STACK_CHARS, cut, export_bundle,
+        record_frontend_event, running,
     };
-    use crate::logging::DiagnosticsState;
+    use crate::logging::{DiagnosticsState, FRONTEND_TARGET};
     use crate::test_support::TestLog;
 
     fn event(message: &str) -> FrontendEvent {
@@ -302,7 +304,7 @@ mod tests {
 
         let written = tracing::dispatcher::with_default(&log.dispatch, || {
             (0..10_000)
-                .filter(|index| record_frontend_event(&state, event(&format!("loop {index}"))))
+                .filter(|_| record_frontend_event(&state, event("the same error")))
                 .count()
         });
 
@@ -312,8 +314,55 @@ mod tests {
             (20..=30).contains(&written),
             "{written} records were written"
         );
+        assert!(log.finish().len() <= 60);
+    }
+
+    #[test]
+    fn a_new_error_is_written_during_a_flood_and_the_drops_are_counted() {
+        let log = TestLog::new();
+        let state = DiagnosticsState::new();
+
+        tracing::dispatcher::with_default(&log.dispatch, || {
+            let mut noise = event("noise");
+            noise.level = FrontendLevel::Info;
+            for _ in 0..5_000 {
+                record_frontend_event(&state, noise.clone());
+                record_frontend_event(&state, event("render loop"));
+            }
+            assert!(record_frontend_event(&state, event("the disk is full")));
+            state.report_dropped_frontend_records();
+        });
+
         let records = log.finish();
-        assert!(records.len() <= 60, "{} records in the log", records.len());
+        assert!(
+            records
+                .iter()
+                .any(|record| record["msg"] == "the disk is full")
+        );
+
+        // Every record that was not written is accounted for.
+        let written = records
+            .iter()
+            .filter(|record| record["fields"].get("source").is_some())
+            .count() as u64;
+        let dropped: u64 = records
+            .iter()
+            .filter(|record| record["msg"] == "frontend records were dropped by the rate limit")
+            .map(|record| {
+                assert_eq!(record["level"], "WARN");
+                assert_eq!(record["target"], FRONTEND_TARGET);
+                let fields = &record["fields"];
+                assert_eq!(
+                    fields["dropped"].as_u64().unwrap(),
+                    fields["errors"].as_u64().unwrap()
+                        + fields["warnings"].as_u64().unwrap()
+                        + fields["infos"].as_u64().unwrap()
+                );
+                fields["dropped"].as_u64().unwrap()
+            })
+            .sum();
+        assert!(dropped > 9_000, "{dropped} drops were reported");
+        assert_eq!(written + dropped, 10_001);
     }
 
     #[test]

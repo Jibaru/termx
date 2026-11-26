@@ -4,6 +4,7 @@
 //! belongs in `termx-core`; the commands exposed to the frontend live in the
 //! [`commands`] module, one file per feature area.
 
+use tauri::Manager;
 use termx_core::diagnostics::tracing;
 
 pub mod commands;
@@ -37,14 +38,18 @@ pub fn run() {
         Ok(app) => app,
         Err(error) => {
             tracing::error!(error = %error, "the application could not be started");
-            logging::stop(diagnostics.as_ref());
+            if let Some(diagnostics) = diagnostics {
+                diagnostics.shutdown();
+            }
             panic!("failed to build the termx application: {error}");
         }
     };
 
-    app.run(move |_app, event| {
-        if matches!(event, tauri::RunEvent::Exit) {
-            logging::stop(diagnostics.as_ref());
+    app.run(|app, event| {
+        if matches!(event, tauri::RunEvent::Exit)
+            && let Some(state) = app.try_state::<logging::DiagnosticsState>()
+        {
+            logging::stop(&state);
         }
     });
 }

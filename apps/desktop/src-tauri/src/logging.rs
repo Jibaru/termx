@@ -8,11 +8,10 @@
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-use std::time::Duration;
+use std::sync::{Mutex, PoisonError};
 
 use termx_core::diagnostics::tracing;
-use termx_core::diagnostics::{Diagnostics, LogConfig, RateLimiter};
+use termx_core::diagnostics::{Diagnostics, Dropped, LogConfig, RecordGate};
 
 /// Environment variable that overrides the log directory. Useful for
 /// development and for tests that launch the real application.
@@ -21,17 +20,15 @@ pub const LOG_DIR_ENV_VAR: &str = "TERMX_LOG_DIR";
 /// Name of the application directory inside the platform locations.
 const APP_DIR: &str = "termx";
 
-/// Records the frontend may write in one go before it is slowed down.
-const FRONTEND_BURST: u32 = 20;
-/// After a burst, the frontend may write one record per interval.
-const FRONTEND_INTERVAL: Duration = Duration::from_secs(1);
+/// Target of the records that come from the frontend.
+pub const FRONTEND_TARGET: &str = "termx::frontend";
 
 /// Application state for diagnostics, managed by Tauri.
 pub struct DiagnosticsState {
     /// The running logger. Empty when logging could not start.
     diagnostics: Option<Diagnostics>,
     /// Keeps a frontend error loop from flooding the log.
-    pub(crate) frontend_limiter: Mutex<RateLimiter>,
+    pub(crate) frontend_gate: Mutex<RecordGate>,
 }
 
 impl DiagnosticsState {
@@ -40,7 +37,7 @@ impl DiagnosticsState {
     pub fn new() -> Self {
         Self {
             diagnostics: None,
-            frontend_limiter: Mutex::new(RateLimiter::new(FRONTEND_BURST, FRONTEND_INTERVAL)),
+            frontend_gate: Mutex::new(RecordGate::default()),
         }
     }
 
@@ -58,6 +55,33 @@ impl DiagnosticsState {
     pub fn diagnostics(&self) -> Option<&Diagnostics> {
         self.diagnostics.as_ref()
     }
+
+    /// Logs the frontend records dropped by the rate limit that were not
+    /// reported yet. Called when the application exits, in case no later
+    /// record came through to carry the count.
+    pub fn report_dropped_frontend_records(&self) {
+        let dropped = self
+            .frontend_gate
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take_dropped();
+        log_dropped_frontend_records(dropped);
+    }
+}
+
+/// Writes how many frontend records the rate limit dropped, if any.
+pub(crate) fn log_dropped_frontend_records(dropped: Dropped) {
+    if dropped.is_empty() {
+        return;
+    }
+    tracing::warn!(
+        target: FRONTEND_TARGET,
+        dropped = dropped.total(),
+        errors = dropped.errors,
+        warnings = dropped.warnings,
+        infos = dropped.infos,
+        "frontend records were dropped by the rate limit"
+    );
 }
 
 impl Default for DiagnosticsState {
@@ -154,8 +178,9 @@ pub fn start() -> DiagnosticsState {
 }
 
 /// Writes out what is still queued. Called when the application exits.
-pub fn stop(diagnostics: Option<&Diagnostics>) {
-    if let Some(diagnostics) = diagnostics {
+pub fn stop(state: &DiagnosticsState) {
+    if let Some(diagnostics) = state.diagnostics() {
+        state.report_dropped_frontend_records();
         tracing::info!("termx exiting");
         diagnostics.shutdown();
     }
