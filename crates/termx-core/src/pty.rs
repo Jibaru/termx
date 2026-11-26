@@ -54,8 +54,14 @@
 //!   simply forward each chunk it receives, and may sleep between two
 //!   `recv` calls to cap the number of messages per second.
 //!
-//! The consumer chooses its own thread and pace; a callback would instead run
-//! on the reader thread and make its latency part of the reading loop.
+//! The consumer chooses its own thread and pace; a callback receiving the
+//! bytes would instead run on the reader thread and make its latency part of
+//! the reading loop.
+//!
+//! A consumer does not need a thread of its own per terminal, though:
+//! [`PtyOutput::on_readable`] registers a notification that there is
+//! something to receive, so one event loop or async runtime can drain every
+//! terminal with non-blocking calls.
 //!
 //! Bytes are passed through **unmodified**. Chunk boundaries are arbitrary
 //! and can fall in the middle of a UTF-8 character or of an escape sequence,
