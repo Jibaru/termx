@@ -1,6 +1,7 @@
 import { invoke, type InvokeArgs } from "@tauri-apps/api/core";
 
 import { LogLimiter, type LogLimits } from "./logLimiter";
+import { describeIpcFailure } from "./logSafe";
 
 /**
  * Typed wrappers around the Tauri commands exposed by the Rust side
@@ -112,7 +113,11 @@ export function isCommandError(error: unknown): error is CommandError {
   );
 }
 
-/** A readable description of whatever a call rejected or a `throw` threw. */
+/**
+ * A readable description of whatever a call rejected or a `throw` threw, to
+ * show in the interface. It may contain the thrown value itself, so it must
+ * not be logged: use `describeForLog` from `logSafe.ts` for that.
+ */
 export function describeError(error: unknown): string {
   if (isCommandError(error)) return error.message;
   if (error instanceof Error) return error.message || error.name;
@@ -143,8 +148,7 @@ async function call<T = void>(command: string, args?: InvokeArgs): Promise<T> {
         level: "error",
         source: "ipc",
         command,
-        message: describeError(error),
-        stack: error instanceof Error ? error.stack : undefined,
+        ...describeIpcFailure(error),
       });
     }
     throw error;

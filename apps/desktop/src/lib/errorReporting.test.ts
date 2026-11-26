@@ -28,7 +28,7 @@ describe("installGlobalErrorHandlers", () => {
     expect(ipc.logged()[0]).toMatchObject({
       level: "error",
       source: "window.onerror",
-      message: "x is not a function",
+      message: "Error: x is not a function",
       stack: error.stack,
     });
   });
@@ -69,12 +69,30 @@ describe("installGlobalErrorHandlers", () => {
     expect(ipc.logged()[0]).toMatchObject({
       level: "error",
       source: "unhandledrejection",
-      message: "request failed",
+      message: "Error: request failed",
     });
     expect(ipc.logged()[1]).toMatchObject({
       source: "unhandledrejection",
-      message: "rejected with a string",
+      message: "non-Error value (string of length 22)",
     });
+  });
+
+  it("never logs the values of a rejection or an error that is not an Error", async () => {
+    const ipc = recordIPC();
+    uninstall = installGlobalErrorHandlers();
+    const payload = { token: "hunter2-very-secret", env: { HOME: "/home/someone" } };
+
+    window.dispatchEvent(rejectionEvent(payload));
+    window.dispatchEvent(new ErrorEvent("error", { error: payload, message: "Uncaught hunter2" }));
+
+    await vi.waitFor(() => {
+      expect(ipc.logged()).toHaveLength(2);
+    });
+    expect(ipc.logged().map((event) => event.message)).toEqual([
+      "non-Error value (object with keys [token, env])",
+      "non-Error value (object with keys [token, env])",
+    ]);
+    expect(JSON.stringify(ipc.logged())).not.toMatch(/hunter2|someone/);
   });
 
   it("stops logging once the handlers are removed", async () => {
@@ -110,7 +128,7 @@ describe("reportError", () => {
     expect(ipc.logged()[0]).toMatchObject({
       level: "error",
       source: "react",
-      message: "render failed",
+      message: "Error: render failed",
       componentStack: "\n    at Widget",
     });
   });

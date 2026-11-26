@@ -50,8 +50,26 @@ describe("failed IPC calls", () => {
       level: "error",
       source: "ipc",
       command: "core_version",
-      message: "command core_version not found",
+      message: "Error: command core_version not found",
     });
+  });
+
+  it("are classified, not copied, when Tauri rejects with a string", async () => {
+    const ipc = recordIPC((command) => {
+      if (command === "core_version") {
+        // eslint-disable-next-line @typescript-eslint/only-throw-error -- Tauri rejects with a string.
+        throw 'invalid args `data`: invalid type: string "typed-by-the-user", expected u32';
+      }
+      return undefined;
+    });
+
+    await expect(getCoreVersion()).rejects.toBeTypeOf("string");
+
+    await vi.waitFor(() => {
+      expect(ipc.logged()).toHaveLength(1);
+    });
+    expect(ipc.logged()[0]?.message).toMatch(/^invalid arguments \(string of length \d+\)$/);
+    expect(JSON.stringify(ipc.logged())).not.toContain("typed-by-the-user");
   });
 
   it("are not logged again when the Rust side already logged a command error", async () => {
