@@ -33,18 +33,23 @@
 //!
 //! Log sizes, counts, identifiers, durations and error kinds instead.
 //!
-//! What the logger does enforce is redaction of the identity of the user:
-//! every record goes through a [`Redactor`] that replaces the home directory
-//! with `~` and the user name with `<user>` in the message and in all string
-//! fields (see [`redact`] for the exact rules), so logging a path is safe by
-//! default. Use [`redact::path`] for paths that end up anywhere else, such
-//! as an error message returned to the interface.
+//! What the logger does on its own, to the message and all string fields of
+//! every record: it replaces the home directory with `~` and the user name
+//! with `<user>` (see [`redact`] for the exact rules), so logging a path is
+//! safe by default, and it replaces what looks like a secret with
+//! `<redacted>` (see [`scrub`]), which is best effort and no excuse to log
+//! one. Use [`redact::path`] for paths that end up anywhere else, such as an
+//! error message returned to the interface.
 //!
 //! # Delivery
 //!
-//! `WARN` and `ERROR` records are written before the logging call returns,
-//! so they survive a crash right after. Lower levels are queued for a
-//! background thread and can be dropped, with a count, under extreme load.
+//! A `WARN` or `ERROR` logging call returns when its record is written, or
+//! after [`URGENT_WAIT`] if the disk does not answer, in which case the
+//! record is written late. Repeats of the same warning or error are written
+//! [`REPEATS_WRITTEN`] times per [`REPEAT_WINDOW`] and then counted. The
+//! first [`FIRST_ERRORS_RECORDS`] warnings and errors of a launch are also
+//! kept in a file that the launch never deletes. Lower levels are queued and
+//! can be dropped, with a count, under extreme load.
 //!
 //! # Format and retention
 //!

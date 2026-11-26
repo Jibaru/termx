@@ -113,15 +113,19 @@ Nothing in the logger can recognise such data, so these rules are enforced by
 review. Treat a logging call that takes a value from a PTY, from the
 environment or from a file as a bug.
 
-What the logger does enforce is redaction of the user's identity: every record
-passes through a filter that replaces the home directory with `~`, the name in
-any other home-shaped path (`/Users/x`, `/home/x`, `C:\Users\x`) with
-`<user>`, and the bare user name with `<user>`, in the message and in every
-text field. So paths are safe to log. For a path that leaves the application
-some other way (an error returned to the interface, a file you write), use
-`termx_core::diagnostics::redact::path`. Keep
-[docs/logging.md](docs/logging.md#privacy) accurate when you change any of
-this: it tells users exactly what is guaranteed.
+What the logger does on its own, to every message and text field:
+
+- It replaces the home directory with `~` and the name in any other
+  home-shaped path (`/Users/x`, `/home/x`, `C:\Users\x`) with `<user>`. So
+  paths are safe to log.
+- Best effort, it replaces the bare user name with `<user>` and anything
+  shaped like a token, a password or a key with `<redacted>`. Do not rely on
+  it: it is the last line of defence, not a licence to log request headers.
+
+For a path that leaves the application some other way (an error returned to
+the interface, a file you write), use `termx_core::diagnostics::redact::path`.
+Keep [docs/logging.md](docs/logging.md#privacy) accurate when you change any of
+this: it tells users exactly what is guaranteed and what is best effort.
 
 ### In Rust
 
@@ -148,15 +152,21 @@ error!(session_id, error = %source, "could not resize the terminal");
 Log an error once, where it is handled, not at every level it passes through.
 Panics are recorded automatically by the panic hook.
 
-`warn!` and `error!` write to the file before they return, so that the record
-survives a crash right after it. That costs a few microseconds: fine for
-things that go wrong, not for a hot loop. `info!` and lower are queued and
-cost almost nothing, but can be dropped under extreme load.
+`warn!` and `error!` return once the record is written (or after 100 ms if the
+disk does not answer), so that the record survives a crash right after it.
+That costs tens of microseconds: fine for things that go wrong, not for a hot
+loop. Repeats from the same line with the same message, numbers aside, are
+written 5 times per 10 seconds and then counted, so put what varies in fields
+or numbers and keep the words of the message constant. `info!` and lower are
+queued and cost almost nothing, but can be dropped under extreme load.
+
+To make a panic record say what was going on, run the code inside
+`termx_core::diagnostics::with_panic_context("key", value, || ...)`.
 
 A Tauri command that can fail or panic returns `CommandResult` and runs its
 body inside `logged` (`logged_async` for an `async fn`). The wrapper writes one
 `ERROR` record with the command name, gives the frontend a `CommandError`, and
-turns a panic into an error:
+turns a panic into an error (the panic record then names the command):
 
 ```rust
 use super::error::{CommandResult, logged};
@@ -189,7 +199,8 @@ to assert on what was written.
   `reportError("where-it-happened", error)` from `src/lib/errorReporting.ts`
   if it is worth knowing about.
 - Throw `Error` objects. For anything else that is thrown or rejected, only
-  the type and the top-level key names are logged, never the value
+  the type, the number of keys and the names of plainly field-like keys are
+  logged, never a value
   (`src/lib/logSafe.ts`). Put what must be known in the message of the error,
   and nothing that must not be logged.
 - `console.log` and friends do not reach the log file.
