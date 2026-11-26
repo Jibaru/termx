@@ -9,6 +9,7 @@ use std::process::Command;
 
 use serde_json::Value;
 use termx_core::diagnostics::tracing::{self, debug, error, info, info_span, warn};
+use termx_core::diagnostics::with_panic_context;
 use termx_core::diagnostics::{
     Diagnostics, FIRST_ERRORS_RECORDS, LOG_TARGET, LogConfig, LogLevel, PANIC_TARGET,
     REPEATS_WRITTEN, Redactor, Retention, STARTUP_TARGET, log_files,
@@ -326,6 +327,12 @@ fn a_panic_on_any_thread_is_recorded_and_the_default_behaviour_is_kept() {
             .spawn(|| panic!("worker failed in /home/ana/project"))
             .unwrap();
         assert!(worker.join().is_err());
+        let caught = std::panic::catch_unwind(|| {
+            with_panic_context("command", "resize_session", || {
+                with_panic_context("session", "7", || panic!("command failed inside"))
+            })
+        });
+        assert!(caught.is_err());
         panic!("main failed with code {}", 42);
     }
 
@@ -353,7 +360,7 @@ fn a_panic_on_any_thread_is_recorded_and_the_default_behaviour_is_kept() {
         .iter()
         .filter(|record| record["target"] == PANIC_TARGET)
         .collect();
-    assert_eq!(panics.len(), 2, "{records:?}");
+    assert_eq!(panics.len(), 3, "{records:?}");
 
     let worker = &panics[0];
     assert_eq!(worker["level"], "ERROR");
@@ -364,7 +371,16 @@ fn a_panic_on_any_thread_is_recorded_and_the_default_behaviour_is_kept() {
     assert!(location.contains("diagnostics.rs:"), "{location}");
     assert!(!worker["fields"]["backtrace"].as_str().unwrap().is_empty());
 
-    let main = &panics[1];
+    // What the thread was doing is part of the record...
+    let command = &panics[1];
+    assert_eq!(command["fields"]["message"], "command failed inside");
+    assert_eq!(command["fields"]["command"], "resize_session");
+    assert_eq!(command["fields"]["session"], "7");
+    assert!(worker["fields"].get("command").is_none());
+
+    // ...and only for as long as it was doing it.
+    let main = &panics[2];
+    assert!(main["fields"].get("command").is_none());
     assert_eq!(main["fields"]["message"], "main failed with code 42");
     assert_eq!(main["run"], worker["run"]);
 }

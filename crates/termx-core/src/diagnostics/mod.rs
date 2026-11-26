@@ -89,7 +89,7 @@ pub use tracing;
 pub use self::gate::{Dropped, GateConfig, RecordGate, Severity};
 pub use self::level::{LogLevel, ParseLogLevelError};
 pub use self::normalise::message_key;
-pub use self::panic::PANIC_TARGET;
+pub use self::panic::{PANIC_TARGET, panic_context, with_panic_context};
 pub use self::rate_limit::{Decision, RateLimiter};
 pub use self::record::{MAX_VALUE_BYTES, TRUNCATION_MARKER};
 pub use self::redact::Redactor;
@@ -283,7 +283,8 @@ impl Diagnostics {
     /// the previously installed hook runs.
     ///
     /// The record has the target [`PANIC_TARGET`] and the fields `message`,
-    /// `location`, `thread` and `backtrace`. It is written even when the
+    /// `location`, `thread` and `backtrace`, plus whatever
+    /// [`with_panic_context`] added. It is written even when the
     /// level is [`LogLevel::Off`].
     pub fn install_panic_hook(&self) {
         panic::install(
