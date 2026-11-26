@@ -79,6 +79,7 @@ pub mod rate_limit;
 mod record;
 pub mod redact;
 mod rotate;
+pub mod scrub;
 mod suppress;
 mod system;
 mod writer;
