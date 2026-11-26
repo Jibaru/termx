@@ -444,6 +444,7 @@ impl RotatingFile {
 
     /// Appends one complete record, starting a new file first if it would
     /// not fit.
+    #[cfg(test)]
     pub fn write_record(&mut self, record: &[u8]) -> io::Result<()> {
         self.write_batch(std::iter::once(record))
     }
