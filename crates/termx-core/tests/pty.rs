@@ -59,40 +59,34 @@ fn guarded(test: impl FnOnce() + Send + 'static) {
 
 /// Path of the `pty-test-helper` example.
 ///
-/// Cargo builds examples next to the test binaries
-/// (`target/<profile>/examples`) whenever `cargo test` runs without selecting
-/// targets. When a single target is selected (`cargo test --test pty`) the
-/// example may be missing, in which case it is built here.
+/// Cargo does not tell integration tests where it puts examples, and the
+/// layout of the target directory changes between Cargo versions. So Cargo is
+/// asked: building the example (a no-op when it is up to date, which it is
+/// after a plain `cargo test`) with JSON messages reports the executable.
 fn helper_path() -> &'static Path {
     static HELPER: OnceLock<PathBuf> = OnceLock::new();
     HELPER.get_or_init(|| {
-        let test_binary = std::env::current_exe().expect("cannot locate the test binary");
-        let profile_dir = test_binary
-            .parent()
-            .and_then(Path::parent)
-            .expect("the test binary is not in target/<profile>/deps");
-        let helper = profile_dir
-            .join("examples")
-            .join(format!("pty-test-helper{}", std::env::consts::EXE_SUFFIX));
-
-        if !helper.is_file() {
-            let mut cargo = std::process::Command::new(env!("CARGO"));
-            cargo.args([
-                "build",
-                "--package",
-                "termx-core",
-                "--example",
-                "pty-test-helper",
-            ]);
-            if profile_dir
-                .file_name()
-                .is_some_and(|name| name == "release")
-            {
-                cargo.arg("--release");
-            }
-            let status = cargo.status().expect("cannot run cargo");
-            assert!(status.success(), "building the test helper failed");
+        let mut cargo = std::process::Command::new(env!("CARGO"));
+        cargo
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .args(["build", "--example", "pty-test-helper"])
+            .arg("--message-format=json");
+        if !cfg!(debug_assertions) {
+            cargo.arg("--release");
         }
+        let output = cargo.output().expect("cannot run cargo");
+        assert!(
+            output.status.success(),
+            "building the test helper failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let messages = String::from_utf8_lossy(&output.stdout);
+        let helper = messages
+            .lines()
+            .filter(|line| line.contains(r#""name":"pty-test-helper""#))
+            .find_map(executable_of)
+            .expect("cargo did not report where the test helper is");
         assert!(
             helper.is_file(),
             "the test helper was not found at {}",
@@ -100,6 +94,21 @@ fn helper_path() -> &'static Path {
         );
         helper
     })
+}
+
+/// Extracts the `executable` field of one of Cargo's JSON messages.
+fn executable_of(message: &str) -> Option<PathBuf> {
+    let (_, rest) = message.split_once(r#""executable":""#)?;
+    let mut path = String::new();
+    let mut chars = rest.chars();
+    loop {
+        match chars.next()? {
+            '"' => return Some(PathBuf::from(path)),
+            // Only backslashes and quotes are escaped in a path.
+            '\\' => path.push(chars.next()?),
+            c => path.push(c),
+        }
+    }
 }
 
 /// A command running the test helper in the given mode.
