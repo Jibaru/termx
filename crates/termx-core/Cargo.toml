@@ -19,12 +19,9 @@ thiserror = "2.0.21"
 [target.'cfg(unix)'.dependencies]
 filedescriptor = "0.8.3"
 
-# Child process driven by the PTY integration tests. It is a test fixture, not
-# part of the library: Cargo only exposes the path of a binary to integration
-# tests (`CARGO_BIN_EXE_*`) when the binary belongs to the same package.
-[[bin]]
-name = "termx-pty-test-helper"
+# Child process driven by the PTY integration tests. It is a test fixture
+# declared as an example so that it is built by `cargo test` but never
+# installed or shipped with the library.
+[[example]]
+name = "pty-test-helper"
 path = "tests/helpers/pty_helper.rs"
-test = false
-doc = false
-bench = false

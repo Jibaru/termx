@@ -1,7 +1,8 @@
 //! Integration tests of the PTY layer against real pseudo-terminals.
 //!
-//! Most tests run `termx-pty-test-helper` (see `tests/helpers/pty_helper.rs`)
-//! inside the PTY, because it behaves identically on every platform. Shell
+//! Most tests run the `pty-test-helper` example (see
+//! `tests/helpers/pty_helper.rs`) inside the PTY, because it behaves
+//! identically on every platform. Shell
 //! commands are only used where the shell itself is what is being tested.
 //!
 //! Two rules keep the suite reliable:
@@ -15,8 +16,8 @@
 //!   where the PTY is transparent.
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
-use std::sync::mpsc;
+use std::path::{Path, PathBuf};
+use std::sync::{OnceLock, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -56,9 +57,54 @@ fn guarded(test: impl FnOnce() + Send + 'static) {
     }
 }
 
+/// Path of the `pty-test-helper` example.
+///
+/// Cargo builds examples next to the test binaries
+/// (`target/<profile>/examples`) whenever `cargo test` runs without selecting
+/// targets. When a single target is selected (`cargo test --test pty`) the
+/// example may be missing, in which case it is built here.
+fn helper_path() -> &'static Path {
+    static HELPER: OnceLock<PathBuf> = OnceLock::new();
+    HELPER.get_or_init(|| {
+        let test_binary = std::env::current_exe().expect("cannot locate the test binary");
+        let profile_dir = test_binary
+            .parent()
+            .and_then(Path::parent)
+            .expect("the test binary is not in target/<profile>/deps");
+        let helper = profile_dir
+            .join("examples")
+            .join(format!("pty-test-helper{}", std::env::consts::EXE_SUFFIX));
+
+        if !helper.is_file() {
+            let mut cargo = std::process::Command::new(env!("CARGO"));
+            cargo.args([
+                "build",
+                "--package",
+                "termx-core",
+                "--example",
+                "pty-test-helper",
+            ]);
+            if profile_dir
+                .file_name()
+                .is_some_and(|name| name == "release")
+            {
+                cargo.arg("--release");
+            }
+            let status = cargo.status().expect("cannot run cargo");
+            assert!(status.success(), "building the test helper failed");
+        }
+        assert!(
+            helper.is_file(),
+            "the test helper was not found at {}",
+            helper.display()
+        );
+        helper
+    })
+}
+
 /// A command running the test helper in the given mode.
 fn helper(args: &[&str]) -> PtyCommand {
-    PtyCommand::new(env!("CARGO_BIN_EXE_termx-pty-test-helper")).args(args)
+    PtyCommand::new(helper_path()).args(args)
 }
 
 /// Creates an empty directory for one test, inside Cargo's directory for
@@ -592,7 +638,7 @@ fn kill_terminates_a_long_running_process() {
 }
 
 /// Reads the counter the helper's `heartbeat` mode keeps writing.
-fn read_heartbeat(file: &std::path::Path) -> Option<u64> {
+fn read_heartbeat(file: &Path) -> Option<u64> {
     std::fs::read_to_string(file).ok()?.trim().parse().ok()
 }
 
