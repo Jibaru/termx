@@ -67,7 +67,7 @@ describe("ErrorBoundary", () => {
     expect(event).toMatchObject({
       level: "error",
       source: "react",
-      message: "cannot render the widget",
+      message: "Error: cannot render the widget",
     });
     expect(event?.stack).toContain("cannot render the widget");
     expect(event?.componentStack).toContain("Flaky");
