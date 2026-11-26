@@ -16,6 +16,11 @@
     "dev": "pnpm --filter @termx/desktop tauri dev",
     "build": "pnpm --filter @termx/desktop build",
     "typecheck": "pnpm --filter @termx/desktop typecheck",
-    "tauri": "pnpm --filter @termx/desktop tauri"
+    "tauri": "pnpm --filter @termx/desktop tauri",
+    "lint": "pnpm --filter @termx/desktop lint && prettier --check .",
+    "format": "prettier --write ."
+  },
+  "devDependencies": {
+    "prettier": "^3.10.1"
   }
 }

@@ -1,0 +1,7 @@
+target/
+dist/
+coverage/
+node_modules/
+pnpm-lock.yaml
+apps/desktop/src-tauri/gen/
+CHANGELOG.md
