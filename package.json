@@ -15,11 +15,13 @@
   "scripts": {
     "dev": "pnpm --filter @termx/desktop tauri dev",
     "build": "pnpm --filter @termx/desktop build",
-    "typecheck": "pnpm --filter @termx/desktop typecheck",
+    "typecheck": "pnpm --filter @termx/desktop typecheck && pnpm --filter @termx/e2e typecheck",
     "tauri": "pnpm --filter @termx/desktop tauri",
-    "lint": "pnpm --filter @termx/desktop lint && prettier --check .",
+    "lint": "pnpm --filter @termx/desktop lint && pnpm --filter @termx/e2e lint && prettier --check .",
     "format": "prettier --write .",
     "test": "pnpm --filter @termx/desktop test",
+    "e2e:build": "pnpm build && cargo build -p termx-desktop --features e2e,tauri/custom-protocol --locked",
+    "e2e": "pnpm --filter @termx/e2e test",
     "change": "knope document-change",
     "release:dry-run": "knope prepare-release --dry-run"
   },

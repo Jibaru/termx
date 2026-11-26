@@ -9,6 +9,9 @@ node_modules/
 dist/
 coverage/
 
+# What the end-to-end suite keeps of a run
+e2e/artifacts*/
+
 # Tauri generated files
 apps/desktop/src-tauri/gen/schemas/
 

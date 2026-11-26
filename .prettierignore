@@ -2,6 +2,7 @@ target/
 dist/
 coverage/
 node_modules/
+e2e/artifacts*/
 pnpm-lock.yaml
 apps/desktop/src-tauri/gen/
 CHANGELOG.md
