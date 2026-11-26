@@ -14,6 +14,23 @@ type Master = Box<dyn MasterPty + Send>;
 type Writer = Box<dyn Write + Send>;
 type Child = Box<dyn portable_pty::Child + Send + Sync>;
 
+/// Our own handle to the process side of the terminal, kept open by the
+/// reader thread on macOS until it has finished reading; `None` elsewhere.
+///
+/// On macOS a process that exits while the terminal still holds output
+/// nobody has read waits for it to be read, but only for about 600 ms. After
+/// that the output is thrown away, unless something else still has the
+/// terminal open, in which case the process keeps waiting. A reader thread
+/// that the system schedules late (measured under heavy load) or a consumer
+/// that is slow to take the output would therefore lose the last output of
+/// the process. Keeping the terminal open on our side makes the exit wait
+/// for as long as it takes: backpressure instead of loss.
+///
+/// End of file is still reported as soon as the process exits, because macOS
+/// revokes the terminal of a session whose leader is gone. It costs a fifth
+/// file descriptor per PTY on macOS.
+type TerminalKeeper = Option<Box<dyn portable_pty::SlavePty + Send>>;
+
 /// A process running inside a pseudo-terminal.
 ///
 /// Created with [`Pty::spawn`], which also returns the [`PtyOutput`] carrying
@@ -154,6 +171,17 @@ impl Pty {
     /// - [`PtyError::Setup`] if the streams or helper threads cannot be
     ///   created; the process is killed before returning.
     pub fn spawn(command: &PtyCommand, size: PtySize) -> Result<(Self, PtyOutput), PtyError> {
+        Self::spawn_with_reader_delay(command, size, Duration::ZERO)
+    }
+
+    /// Implements [`spawn`](Self::spawn). `reader_delay` holds the reader
+    /// thread back before its first read, which lets a test reproduce a
+    /// reader thread that the system is slow to schedule.
+    fn spawn_with_reader_delay(
+        command: &PtyCommand,
+        size: PtySize,
+        reader_delay: Duration,
+    ) -> Result<(Self, PtyOutput), PtyError> {
         let size = size.validate()?;
         let builder = command.to_builder()?;
 
@@ -164,11 +192,25 @@ impl Pty {
                 program: command.program().to_string_lossy().into_owned(),
                 message: format!("{error:#}"),
             })?;
-        // The process has its own handles to the terminal. Ours must be
-        // closed, or end of file would never be reported on Unix.
-        drop(slave);
+        // The process has its own handles to the terminal. Ours is closed,
+        // or end of file would never be reported on Linux. macOS is the
+        // opposite: see `TerminalKeeper`.
+        #[cfg(target_os = "macos")]
+        let keeper: TerminalKeeper = Some(slave);
+        #[cfg(not(target_os = "macos"))]
+        let keeper: TerminalKeeper = {
+            drop(slave);
+            None
+        };
 
-        Self::attach(master, child, size, command.kill_grace_period())
+        Self::attach(
+            master,
+            child,
+            size,
+            command.kill_grace_period(),
+            reader_delay,
+            keeper,
+        )
     }
 
     /// Wires a freshly spawned child up to the helper threads.
@@ -181,10 +223,13 @@ impl Pty {
         mut child: Child,
         size: PtySize,
         kill_grace: Duration,
+        reader_delay: Duration,
+        keeper: TerminalKeeper,
     ) -> Result<(Self, PtyOutput), PtyError> {
-        // Windows terminates a process at once: there is no grace period.
+        // Windows terminates a process at once: there is no grace period,
+        // and its console needs no keeper.
         #[cfg(windows)]
-        let _ = kill_grace;
+        let _ = (kill_grace, keeper);
 
         let streams = match Streams::open(master.as_ref()) {
             Ok(streams) => streams,
@@ -243,7 +288,11 @@ impl Pty {
                 let (sink, poke, shared) = (sink.clone(), poke.clone(), Arc::clone(&shared));
                 let (master, stop) = (streams.master, streams.stop_reader);
                 move || {
+                    thread::sleep(reader_delay);
                     reader::pump_until_stopped(&master, &stop, &sink);
+                    // Everything that will be delivered has been read: the
+                    // terminal no longer needs to be kept open.
+                    drop(keeper);
                     // End of file usually means the process is gone: have the
                     // waiter thread check now, and give it a moment to publish
                     // the exit status before the stream ends, so that a
@@ -275,6 +324,7 @@ impl Pty {
                 let (sink, shared) = (sink.clone(), Arc::clone(&shared));
                 let reader = streams.reader;
                 move || {
+                    thread::sleep(reader_delay);
                     // The console's start-up question is answered here, so
                     // that output flows even when no terminal emulator is
                     // attached to answer it (see `StartupQueryFilter`).
@@ -382,6 +432,12 @@ impl Pty {
     /// `SIGKILL` in the background. On Windows the process is terminated
     /// immediately, and the remaining processes attached to the console are
     /// terminated when the console is closed.
+    ///
+    /// On macOS a process, even a killed one, only finishes exiting once the
+    /// output it has already printed has been read from the terminal. If the
+    /// consumer of the [`PtyOutput`] has stopped receiving while its buffer
+    /// is full, the exit is observed when it resumes, when the `PtyOutput`
+    /// is dropped, or when this handle is dropped.
     ///
     /// # Errors
     ///
@@ -635,7 +691,7 @@ impl Streams {
                 .ok_or_else(|| setup(&"the pseudo-terminal has no file descriptor"))?;
             // One owned duplicate of the master serves both directions: a
             // `&File` can be read and written from different threads. This
-            // keeps a PTY down to four descriptors (see `limits`), and the
+            // saves a descriptor per PTY (see `limits`), and the
             // reader thread never depends on the lifetime of the master.
             let master = filedescriptor::FileDescriptor::dup(&fd)
                 .and_then(|duplicate| duplicate.as_file())
@@ -729,5 +785,27 @@ fn poll_exit(state: &Mutex<ChildState>, pokes: &std::sync::mpsc::Receiver<()>) -
                 pause = EXIT_POLL_MAX;
             }
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn output_of_a_process_that_exits_before_it_is_read_is_not_lost() {
+        // The process prints and exits long before the reader thread gets to
+        // read, as happens for real when the machine is very busy. One
+        // second is beyond the time macOS keeps unread output for.
+        let command = PtyCommand::new("/bin/echo").arg("printed-before-reading");
+        let (pty, output) =
+            Pty::spawn_with_reader_delay(&command, PtySize::default(), Duration::from_secs(1))
+                .unwrap();
+
+        let bytes: Vec<u8> = output.flatten().collect();
+        let text = String::from_utf8_lossy(&bytes);
+
+        assert!(text.contains("printed-before-reading"), "got: {text:?}");
+        assert!(pty.wait().success());
     }
 }

@@ -13,22 +13,24 @@ pub const OPEN_FILE_LIMIT_TARGET: u64 = 10_240;
 /// towards [`OPEN_FILE_LIMIT_TARGET`], without exceeding the hard limit.
 ///
 /// **Call this once when the application starts.** On Unix each PTY keeps
-/// four file descriptors open (the terminal, a duplicate used for reading
-/// and writing, and the two ends of the pipe that stops the reader thread).
-/// macOS gives a process started from the Finder a soft limit of only 256
-/// descriptors, which the rest of the application shares: without raising
-/// it, spawning fails after roughly 60 terminals.
+/// file descriptors open: the terminal, a duplicate used for reading and
+/// writing, and the two ends of the pipe that stops the reader thread, which
+/// makes four on Linux. macOS needs a fifth, which keeps the terminal open so
+/// that the last output of a process is never lost. macOS also gives a
+/// process started from the Finder a soft limit of only 256 descriptors,
+/// which the rest of the application shares: without raising it, spawning
+/// fails after roughly 50 terminals.
 ///
-/// Resulting capacity:
+/// Resulting capacity, approximately:
 ///
-/// | Soft limit                | PTYs, approximately |
-/// | ------------------------- | ------------------- |
-/// | 256 (macOS default)       | 60                  |
-/// | 1,024 (usual Linux default) | 250               |
-/// | 10,240 (after this call)  | 2,500               |
+/// | Soft limit                  | PTYs on Linux | PTYs on macOS |
+/// | --------------------------- | ------------- | ------------- |
+/// | 256 (macOS default)         | 60            | 50            |
+/// | 1,024 (usual Linux default) | 250           | 200           |
+/// | 10,240 (after this call)    | 2,500         | 2,000         |
 ///
 /// On macOS, terminals whose descriptors are numbered 1,024 or above (beyond
-/// roughly 250 PTYs) still work but lose one guarantee: their reader thread
+/// roughly 200 PTYs) still work but lose one guarantee: their reader thread
 /// can no longer be interrupted, because the `select`-based wait macOS needs
 /// does not support such descriptors. Their output stream then only ends
 /// once every process holding the terminal has exited.

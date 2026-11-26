@@ -82,8 +82,8 @@
 //! threads, so no thread, zombie process or file descriptor outlives the
 //! handle. Dropping the [`PtyOutput`] only discards the output.
 //!
-//! On Unix each PTY uses four file descriptors, and macOS only allows 256 by
-//! default. Call [`raise_open_file_limit`] when the application starts; its
+//! Each PTY uses four file descriptors on Linux and five on macOS, which only
+//! allows 256 by default. Call [`raise_open_file_limit`] when the application starts; its
 //! documentation gives the resulting capacity.
 //!
 //! # Platform notes
