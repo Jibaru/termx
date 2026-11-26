@@ -30,7 +30,7 @@ fn main() -> ExitCode {
     match run(mode, rest) {
         Ok(code) => code,
         Err(error) => {
-            eprintln!("termx-pty-test-helper {mode}: {error}");
+            eprintln!("pty-test-helper {mode}: {error}");
             ExitCode::from(2)
         }
     }
