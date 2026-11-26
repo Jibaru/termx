@@ -28,6 +28,8 @@ describe("the default terminal configuration", () => {
     expect(DEFAULT_TERMINAL_CONFIG.scrollback).toBe(10_000);
     // Shortcuts on the left Option key, characters on the right one.
     expect(DEFAULT_TERMINAL_CONFIG.optionAsMeta).toBe("left");
+    expect(DEFAULT_TERMINAL_CONFIG.renderer).toBe("auto");
+    expect(DEFAULT_TERMINAL_CONFIG.allowOsc52Write).toBe(true);
   });
 
   it("is near-white on an opaque near-black background", () => {

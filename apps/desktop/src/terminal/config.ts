@@ -70,10 +70,22 @@ export interface TerminalConfig {
   /** Space between the terminal and the edges of its pane, in CSS pixels. */
   padding: { x: number; y: number };
   /**
-   * `webgl` draws with the GPU and falls back to `dom` by itself when
-   * WebGL is unavailable or its context is lost.
+   * What draws the terminal.
+   *
+   * - `auto`: WebGL, and the DOM renderer when WebGL is unavailable or its
+   *   context is lost.
+   * - `webgl`: WebGL, started again when its context is lost. The DOM
+   *   renderer is only used when WebGL cannot be started at all.
+   * - `dom`: never WebGL. Slower, but the one to choose if WebGL draws
+   *   garbled text on a machine.
    */
-  renderer: "webgl" | "dom";
+  renderer: "auto" | "webgl" | "dom";
+  /**
+   * Whether programs may put text on the clipboard with the OSC 52 escape
+   * sequence, as Claude Code's `/copy` and tmux do. Reading the clipboard
+   * that way is never allowed, whatever this says.
+   */
+  allowOsc52Write: boolean;
   /**
    * How the width of characters is decided. `15-graphemes` treats an emoji
    * built from several code points as one wide character, as current
@@ -128,7 +140,8 @@ export const DEFAULT_TERMINAL_CONFIG: TerminalConfig = {
   optionAsMeta: "left",
   minimumContrastRatio: 4.5,
   padding: { x: 6, y: 4 },
-  renderer: "webgl",
+  renderer: "auto",
+  allowOsc52Write: true,
   unicodeVersion: "15-graphemes",
   theme: DEFAULT_TERMINAL_THEME,
 };

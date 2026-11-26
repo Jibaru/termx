@@ -13,9 +13,11 @@ import {
   resetXtermMocks,
 } from "../test/xtermMock";
 import { DEFAULT_TERMINAL_CONFIG, type TerminalConfig } from "./config";
+import { OSC52_MAX_BYTES } from "./osc52";
 import {
   MIN_FIT_HEIGHT_PX,
   MIN_FIT_WIDTH_PX,
+  MAX_WEBGL_RESTARTS,
   RESIZE_DEBOUNCE_MS,
   TerminalController,
 } from "./TerminalController";
@@ -833,6 +835,35 @@ describe("the renderer", () => {
     expect(ipc.logged()[0]?.message).toContain("WebGL context was lost");
   });
 
+  it("stays on the DOM renderer after a lost context when set to `auto`", async () => {
+    recordIPC();
+    const { controller } = await attached({ config: { renderer: "auto" } });
+
+    FakeWebglAddon.instances[0]?.loseContext();
+
+    expect(controller.renderer).toBe("dom");
+    expect(FakeWebglAddon.instances).toHaveLength(1);
+  });
+
+  it("starts WebGL again after a lost context when set to `webgl`, a few times", async () => {
+    const ipc = recordIPC();
+    const { controller } = await attached({ config: { renderer: "webgl" } });
+
+    for (let loss = 1; loss <= MAX_WEBGL_RESTARTS; loss += 1) {
+      FakeWebglAddon.instances.at(-1)?.loseContext();
+      expect(controller.renderer).toBe("webgl");
+      expect(FakeWebglAddon.instances).toHaveLength(loss + 1);
+    }
+
+    // A machine that keeps losing the context ends up on the DOM renderer.
+    FakeWebglAddon.instances.at(-1)?.loseContext();
+    expect(controller.renderer).toBe("dom");
+    expect(FakeWebglAddon.instances).toHaveLength(MAX_WEBGL_RESTARTS + 1);
+    await vi.waitFor(() => {
+      expect(ipc.logged().at(-1)?.message).toContain("now uses the DOM renderer");
+    });
+  });
+
   it("can be configured to never use WebGL", () => {
     const fake = fakeBackend();
     const controller = new TerminalController({
@@ -856,6 +887,24 @@ describe("the clipboard requests of programs (OSC 52)", () => {
     expect(handler?.(`c;${btoa("copied by a program")}`)).toBe(true);
 
     expect(clipboard.writes).toEqual(["copied by a program"]);
+  });
+
+  it("ignores a program writing the clipboard when the setting is off", async () => {
+    const { terminal, clipboard } = await attached({ config: { allowOsc52Write: false } });
+
+    // Still reported as handled: the sequence must not show up as text.
+    expect(terminal.oscHandlers.get(52)?.(`c;${btoa("unwanted")}`)).toBe(true);
+
+    expect(clipboard.writes).toEqual([]);
+  });
+
+  it("ignores a payload larger than the limit", async () => {
+    const { terminal, clipboard } = await attached();
+
+    const handled = terminal.oscHandlers.get(52)?.(`c;${btoa("x".repeat(OSC52_MAX_BYTES + 3))}`);
+
+    expect(handled).toBe(true);
+    expect(clipboard.writes).toEqual([]);
   });
 
   it("never lets a program read the clipboard", async () => {
