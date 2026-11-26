@@ -113,11 +113,19 @@ refactor(core)!: rename the session identifier type
 - The scope is optional. Use the part of the project the change touches, such
   as `core`, `desktop` or `plugin`.
 - Start the description in lower case and do not end it with a full stop.
+- Keep the whole first line at 100 characters or fewer.
 - Mark a breaking change with `!` before the colon.
 
 Continuous integration checks the pull request title and every commit of the
-pull request, so the history of `main` stays conventional whether a pull
-request is squashed (the title becomes the commit message), rebased or merged.
+pull request against these rules, so the history of `main` stays conventional
+whether a pull request is squashed (the title becomes the commit message),
+rebased or merged.
+
+To revert a change, `git revert` is fine: its default `Revert "..."` commit
+message is accepted. The pull request title is not, so change the title that
+GitHub suggests to the `revert` type followed by the description of the
+reverted change, for example `revert: add a sidebar listing the open sessions`.
+
 To check your commits locally before pushing:
 
 ```sh
@@ -164,6 +172,13 @@ it.
   write it by hand instead of using the command.
 - Commit the file with the change it describes. Add more than one file when a
   pull request contains several independent changes.
+- `.changeset/` holds change files only. Continuous integration rejects any
+  other file there, and any change file without this front matter and a
+  heading.
+- Do not delete change files: the release does that. The exception is a
+  `revert` pull request, which deletes the change file of the change it
+  reverts if that change has not been released yet. If it has been released,
+  add a new change file describing the revert instead.
 
 While the version is below 1.0.0, Knope bumps one position lower than the
 change type says: breaking changes bump the minor version, and features and
@@ -212,9 +227,27 @@ The workflow then:
 4. Tags the commit `v<version>` and publishes a GitHub Release with the new
    changelog section as its notes.
 
-If the last step fails after the commit was pushed, re-run the failed job
-instead of starting the workflow again. Installers are not built or attached
-to the release yet.
+Installers are not built or attached to the release yet.
+
+Things to know:
+
+- **Nothing to release.** The workflow stops with an error when `.changeset/`
+  has no change files, also when a version is given.
+- **Recovering from a failed run.** If the workflow fails after the release
+  commit was pushed (step 3) but before the tag and the GitHub Release exist,
+  start the workflow again or re-run the failed job. A new run notices that
+  the version in `Cargo.toml` has a changelog section but no tag, skips
+  steps 1 to 3, and tags the original release commit, even if other pull
+  requests were merged in the meantime. Their change files stay for the next
+  release.
+- **The release commit is not checked by CI.** It is pushed with the
+  workflow's `GITHUB_TOKEN`, and GitHub does not start workflows for such
+  pushes. The commit only changes versions and the changelog, and the workflow
+  verifies `Cargo.lock` with `cargo metadata --locked` before pushing.
+- **Branch protection.** The workflow pushes directly to `main`. If `main` is
+  later protected against direct pushes, the push will be rejected: the
+  workflow then has to push through an identity that is allowed to bypass the
+  protection, or open a release pull request instead.
 
 When you add a crate to the workspace, also add it to `versioned_files` in
 [knope.toml](knope.toml) so that its `Cargo.lock` entry is bumped on release.
