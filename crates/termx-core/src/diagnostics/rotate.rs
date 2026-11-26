@@ -13,7 +13,8 @@
 //! exactly this name pattern are ever listed, exported or deleted; symbolic
 //! links are ignored.
 
-use std::fs::{self, File, Metadata, OpenOptions};
+use std::collections::HashMap;
+use std::fs::{self, File, Metadata, OpenOptions, TryLockError};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -25,6 +26,10 @@ use super::record::compact_timestamp;
 
 const PREFIX: &str = "termx-";
 const EXTENSION: &str = ".log";
+const LOCK_EXTENSION: &str = ".lock";
+
+/// How far in the future a file may be dated before its date is distrusted.
+const CLOCK_TOLERANCE: Duration = Duration::from_secs(60);
 
 /// How many file names are tried when the expected one is taken.
 const NAME_ATTEMPTS: u32 = 16;
@@ -97,17 +102,17 @@ fn file_name(stamp: &str, run_id: &str, sequence: u32) -> String {
 /// `termx-YYYYMMDDTHHMMSSZ-<12 hex digits>-<3 or more digits>.log`.
 #[must_use]
 pub fn is_log_file_name(name: &str) -> bool {
-    let Some(stem) = name
-        .strip_prefix(PREFIX)
-        .and_then(|rest| rest.strip_suffix(EXTENSION))
-    else {
-        return false;
-    };
+    run_id_of(name).is_some()
+}
+
+/// The run id in a log file name, or `None` if `name` is not one.
+fn run_id_of(name: &str) -> Option<&str> {
+    let stem = name.strip_prefix(PREFIX)?.strip_suffix(EXTENSION)?;
     let mut parts = stem.split('-');
     let (Some(stamp), Some(run_id), Some(sequence), None) =
         (parts.next(), parts.next(), parts.next(), parts.next())
     else {
-        return false;
+        return None;
     };
 
     let stamp = stamp.as_bytes();
@@ -116,13 +121,49 @@ pub fn is_log_file_name(name: &str) -> bool {
         && stamp[8] == b'T'
         && stamp[9..15].iter().all(u8::is_ascii_digit)
         && stamp[15] == b'Z';
-    let run_id_ok = run_id.len() == 12
-        && run_id
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
     let sequence_ok = sequence.len() >= 3 && sequence.bytes().all(|byte| byte.is_ascii_digit());
 
-    stamp_ok && run_id_ok && sequence_ok
+    (stamp_ok && is_run_id(run_id) && sequence_ok).then_some(run_id)
+}
+
+fn is_run_id(text: &str) -> bool {
+    text.len() == 12
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// Name of the file a running process holds a lock on to say that it is
+/// alive: `termx-<run id>.lock`.
+fn lock_file_name(run_id: &str) -> String {
+    format!("{PREFIX}{run_id}{LOCK_EXTENSION}")
+}
+
+/// Whether the process that logs as `run_id` in `dir` is still running.
+///
+/// Every running process holds an exclusive lock on its lock file, and the
+/// operating system releases it when the process ends, however it ends. A
+/// lock file that can be locked is left over from a dead process and is
+/// removed.
+fn is_alive(dir: &Path, run_id: &str) -> bool {
+    let path = dir.join(lock_file_name(run_id));
+    if eligible_metadata(&path).is_none() {
+        return false;
+    }
+    let Ok(file) = File::open(&path) else {
+        return false;
+    };
+    match file.try_lock() {
+        Err(TryLockError::WouldBlock) => true,
+        Ok(()) => {
+            // Close it before removing it, as Windows requires.
+            drop(file);
+            let _ = fs::remove_file(&path);
+            false
+        }
+        // Locks are not supported here: assume the worst and keep the files.
+        Err(TryLockError::Error(_)) => true,
+    }
 }
 
 /// The metadata of `path` if it may be treated as one of our log files: a
@@ -237,8 +278,13 @@ pub fn log_files(dir: &Path) -> io::Result<Vec<LogFile>> {
 /// paths that were removed.
 ///
 /// `current` is the file the calling process is writing to. It is never
-/// deleted, and room for it to grow to its full size is set aside. The
-/// newest [`Retention::min_files_kept`] files are never deleted either.
+/// deleted, and room for it to grow to its full size is set aside. Also
+/// never deleted:
+///
+/// - the newest [`Retention::min_files_kept`] files, not counting files dated
+///   in the future, whose date cannot be trusted;
+/// - the files of other processes that are still running. Each process
+///   cleans up after itself, and the files of dead ones are fair game.
 ///
 /// # Errors
 ///
@@ -250,15 +296,40 @@ pub fn prune(
     now: SystemTime,
     current: Option<&Path>,
 ) -> io::Result<Vec<PathBuf>> {
-    let files = log_files(dir)?;
+    let mut files = log_files(dir)?;
+    // A file dated in the future was written under a wrong clock. It is not
+    // one of "the newest files": sort those first, where they are the first
+    // to go when room is needed. The sort is stable, so the rest stay in
+    // order.
+    let from_the_future = |file: &LogFile| {
+        file.modified
+            .duration_since(now)
+            .is_ok_and(|ahead| ahead > CLOCK_TOLERANCE)
+    };
+    files.sort_by_key(|file| !from_the_future(file));
     let first_protected = files.len().saturating_sub(retention.min_files_kept);
-    let mut removed = Vec::new();
 
+    let own_run = current
+        .and_then(|current| current.file_name()?.to_str())
+        .and_then(run_id_of);
+    let mut alive: HashMap<String, bool> = HashMap::new();
+    let mut belongs_to_another_live_process = |name: &str| {
+        let Some(run_id) = run_id_of(name).filter(|run_id| Some(*run_id) != own_run) else {
+            return false;
+        };
+        *alive
+            .entry(run_id.to_owned())
+            .or_insert_with(|| is_alive(dir, run_id))
+    };
+
+    let mut removed = Vec::new();
     // (file, may be deleted), oldest first.
     let mut kept: Vec<(LogFile, bool)> = Vec::with_capacity(files.len());
     for (index, file) in files.into_iter().enumerate() {
         let is_current = current.is_some_and(|current| current == file.path);
-        let deletable = index < first_protected && !is_current;
+        let protected_as_recent = index >= first_protected && !from_the_future(&file);
+        let deletable =
+            !protected_as_recent && !is_current && !belongs_to_another_live_process(&file.name);
         let age = now.duration_since(file.modified).unwrap_or(Duration::ZERO);
         if deletable && age > retention.max_age && fs::remove_file(&file.path).is_ok() {
             removed.push(file.path);
@@ -309,6 +380,9 @@ pub(crate) struct RotatingFile {
     /// The file being written to.
     path: PathBuf,
     file: Option<File>,
+    /// Held locked for as long as this process logs, so that other instances
+    /// know its files are in use and leave them alone.
+    alive_lock: Option<File>,
     /// What the open file is on disk (device and inode, or the Windows
     /// equivalent), to notice when the path stops referring to it.
     identity: Option<Handle>,
@@ -332,6 +406,7 @@ impl RotatingFile {
             next_sequence: 0,
             path: PathBuf::new(),
             file: None,
+            alive_lock: None,
             identity: None,
             written: 0,
             written_since_prune: 0,
@@ -339,8 +414,23 @@ impl RotatingFile {
             fail_new_files: false,
         };
         file.start_new_file()?;
+        file.hold_alive_lock();
         file.prune();
         Ok(file)
+    }
+
+    /// Creates and locks the file that tells other instances this process is
+    /// alive. Without it logging still works; the files are then only
+    /// protected by the other retention rules.
+    fn hold_alive_lock(&mut self) {
+        let path = self.dir.join(lock_file_name(&self.run_id));
+        let lock = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .ok()
+            .filter(|file| file.try_lock().is_ok());
+        self.alive_lock = lock;
     }
 
     /// The file being written to.
@@ -484,6 +574,16 @@ impl RotatingFile {
             }
         }
         Err(last_error.unwrap_or_else(|| io::Error::other("no free log file name")))
+    }
+}
+
+impl Drop for RotatingFile {
+    fn drop(&mut self) {
+        // Closing the file releases the lock; then the file can go. After a
+        // crash the next instance that prunes removes it instead.
+        if self.alive_lock.take().is_some() {
+            let _ = fs::remove_file(self.dir.join(lock_file_name(&self.run_id)));
+        }
     }
 }
 
@@ -807,6 +907,107 @@ mod tests {
         prune(dir.path(), &limits, future, None).unwrap();
 
         assert_eq!(names(dir.path()), [name(4), name(5), name(6)]);
+    }
+
+    #[test]
+    fn files_dated_in_the_future_do_not_count_as_the_newest() {
+        let dir = tempfile::tempdir().unwrap();
+        // Three files written while the clock was a month ahead...
+        for day in 1..=3 {
+            create(dir.path(), &name(day), 10, Duration::ZERO);
+            File::options()
+                .write(true)
+                .open(dir.path().join(name(day)))
+                .unwrap()
+                .set_modified(SystemTime::now() + 30 * DAY)
+                .unwrap();
+        }
+        // ...and four real ones, all past the maximum age.
+        for day in 4..=7 {
+            create(dir.path(), &name(day), 10, (40 - day) * DAY);
+        }
+        let mut limits = retention(100, 10_000);
+        limits.min_files_kept = 3;
+
+        prune(dir.path(), &limits, SystemTime::now(), None).unwrap();
+
+        // The three newest real files are the ones that are kept.
+        let left = names(dir.path());
+        for day in 5..=7 {
+            assert!(left.contains(&name(day)), "{left:?}");
+        }
+        assert!(!left.contains(&name(4)));
+    }
+
+    #[test]
+    fn a_busy_instance_does_not_prune_the_files_of_an_idle_live_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let limits = retention(1_000, 3_000);
+        let mut idle = RotatingFile::open(dir.path(), limits, OTHER_RUN).unwrap();
+        idle.write_record(b"the idle instance was here\n").unwrap();
+        let idle_file = idle.path().to_owned();
+        // Make it the oldest file by far, as after a long idle period.
+        File::options()
+            .write(true)
+            .open(&idle_file)
+            .unwrap()
+            .set_modified(SystemTime::now() - 30 * DAY)
+            .unwrap();
+
+        let mut busy = RotatingFile::open(dir.path(), limits, RUN).unwrap();
+        for _ in 0..500 {
+            busy.write_record(&[b'b'; 100]).unwrap();
+        }
+
+        assert!(
+            idle_file.is_file(),
+            "the file of a live instance was pruned"
+        );
+        idle.write_record(b"and still is\n").unwrap();
+        assert_eq!(idle.path(), idle_file);
+        assert!(
+            fs::read_to_string(&idle_file)
+                .unwrap()
+                .starts_with("the idle instance was here\n")
+        );
+
+        // Once it is gone, its files are ordinary old files.
+        drop(idle);
+        File::options()
+            .write(true)
+            .open(&idle_file)
+            .unwrap()
+            .set_modified(SystemTime::now() - 30 * DAY)
+            .unwrap();
+        prune(dir.path(), &limits, SystemTime::now(), Some(busy.path())).unwrap();
+        assert!(!idle_file.exists());
+    }
+
+    #[test]
+    fn the_files_of_a_dead_instance_are_pruned_and_its_lock_file_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let dead = format!("termx-20261101T000000Z-{OTHER_RUN}-000.log");
+        create(dir.path(), &dead, 10, 30 * DAY);
+        // The lock file of a process that died without cleaning up.
+        let lock = dir.path().join(format!("termx-{OTHER_RUN}.lock"));
+        fs::write(&lock, "").unwrap();
+
+        prune(dir.path(), &retention(100, 10_000), SystemTime::now(), None).unwrap();
+
+        assert!(names(dir.path()).is_empty());
+        assert!(!lock.exists());
+    }
+
+    #[test]
+    fn the_alive_lock_file_is_removed_when_logging_ends() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join(format!("termx-{RUN}.lock"));
+
+        let file = RotatingFile::open(dir.path(), Retention::default(), RUN).unwrap();
+        assert!(lock.is_file());
+        drop(file);
+
+        assert!(!lock.exists());
     }
 
     #[test]
