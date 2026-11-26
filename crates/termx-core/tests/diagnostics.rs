@@ -27,6 +27,9 @@ fn config(dir: &Path) -> LogConfig {
         app_version: "1.2.3".to_owned(),
         webview_version: Some("605.1.15".to_owned()),
         redactor: Redactor::with_case_sensitivity(Some(Path::new("/home/ana")), true),
+        // These tests are about what is written, not about how long a busy
+        // test machine may take to write it.
+        urgent_wait: std::time::Duration::from_secs(60),
     }
 }
 

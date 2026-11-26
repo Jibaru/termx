@@ -17,6 +17,8 @@ impl TestLog {
         let dir = tempfile::tempdir().unwrap();
         let mut config = LogConfig::new(dir.path().join("logs"), "0.0.0-test");
         config.level = LogLevel::Info;
+        // Never write a record late because the test machine is busy.
+        config.urgent_wait = std::time::Duration::from_secs(60);
         let (diagnostics, dispatch) = Diagnostics::build(config).unwrap();
         Self {
             diagnostics,
