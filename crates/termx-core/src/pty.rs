@@ -133,9 +133,9 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 /// Locks a mutex, ignoring poisoning.
 ///
-/// The state guarded by the mutexes of this module is kept consistent by
+/// The state guarded by the mutexes of this crate is kept consistent by
 /// single assignments, so it is still valid after a panic in another thread.
-/// Recovering it keeps the module free of panics of its own.
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+/// Recovering it keeps the crate free of panics of its own.
+pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
