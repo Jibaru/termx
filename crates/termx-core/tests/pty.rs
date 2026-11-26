@@ -352,6 +352,33 @@ fn output_can_be_consumed_without_a_blocking_thread() {
 }
 
 #[test]
+fn panicking_readable_callback_does_not_wedge_the_session() {
+    guarded(|| {
+        // More output than the buffer holds: if the reader thread died with
+        // the callback, the process would block and never exit.
+        let text = "x".repeat(92);
+        let (pty, mut output) =
+            Pty::spawn(&helper(&["repeat", "40000", &text]), PtySize::new(120, 30)).unwrap();
+        output.on_readable(|| panic!("deliberate panic in a test callback"));
+
+        let mut raw = Vec::new();
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            match output.recv_timeout(Duration::from_millis(100)) {
+                Ok(chunk) => raw.extend_from_slice(&chunk),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Closed) => break,
+            }
+            assert!(Instant::now() < deadline, "the stream never ended");
+        }
+
+        assert!(visible_text(&raw).contains("END-OF-OUTPUT"));
+        let status = pty.try_wait().expect("the exit status was never published");
+        assert!(status.success(), "{status}");
+    });
+}
+
+#[test]
 fn utf8_output_survives_chunking() {
     guarded(|| {
         // Two, three and four byte characters, without spaces (ConPTY may

@@ -90,9 +90,25 @@ impl OutputSink {
         state.buffer.extend_from_slice(bytes);
         drop(state);
         self.channel.readable.notify_one();
-        // Called without the lock, so that it may use the output.
         if let Some(callback) = callback {
-            callback();
+            self.notify(&callback);
+        }
+    }
+
+    /// Calls the consumer's callback, without the lock so that it may use
+    /// the output.
+    ///
+    /// The callback is foreign code running on the reader thread. If it
+    /// panicked through here, the thread would die without ever ending the
+    /// stream: the consumer would wait forever and the process would block
+    /// once the buffer is full. The panic is contained instead, and the
+    /// callback is unregistered, since it can no longer be trusted.
+    fn notify(&self, callback: &ReadyCallback) {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback()));
+        if outcome.is_err() {
+            let broken = lock(&self.channel.state).on_readable.take();
+            // Dropped outside the lock: its captures may do anything.
+            drop(broken);
         }
     }
 
@@ -105,7 +121,7 @@ impl OutputSink {
         };
         self.channel.readable.notify_all();
         if let Some(callback) = callback {
-            callback();
+            self.notify(&callback);
         }
     }
 
@@ -201,6 +217,11 @@ impl PtyOutput {
     ///
     /// Registering a callback replaces the previous one.
     ///
+    /// If the callback panics, the panic is contained so that the session
+    /// keeps working, and the callback is unregistered: it is never called
+    /// again. The stream must then be read with [`recv`](Self::recv) or
+    /// after registering a new callback.
+    ///
     /// # Examples
     ///
     /// ```no_run
@@ -290,9 +311,10 @@ impl Drop for PtyOutput {
         let mut state = lock(&self.channel.state);
         state.receiver_dropped = true;
         state.buffer = Vec::new();
-        state.on_readable = None;
+        let callback = state.on_readable.take();
         drop(state);
         self.channel.writable.notify_all();
+        drop(callback);
     }
 }
 
@@ -469,6 +491,53 @@ mod tests {
         let (sink, mut output) = channel();
         sink.finish();
         assert_eq!(count_calls(&mut output).load(SeqCst), 1);
+    }
+
+    #[test]
+    fn panicking_callback_does_not_wedge_the_stream() {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+
+        let (sink, mut output) = channel();
+        let calls = Arc::new(AtomicUsize::new(0));
+        output.on_readable({
+            let calls = Arc::clone(&calls);
+            move || {
+                calls.fetch_add(1, SeqCst);
+                panic!("deliberate panic in a test callback");
+            }
+        });
+
+        // The panic does not reach the producer (the reader thread)...
+        sink.push(b"one");
+        assert_eq!(calls.load(SeqCst), 1);
+        assert_eq!(output.recv_timeout(Duration::ZERO).unwrap(), b"one");
+
+        // ...the callback is not called again...
+        sink.push(b"two");
+        sink.finish();
+        assert_eq!(calls.load(SeqCst), 1);
+        assert_eq!(Arc::strong_count(&calls), 1, "the callback was kept");
+
+        // ...and the stream still delivers everything and ends.
+        assert_eq!(output.recv().unwrap(), b"two");
+        assert_eq!(output.recv(), None);
+
+        // A new callback can be registered afterwards.
+        let (sink, mut output) = channel();
+        output.on_readable(|| panic!("deliberate panic in a test callback"));
+        sink.push(b"x");
+        let calls = count_calls(&mut output);
+        assert_eq!(calls.load(SeqCst), 1, "output is waiting");
+    }
+
+    #[test]
+    fn callback_panicking_at_the_end_of_the_stream_is_contained() {
+        let (sink, mut output) = channel();
+        output.on_readable(|| panic!("deliberate panic in a test callback"));
+
+        sink.finish();
+
+        assert_eq!(output.recv(), None);
     }
 
     #[test]
