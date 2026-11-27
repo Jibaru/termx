@@ -590,6 +590,15 @@ body {
   gap: 6px;
 }
 
+.folder-removed {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
 .folder-picker > .button {
   align-self: flex-start;
 }

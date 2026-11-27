@@ -54,17 +54,37 @@ describe("the new-session dialog", () => {
     ]);
   });
 
-  it("forgets a recent folder", async () => {
+  it("takes a recent folder off the list, with undo, and forgets it when it closes", async () => {
     const view = await open();
 
     const [first] = screen.getAllByTestId("folder-option");
     if (!first) throw new Error("no folder");
     fireEvent.click(within(first).getByTestId("folder-forget"));
+    expect(folders()).toEqual(["api"]);
+    expect(screen.getByTestId("folder-removed")).toHaveTextContent(
+      "Removed app from the recent folders.",
+    );
+    // Nothing is forgotten while it can still be undone.
+    expect(view.callsOf("forgetRecentFolder")).toEqual([]);
+    fireEvent.click(screen.getByTestId("folder-undo"));
+    expect(folders()).toEqual(["app", "api"]);
+
+    fireEvent.keyDown(screen.getByTestId("folder-list"), { key: "Delete" });
+    expect(folders()).toEqual(["api"]);
+    fireEvent.keyDown(screen.getByTestId("folder-list"), { key: "Escape" });
     await flush();
 
     expect(view.callsOf("forgetRecentFolder")).toEqual([["/work/app"]]);
-    view.push({ recentFolders: ["/work/api"] });
-    expect(folders()).toEqual(["api"]);
+  });
+
+  it("does not take a folder off the list on Backspace", async () => {
+    const view = await open();
+
+    fireEvent.keyDown(screen.getByTestId("folder-list"), { key: "Backspace" });
+    fireEvent.keyDown(screen.getByTestId("folder-list"), { key: "Escape" });
+    await flush();
+
+    expect(view.callsOf("forgetRecentFolder")).toEqual([]);
   });
 
   it("takes a folder from the picker of the system, and puts it first", async () => {
