@@ -249,6 +249,27 @@ fn a_silent_connection_is_closed_and_does_not_hold_its_place() {
 }
 
 #[test]
+fn idle_connections_do_not_keep_a_hook_out() {
+    let recorded = start();
+    let server = &recorded.server;
+    // Another process of the user opens 64 connections and sends nothing.
+    let idle: Vec<_> = (0..64).map(|_| raw(server)).collect();
+
+    let started = Instant::now();
+    let response = client::send(
+        server.address(),
+        Request::new(server.ticket(), hook("s-1", "Stop")).to_line(),
+        termx_protocol::hook::HOOK_TIMEOUT,
+    )
+    .unwrap();
+
+    assert!(response.ok);
+    assert!(started.elapsed() < termx_protocol::hook::HOOK_TIMEOUT);
+    assert_eq!(recorded.ops.lock().unwrap().len(), 1);
+    drop(idle);
+}
+
+#[test]
 fn shutting_down_stops_serving() {
     let recorded = start();
     let address = recorded.server.address().to_owned();

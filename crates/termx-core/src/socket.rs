@@ -27,9 +27,15 @@
 //! A line is at most [`MAX_MESSAGE_BYTES`] bytes; a longer one is answered
 //! with `tooLarge` and the connection is closed. At most
 //! [`MAX_CONNECTIONS`] connections are served at once; more wait for a
-//! place (and the hooks give up on their own after a short time). A
-//! connection that sends nothing for [`IDLE_TIMEOUT`] is closed. Input that
-//! is not a request is answered with an error and never stops the server.
+//! place in the backlog of the socket, which the system bounds (128 on
+//! macOS and Linux; a pipe has as many instances as places, plus one), and
+//! the hooks give up on their own after a short time. A connection that
+//! takes longer than [`IDLE_TIMEOUT`] to send a line is closed: a hook
+//! sends its one line at once, so a process that opens connections and
+//! sends nothing holds a place for no longer than that, and there are more
+//! places than a burst of hooks needs. Input that is not a request is
+//! answered with an error and never stops the server. A request without
+//! the right ticket is logged once, then counted (at 10, 100, 1000...).
 //!
 //! # Life of the socket
 //!
@@ -64,10 +70,10 @@ mod windows;
 pub use unix::socket_dir;
 
 /// The most connections served at once.
-pub const MAX_CONNECTIONS: usize = 32;
+pub const MAX_CONNECTIONS: usize = 128;
 
-/// How long a connection may stay silent before it is closed.
-pub const IDLE_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a connection may take to send a line before it is closed.
+pub const IDLE_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// What the server does with the requests it accepted: those that carry
 /// the ticket and a known operation.
@@ -134,6 +140,7 @@ impl Server {
             ticket: ticket.clone(),
             idle_timeout: config.idle_timeout,
             permits: Arc::new(Semaphore::new(config.max_connections.max(1))),
+            refused: std::sync::atomic::AtomicU64::new(0),
         });
 
         #[cfg(unix)]
@@ -214,6 +221,8 @@ struct Shared {
     ticket: String,
     idle_timeout: Duration,
     permits: Arc<Semaphore>,
+    /// Requests refused for their ticket, for the log.
+    refused: std::sync::atomic::AtomicU64,
 }
 
 /// A ticket drawn from the random generator of the system.
@@ -317,6 +326,17 @@ async fn read_line(
 /// connection is closed anyway.
 const DISCARD_LIMIT: usize = 16 * 1024 * 1024;
 
+/// Whether `n` is 10, 100, 1000...
+fn is_power_of_ten(mut n: u64) -> bool {
+    if n < 10 {
+        return false;
+    }
+    while n.is_multiple_of(10) {
+        n /= 10;
+    }
+    n == 1
+}
+
 /// The response to one line, and whether to close the connection after
 /// it.
 fn answer(line: &[u8], shared: &Shared) -> (Response, bool) {
@@ -339,7 +359,16 @@ fn answer(line: &[u8], shared: &Shared) -> (Response, bool) {
         .and_then(serde_json::Value::as_str)
         .is_some_and(|ticket| tickets_match(&shared.ticket, ticket));
     if !ticket_matches {
-        warn!("socket: a request without the right ticket was refused");
+        let refused = shared
+            .refused
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        if refused == 1 || is_power_of_ten(refused) {
+            warn!(
+                refused,
+                "socket: requests without the right ticket were refused"
+            );
+        }
         return refuse(ErrorKind::Unauthorized, "the ticket is missing or wrong");
     }
     request.remove("v");
@@ -385,6 +414,7 @@ mod tests {
             ticket: "0123456789abcdef0123456789abcdef".to_owned(),
             idle_timeout: IDLE_TIMEOUT,
             permits: Arc::new(Semaphore::new(1)),
+            refused: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -448,6 +478,14 @@ mod tests {
         let (response, close) = answer(line.as_bytes(), &shared);
         assert_eq!(response.error.unwrap().kind, ErrorKind::Internal);
         assert!(!close);
+    }
+
+    #[test]
+    fn refusals_are_logged_once_then_counted() {
+        let logged: Vec<u64> = (1..=2000)
+            .filter(|n| *n == 1 || is_power_of_ten(*n))
+            .collect();
+        assert_eq!(logged, [1, 10, 100, 1000]);
     }
 
     #[test]

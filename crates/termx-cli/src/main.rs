@@ -20,7 +20,7 @@ fn main() -> ExitCode {
         Some("hook") => {
             let _ = termx_protocol::hook::run(
                 |name| std::env::var(name).ok(),
-                std::io::stdin().lock(),
+                std::io::stdin(),
                 termx_protocol::parent::claude_process,
             );
             ExitCode::SUCCESS

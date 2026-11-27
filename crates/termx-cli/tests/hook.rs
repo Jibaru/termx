@@ -288,6 +288,39 @@ fn hold_connection(server: &Server) -> Box<dyn std::any::Any> {
 }
 
 #[test]
+fn an_input_that_never_closes_costs_a_quarter_of_a_second() {
+    let (server, ops, _dir) = server(Duration::ZERO, 8);
+    let mut command = Command::new(BINARY);
+    command
+        .arg("hook")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (name, value) in termx_env(&server) {
+        command.env(name, value);
+    }
+    let started = Instant::now();
+    let mut child = command.spawn().unwrap();
+    // Half an event, and the pipe left open.
+    let mut stdin = child.stdin.take().unwrap();
+    stdin
+        .write_all(br#"{"hook_event_name": "Stop", "session_id": "#)
+        .unwrap();
+    stdin.flush().unwrap();
+
+    let output = child.wait_with_output().unwrap();
+
+    assert_silent_success(&output);
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(ops.lock().unwrap().is_empty());
+    drop(stdin);
+}
+
+#[test]
 fn input_that_is_not_an_event_is_ignored_silently() {
     let (server, ops, _dir) = server(Duration::ZERO, 8);
     let env = termx_env(&server);
