@@ -119,6 +119,7 @@ export function pageLibrary() {
     cols: number;
     rows: number;
     onRender(listener: () => void): { dispose(): void };
+    onData(listener: (data: string) => void): { dispose(): void };
     refresh(start: number, end: number): void;
     textarea?: HTMLTextAreaElement;
     element?: HTMLElement;
@@ -369,6 +370,34 @@ export function pageLibrary() {
         });
         terminal.refresh(0, terminal.rows - 1);
       });
+    },
+
+    /**
+     * Starts recording what xterm.js hands the application as input (its
+     * `onData`), which termx writes to the session: what reaching the
+     * program takes, short of the PTY. Replaces an earlier recording.
+     */
+    recordInput(): void {
+      const recorder = window as unknown as {
+        __TERMX_E2E_INPUT__?: { data: string; subscription?: { dispose(): void } };
+      };
+      recorder.__TERMX_E2E_INPUT__?.subscription?.dispose();
+      const recording: { data: string; subscription?: { dispose(): void } } = { data: "" };
+      const subscription = controller().terminal.onData((data) => {
+        recording.data += data;
+      });
+      recording.subscription = subscription;
+      recorder.__TERMX_E2E_INPUT__ = recording;
+    },
+
+    /** The input recorded since `recordInput`, in hexadecimal. */
+    recordedInput(): string {
+      const recording = (window as unknown as { __TERMX_E2E_INPUT__?: { data: string } })
+        .__TERMX_E2E_INPUT__;
+      if (!recording) throw new Error("no input is being recorded");
+      return Array.from(new TextEncoder().encode(recording.data), (byte) =>
+        byte.toString(16).padStart(2, "0"),
+      ).join("");
     },
 
     /** Throws an error nothing catches, outside the script that asks for it. */

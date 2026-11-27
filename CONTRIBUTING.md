@@ -249,7 +249,9 @@ If a test shows a bug in the application that is not fixed in the same pull
 request, keep the test and mark it `it.fails`, with a comment that says what
 is wrong and links to where it is explained. Do not skip it and do not weaken
 it: the test starts failing when the bug is fixed, which is the reminder to
-remove the mark. `specs/ctrl-c.e2e.ts` has one.
+remove the mark. Check everything up to the bug in a test of its own, before
+the one marked: in a test marked `it.fails`, any failure passes, a timeout or
+a helper that never started included. `specs/ctrl-c.e2e.ts` has one.
 
 ## Code style
 
