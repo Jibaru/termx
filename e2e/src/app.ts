@@ -7,6 +7,7 @@ import {
   openSync,
   readFileSync,
   rmSync,
+  writeFileSync,
 } from "node:fs";
 import { mkdtemp, readdir, readFile } from "node:fs/promises";
 import { createServer } from "node:net";
@@ -203,7 +204,8 @@ export class App {
    * Anything else fails the test: an application that exits while it
    * starts, with what it printed and logged; a server that never answers;
    * and everything after a WebDriver session exists (a page that does not
-   * load, a window that stays empty, a shell that does not start).
+   * load, a window that stays empty, a shell that does not start), with a
+   * description of the page (`captureStartupDiagnostics`).
    */
   static async launch(name: string, options: LaunchOptions = {}): Promise<App> {
     const binary = binaryPath();
@@ -247,8 +249,9 @@ export class App {
         await app.terminal.waitForPrompt();
         return app;
       } catch (error) {
+        const diagnostics = await app.captureStartupDiagnostics();
         await app.dispose();
-        throw error;
+        throw new Error(`${String(error)}\n\n${diagnostics}`, { cause: error });
       }
     }
   }
@@ -329,6 +332,33 @@ export class App {
       removeHome(home);
       throw error;
     }
+  }
+
+  /**
+   * Describes the page and the terminal, when the application started but
+   * its terminal did not get to a prompt: what helps to tell a page that
+   * never ran, a window the system throttles (hidden, unfocused), a session
+   * whose output never reached xterm.js, and a shell that did not start.
+   * Writes it next to the logs of the run and returns it, with the last
+   * lines of the log, to be attached to the failure.
+   */
+  async captureStartupDiagnostics(): Promise<string> {
+    const answer = await Promise.race([
+      this.terminal.diagnostics().catch((error: unknown) => ({ unavailable: String(error) })),
+      delay(20_000).then(() => ({ unavailable: "the page did not answer within 20 s" })),
+    ]);
+    const diagnostics = { process: this.exitInfo() ?? "running", page: answer };
+    const path = join(this.artifactsDir, "startup-diagnostics.json");
+    try {
+      writeFileSync(path, JSON.stringify(diagnostics, null, 2));
+    } catch {
+      // The description is in the message of the failure as well.
+    }
+    return [
+      `Startup diagnostics (also in ${path}):`,
+      JSON.stringify(diagnostics, null, 2),
+      outputOfRun(join(this.artifactsDir, "app-output.log"), this.logDir),
+    ].join("\n");
   }
 
   /** The directory of this run under `artifacts/`. */

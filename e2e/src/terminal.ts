@@ -5,6 +5,7 @@ import {
   type Drawing,
   type KeyEvent,
   PAGE_LIBRARY_NAME,
+  type PageDiagnostics,
   type PageLayout,
   type PageLibrary,
   pageLibrary,
@@ -117,6 +118,10 @@ export class Terminal {
     const id = `${prefix}${String(this.nextId)}x${Math.random().toString(36).slice(2, 8)}`;
     this.nextId += 1;
     return id;
+  }
+
+  diagnostics(): Promise<PageDiagnostics> {
+    return this.call("diagnostics");
   }
 
   isReady(): Promise<boolean> {

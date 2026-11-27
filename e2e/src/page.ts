@@ -50,6 +50,32 @@ export interface TerminalState {
   bufferLength: number;
 }
 
+/**
+ * What the page and its terminal look like, described without failing when
+ * the terminal is not there: attached to a start that did not get to a
+ * prompt (see `App.captureStartupDiagnostics`).
+ */
+export interface PageDiagnostics {
+  readyState: DocumentReadyState;
+  /** A hidden page can be throttled by the webview. */
+  visibilityState: DocumentVisibilityState;
+  hasFocus: boolean;
+  /** Whether the frontend exposed its terminals (`e2eHook.ts`). */
+  hook: "missing" | "marker only" | "installed";
+  /** What went wrong reading the terminal, if it could not be read. */
+  terminalError?: string;
+  status?: TerminalStatus;
+  cols?: number;
+  rows?: number;
+  renderer?: "webgl" | "dom";
+  /** Lines in the buffer of xterm.js, scrollback included, blank or not. */
+  bufferLength?: number;
+  /** Lines of the buffer with something other than blanks: 0 is a blank terminal. */
+  nonBlankLines?: number;
+  /** The last of those, at most 20. */
+  lastLines?: string[];
+}
+
 export interface Rect {
   x: number;
   y: number;
@@ -162,6 +188,37 @@ export function pageLibrary() {
   }
 
   return {
+    /** Describes the page and its terminal, and never fails. */
+    diagnostics(): PageDiagnostics {
+      const marker = (window as unknown as { __TERMX_E2E__?: unknown }).__TERMX_E2E__;
+      const result: PageDiagnostics = {
+        readyState: document.readyState,
+        visibilityState: document.visibilityState,
+        hasFocus: document.hasFocus(),
+        hook: marker === undefined ? "missing" : marker === true ? "marker only" : "installed",
+      };
+      try {
+        const active = controller();
+        const terminal = active.terminal;
+        result.status = active.getStatus();
+        result.cols = terminal.cols;
+        result.rows = terminal.rows;
+        result.renderer = active.renderer;
+        const buffer = terminal.buffer.active;
+        result.bufferLength = buffer.length;
+        const nonBlank: string[] = [];
+        for (let index = 0; index < buffer.length; index += 1) {
+          const text = buffer.getLine(index)?.translateToString(true) ?? "";
+          if (text.trim() !== "") nonBlank.push(text);
+        }
+        result.nonBlankLines = nonBlank.length;
+        result.lastLines = nonBlank.slice(-20);
+      } catch (error) {
+        result.terminalError = String(error);
+      }
+      return result;
+    },
+
     /** Whether the application has put a terminal on screen. */
     isReady(): boolean {
       try {
