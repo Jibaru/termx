@@ -525,6 +525,23 @@ export class TerminalController implements WebglHolder {
       });
   }
 
+  /**
+   * Gives a new Windows pseudo-console the blank screen it assumes.
+   *
+   * ConPTY paints its screen with absolute cursor positions, counted from a
+   * screen that starts empty with the cursor at the top. When the terminal
+   * already shows something (a notice, the output of a previous process),
+   * everything it paints lands that many rows off: its prompt overwrites
+   * an earlier line and what is typed is drawn in the wrong place. So what
+   * is on screen is scrolled into the scrollback first, where it stays,
+   * and the cursor goes to the top.
+   */
+  private clearScreenForConpty(): void {
+    const buffer = this.terminal.buffer.active;
+    if (buffer.baseY === 0 && buffer.cursorY === 0 && buffer.cursorX === 0) return;
+    this.terminal.write(`${"\r\n".repeat(this.terminal.rows)}\x1b[H`);
+  }
+
   /** The session runs in `started`: talk to it. */
   private connected(started: StartedSession): void {
     if (started.windowsBuildNumber !== null) {
@@ -552,6 +569,7 @@ export class TerminalController implements WebglHolder {
     this.terminalId = null;
     this.unacknowledged = 0;
     this.pendingInput.length = 0;
+    if (this.platform === "windows") this.clearScreenForConpty();
     const size = { cols: this.terminal.cols, rows: this.terminal.rows };
     this.sessionSize = size;
     this.setStatus({ kind: "starting" });
