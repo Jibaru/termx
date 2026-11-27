@@ -290,12 +290,28 @@ fn a_session_is_started_driven_and_closed() {
     assert_ne!(restarted["terminal"], started["terminal"]);
     assert_eq!(app.state_of(&id), SessionState::Running);
 
-    app.ok("session_close", json!({ "id": id }));
+    // A running session is not removed by mistake; stopped, it is.
+    let refused = app
+        .invoke("session_remove", json!({ "id": id }))
+        .unwrap_err();
+    assert_eq!(refused["command"], "session_remove");
+    app.ok("session_stop", json!({ "id": id }));
+    assert_eq!(app.state_of(&id), SessionState::Dormant);
+    app.ok("session_stop", json!({ "id": id }));
+    let again = app.ok(
+        "session_start",
+        json!({ "id": id, "request": { "mode": "resume", "cols": 80, "rows": 24 }, "onEvent": channel(4) }),
+    );
+    assert_ne!(again["terminal"], restarted["terminal"]);
+    app.ok("session_stop", json!({ "id": id }));
+    app.ok("session_remove", json!({ "id": id }));
     assert_eq!(
         app.ok("workspace_snapshot", json!({}))["sessions"],
         json!([])
     );
-    // Late calls for a terminal that is gone are not failures.
+    // Closing it now, or late calls for a terminal that is gone, are not
+    // failures.
+    app.ok("session_close", json!({ "id": id }));
     app.ok("session_write", json!({ "id": terminal, "data": "x" }));
     app.ok("session_ack", json!({ "id": terminal, "bytes": 1 }));
 }

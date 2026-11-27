@@ -114,8 +114,9 @@ pub enum SessionKind {
 #[serde(tag = "status", rename_all = "camelCase")]
 #[non_exhaustive]
 pub enum SessionState {
-    /// Restored from the previous run of the application: nothing runs yet.
-    /// The session can be resumed or restarted.
+    /// Nothing runs: the session was restored from the previous run of the
+    /// application, or stopped. It can be resumed or restarted. A restored
+    /// session is never started on its own: only when the user asks.
     Dormant,
     /// The session was created or its start was requested, and its process
     /// is not running yet.

@@ -1617,3 +1617,40 @@ fn layout_operations_go_through_the_workspace_and_are_validated() {
     ));
     assert_eq!(workspace.layout(), before);
 }
+
+#[test]
+fn a_session_can_be_stopped_and_then_removed() {
+    let folders = Folders::new();
+    let workspace = Workspace::open(quiet(None));
+    let id = create(&workspace, SessionKind::Background, &folders.make("app")).id;
+    let launch = workspace.begin_launch(&id, LaunchMode::Fresh).unwrap();
+    assert!(workspace.terminal_started(&id, launch.generation, 9));
+
+    // A running session is not removed by mistake.
+    assert_eq!(
+        workspace.remove_session(&id),
+        Err(WorkspaceError::SessionRunning(id.clone()))
+    );
+    assert!(workspace.session(&id).is_some());
+
+    // Stopping keeps it, with nothing running.
+    assert_eq!(workspace.stop_session(&id), Ok(Some(9)));
+    let stopped = workspace.session(&id).unwrap();
+    assert_eq!(stopped.state, SessionState::Dormant);
+    assert_eq!(stopped.terminal_id, None);
+    assert_eq!(workspace.stop_session(&id), Ok(None), "already stopped");
+    // What the old terminal says afterwards is ignored.
+    workspace.terminal_exited(&id, launch.generation, &ExitStatus::from_code(1));
+    assert_eq!(workspace.session(&id).unwrap().state, SessionState::Dormant);
+
+    // It can be started again, and removed once stopped.
+    let again = workspace.begin_launch(&id, LaunchMode::Resume).unwrap();
+    assert!(workspace.terminal_started(&id, again.generation, 10));
+    assert_eq!(workspace.stop_session(&id), Ok(Some(10)));
+    assert_eq!(workspace.remove_session(&id), Ok(()));
+    assert!(workspace.session(&id).is_none());
+    assert_eq!(
+        workspace.stop_session(&id),
+        Err(WorkspaceError::UnknownSession(id.clone()))
+    );
+}

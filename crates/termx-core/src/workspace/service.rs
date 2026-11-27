@@ -194,6 +194,9 @@ pub enum WorkspaceError {
     /// No project has this key.
     #[error("no such project")]
     UnknownProject,
+    /// The session has a process: stop it first.
+    #[error("the session {0} is running; stop it first")]
+    SessionRunning(SessionKey),
     /// The folder does not exist or is not a directory.
     #[error("the folder {} does not exist or is not a folder", .0.display())]
     FolderNotFound(PathBuf),
@@ -1345,6 +1348,57 @@ impl Workspace {
         })
     }
 
+    /// Stops a session without removing it: it becomes
+    /// [`Dormant`](SessionState::Dormant), keeps its place, its name and
+    /// its conversation, and can be started again, fresh or resuming.
+    /// Returns the terminal it was running in, which the caller must close;
+    /// `None` for a session that was not running, which is left as it is.
+    ///
+    /// # Errors
+    ///
+    /// [`WorkspaceError::UnknownSession`].
+    pub fn stop_session(&self, key: &SessionKey) -> Result<Option<u64>, WorkspaceError> {
+        let (terminal, moved) = self.shared.mutate(|state, mutation| {
+            let entry = state.entry(key)?;
+            if !entry.session.state.is_active() {
+                return Ok::<_, WorkspaceError>((None, false));
+            }
+            // Whatever the old terminal still reports is not news.
+            entry.generation += 1;
+            entry.launch = None;
+            entry.session.warning = None;
+            entry.session.state = SessionState::Dormant;
+            let terminal = entry.session.terminal_id.take();
+            mutation.changes.session(key);
+            Ok((terminal, entry.session.live_cwd.take().is_some()))
+        })?;
+        if moved {
+            self.refresh_git();
+        }
+        info!(session = %key, "session stopped");
+        Ok(terminal)
+    }
+
+    /// Removes a session that is not running, for good, and empties the
+    /// pane that showed it. To end a running one at the same time, use
+    /// [`close_session`](Self::close_session).
+    ///
+    /// # Errors
+    ///
+    /// [`WorkspaceError::UnknownSession`], and
+    /// [`WorkspaceError::SessionRunning`] for a session that is starting
+    /// or running, which is left as it is.
+    pub fn remove_session(&self, key: &SessionKey) -> Result<(), WorkspaceError> {
+        let session = self
+            .session(key)
+            .ok_or_else(|| WorkspaceError::UnknownSession(key.clone()))?;
+        if session.state.is_active() {
+            return Err(WorkspaceError::SessionRunning(key.clone()));
+        }
+        self.remove_if(key, |session| !session.state.is_active())
+            .map(|_| ())
+    }
+
     /// Removes a session for good, and empties the pane that showed it.
     /// Returns the terminal it was running in, which the caller must
     /// close.
@@ -1353,8 +1407,20 @@ impl Workspace {
     ///
     /// [`WorkspaceError::UnknownSession`].
     pub fn close_session(&self, key: &SessionKey) -> Result<Option<u64>, WorkspaceError> {
+        self.remove_if(key, |_| true)
+    }
+
+    /// Removes the session `key` if `allowed` says so, under the lock.
+    fn remove_if(
+        &self,
+        key: &SessionKey,
+        allowed: impl FnOnce(&Session) -> bool,
+    ) -> Result<Option<u64>, WorkspaceError> {
         let terminal = self.shared.mutate(|state, mutation| {
             let position = state.position(key)?;
+            if !allowed(&state.entries[position].session) {
+                return Err(WorkspaceError::SessionRunning(key.clone()));
+            }
             let entry = state.entries.remove(position);
             if state.layout.remove_session(key) {
                 mutation.changes.layout = true;

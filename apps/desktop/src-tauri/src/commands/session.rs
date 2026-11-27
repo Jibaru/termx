@@ -250,6 +250,42 @@ pub fn session_close(
     })
 }
 
+/// Stops a session without removing it: its process is killed and it
+/// becomes `dormant`, keeping its place, its name and its conversation.
+/// Start it again with [`session_start`]. Stopping a session that is not
+/// running does nothing.
+///
+/// Runs on a thread that may block, like [`session_close`].
+///
+/// # Errors
+///
+/// Fails when the session does not exist.
+#[tauri::command(async)]
+pub fn session_stop(
+    terminals: State<'_, TerminalState>,
+    state: State<'_, WorkspaceState>,
+    id: SessionKey,
+) -> CommandResult<()> {
+    logged("session_stop", || {
+        if let Some(terminal) = state.workspace().stop_session(&id)? {
+            terminals.close(SessionId::from_raw(terminal));
+        }
+        Ok::<_, WorkspaceError>(())
+    })
+}
+
+/// Removes a session that is not running: it leaves the sidebar and its
+/// pane. A running session is refused, so that a process is never ended by
+/// mistake: stop it first, or use [`session_close`].
+///
+/// # Errors
+///
+/// Fails when the session does not exist, or is starting or running.
+#[tauri::command]
+pub fn session_remove(state: State<'_, WorkspaceState>, id: SessionKey) -> CommandResult<()> {
+    logged("session_remove", || state.workspace().remove_session(&id))
+}
+
 /// Records the title a program set for its terminal (OSC 0 and 2), as
 /// xterm.js reports it. It becomes the title of the session unless the
 /// user named it.

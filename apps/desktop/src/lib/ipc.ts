@@ -491,6 +491,25 @@ export function closeSession(id: SessionId): Promise<void> {
 }
 
 /**
+ * Stops a session without removing it: its process is killed and it
+ * becomes `dormant`, keeping its place, name and conversation. Start it
+ * again with `startSession` (`resume` to carry on). Stopping a session that
+ * is not running does nothing.
+ */
+export function stopSession(id: SessionId): Promise<void> {
+  return call("session_stop", { id });
+}
+
+/**
+ * Removes a session that is not running from the sidebar and its pane.
+ * Rejects for a running one (kind `sessionRunning`): stop it first, or use
+ * `closeSession`.
+ */
+export function removeSession(id: SessionId): Promise<void> {
+  return call("session_remove", { id });
+}
+
+/**
  * Tells the Rust side the title a program set for its terminal, as
  * xterm.js reports it (`onTitleChange`). It becomes the title of the
  * session unless the user named it.
