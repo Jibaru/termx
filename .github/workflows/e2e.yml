@@ -96,9 +96,50 @@ jobs:
       # which build without it. Once is enough: it is the same everywhere.
       - name: Check the test-only code of the application
         if: runner.os == 'Linux'
+        env:
+          TERMX_ALLOW_E2E: "1"
         run: |
           cargo clippy -p termx-desktop --all-targets --features e2e,tauri/custom-protocol --locked -- -D warnings
           cargo test -p termx-desktop --features e2e,tauri/custom-protocol --locked --lib e2e::
+
+      # The `e2e` feature embeds a WebDriver server, which must never ship.
+      # The application refuses to compile it (apps/desktop/src-tauri/src/lib.rs
+      # and build.rs): this checks that it does, and for the expected reason,
+      # since any other compile error would also make the build fail.
+      - name: Check that a release build cannot include the test-only code
+        if: runner.os == 'Linux'
+        run: |
+          expect_refusal() {
+            local reason="$1"
+            shift
+            echo "::group::$* (expected to fail: $reason)"
+            local output status=0
+            output=$("$@" 2>&1) || status=$?
+            echo "$output"
+            echo "::endgroup::"
+            if ((status == 0)); then
+              echo "::error::'$*' succeeded: the e2e feature was compiled"
+              return 1
+            fi
+            if ! grep -qF -- "$reason" <<<"$output"; then
+              echo "::error::'$*' failed, but not with: $reason"
+              return 1
+            fi
+            echo "Refused as expected: $*" | tee -a "$GITHUB_STEP_SUMMARY"
+          }
+          # A release build, even when it is allowed explicitly.
+          expect_refusal "cannot be enabled in a release build" \
+            env TERMX_ALLOW_E2E=1 \
+            cargo check --release -p termx-desktop --features e2e --locked
+          # A build that inherits from `release`, with debug assertions on.
+          expect_refusal "only for the builds of the end-to-end suite" \
+            env TERMX_ALLOW_E2E=1 CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true \
+            cargo check --release -p termx-desktop --features e2e --locked
+          # A debug build that did not come from `pnpm e2e:build`, such as
+          # `tauri build --debug --features e2e`.
+          expect_refusal "only for the builds of the end-to-end suite" \
+            env -u TERMX_ALLOW_E2E \
+            cargo check -p termx-desktop --features e2e,tauri/custom-protocol --locked
 
       # A failed test is never run again: only starting the application is
       # (see e2e/src/app.ts), and every repeated start is reported below.
