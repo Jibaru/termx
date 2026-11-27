@@ -115,6 +115,17 @@ pub enum PersistenceMode {
     },
     /// The workspace was opened without a directory. Nothing is saved.
     Memory,
+    /// This instance owns the state file, but saving it fails, for example
+    /// because the disk is full: the changes made since `since` are not
+    /// saved. Saving is tried again, and the mode goes back to
+    /// [`Primary`](Self::Primary) as soon as a save succeeds. A frontend
+    /// warns the user while it lasts.
+    Failing {
+        /// Why, for the user: the error of the last save that failed.
+        reason: String,
+        /// When saving started to fail, in milliseconds since 1970.
+        since: u64,
+    },
 }
 
 /// The position and size of the window, in logical pixels.

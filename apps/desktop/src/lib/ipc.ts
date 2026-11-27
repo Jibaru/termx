@@ -274,12 +274,22 @@ export interface Layout {
  * Whether the workspace is saved between runs.
  *
  * - `primary`: yes.
+ * - `failing`: it should be, but saving fails (a full disk, for example):
+ *   the changes made since `since` are not saved. termx keeps trying and
+ *   goes back to `primary` once a save works. Warn the user while it lasts.
  * - `secondary`: no, because another termx is running and owns the state.
  * - `disabled`: no, because the state file could not be used (`reason`).
  * - `memory`: no, because there is nowhere to save it.
  */
 export type PersistenceMode =
   | { mode: "primary" }
+  | {
+      mode: "failing";
+      /** The error of the last save, for the user. */
+      reason: string;
+      /** When saving started to fail, in milliseconds since 1970. */
+      since: number;
+    }
   | { mode: "secondary" }
   | { mode: "disabled"; reason: string }
   | { mode: "memory" };
@@ -313,6 +323,8 @@ export interface WorkspaceDelta {
   projects: Project[] | null;
   layout: Layout | null;
   recentFolders: string[] | null;
+  /** Whether the workspace is saved, when that changed. */
+  persistence: PersistenceMode | null;
 }
 
 /**
@@ -353,7 +365,7 @@ export function applyWorkspaceDelta(
     projects: delta.projects ?? snapshot.projects,
     layout: delta.layout ?? snapshot.layout,
     recentFolders: delta.recentFolders ?? snapshot.recentFolders,
-    persistence: snapshot.persistence,
+    persistence: delta.persistence ?? snapshot.persistence,
   };
 }
 

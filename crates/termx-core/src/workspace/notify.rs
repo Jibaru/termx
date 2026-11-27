@@ -40,6 +40,9 @@ pub struct ChangeSet {
     pub session_order: bool,
     /// Whether the recent folders changed.
     pub recent_folders: bool,
+    /// Whether the persistence mode changed: saving started or stopped
+    /// failing.
+    pub persistence: bool,
 }
 
 impl ChangeSet {
@@ -52,6 +55,7 @@ impl ChangeSet {
             && !self.projects
             && !self.session_order
             && !self.recent_folders
+            && !self.persistence
     }
 
     /// Records that `session` was added or changed.
@@ -72,6 +76,7 @@ impl ChangeSet {
         self.projects |= later.projects;
         self.session_order |= later.session_order;
         self.recent_folders |= later.recent_folders;
+        self.persistence |= later.persistence;
     }
 }
 
