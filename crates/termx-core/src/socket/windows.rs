@@ -263,6 +263,32 @@ mod tests {
         }
     }
 
+    /// The SID, as text, of a trustee of SDDL: a SID or an alias.
+    fn sid_of(trustee: &str) -> String {
+        use windows_sys::Win32::Security::Authorization::ConvertStringSidToSidW;
+        use windows_sys::Win32::Security::PSID;
+
+        let wide: Vec<u16> = trustee.encode_utf16().chain(Some(0)).collect();
+        let mut sid: PSID = std::ptr::null_mut();
+        // SAFETY: a terminated string; the SID is freed below.
+        assert_ne!(
+            unsafe { ConvertStringSidToSidW(wide.as_ptr(), &raw mut sid) },
+            0,
+            "{trustee}"
+        );
+        let mut text: *mut u16 = std::ptr::null_mut();
+        // SAFETY: a valid SID; the text is freed below.
+        assert_ne!(unsafe { ConvertSidToStringSidW(sid, &raw mut text) }, 0);
+        // SAFETY: a terminated string allocated by the system.
+        unsafe {
+            let length = (0..).take_while(|&i| *text.add(i) != 0).count();
+            let string = String::from_utf16_lossy(std::slice::from_raw_parts(text, length));
+            LocalFree(text.cast());
+            LocalFree(sid);
+            string
+        }
+    }
+
     #[test]
     fn only_the_current_user_may_open_the_pipe() {
         let server = Server::start(
@@ -281,7 +307,14 @@ mod tests {
         let sid = current_user_sid().unwrap();
         assert!(dacl.starts_with("D:P"), "{dacl}");
         assert_eq!(dacl.matches("(A;").count(), 1, "{dacl}");
-        assert!(dacl.contains(&sid), "{dacl} does not name {sid}");
+        // SDDL writes well-known accounts by alias (`LA` for the built-in
+        // Administrator, which CI runs as): compare the SID it stands for.
+        let trustee = dacl
+            .rsplit(';')
+            .next()
+            .and_then(|last| last.strip_suffix(')'))
+            .unwrap();
+        assert_eq!(sid_of(trustee), sid, "{dacl}");
         assert!(!dacl.contains(";WD)") && !dacl.contains(";AN)"), "{dacl}");
     }
 }
