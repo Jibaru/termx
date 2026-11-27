@@ -51,10 +51,16 @@ describe("the first launch with Claude Code", () => {
       expect(changes).toHaveTextContent(change.path);
       expect(changes).toHaveTextContent(change.description);
     }
-    expect(dialog).toHaveTextContent(
-      "Your existing Claude Code hooks and settings are not changed. You can remove the integration at any time",
+    expect(within(dialog).getByTestId("claude-note")).toHaveTextContent(
+      "Existing hooks are kept; termx only adds the entries listed above. You can remove them at any time",
     );
-    expect(document.activeElement).toBe(within(dialog).getByTestId("claude-install"));
+    expect(dialog).toHaveTextContent("You can enable it later from the sidebar.");
+    expect(within(dialog).getByTestId("claude-not-now")).toHaveAccessibleDescription(
+      "Not now? You can enable it later from the sidebar.",
+    );
+    // The safe answer has the focus; Install is a deliberate choice.
+    expect(document.activeElement).toBe(within(dialog).getByTestId("claude-not-now"));
+    expect(within(dialog).getByTestId("claude-install")).toBeEnabled();
     expect(screen.queryByTestId("claude-consent-banner")).toBeNull();
   });
 
@@ -135,11 +141,52 @@ describe("the first launch with Claude Code", () => {
     expect(fake.callsOf("installClaudeIntegration")).toHaveLength(2);
   });
 
-  it("says when it cannot tell what would change", async () => {
+  it("says what the Rust side says about existing settings, when it says something", async () => {
+    const fake = fakeClaude(FIRST_LAUNCH, {
+      previewClaudeIntegration: () => ({
+        ...PREVIEW,
+        note: "Your 2 hooks in settings.json stay as they are.",
+      }),
+    });
+    await renderApp(shell(), { claude: fake });
+
+    const dialog = await openSetupFromBanner();
+
+    expect(within(dialog).getByTestId("claude-note")).toHaveTextContent(
+      "Your 2 hooks in settings.json stay as they are.",
+    );
+  });
+
+  it("does not install before it showed what changes", async () => {
+    let show: () => void = () => undefined;
+    const fake = fakeClaude(FIRST_LAUNCH, {
+      previewClaudeIntegration: () =>
+        new Promise((resolve) => {
+          show = () => {
+            resolve(PREVIEW);
+          };
+        }),
+    });
+    await renderApp(shell(), { claude: fake });
+
+    const dialog = await openSetupFromBanner();
+    expect(within(dialog).getByRole("status")).toHaveTextContent("Checking what would change…");
+    expect(within(dialog).getByTestId("claude-install")).toBeDisabled();
+    expect(within(dialog).queryByTestId("claude-note")).toBeNull();
+
+    show();
+    await flush();
+    expect(within(dialog).getByTestId("claude-install")).toBeEnabled();
+  });
+
+  it("says when it cannot tell what would change, keeps Install off, and retries", async () => {
+    let attempts = 0;
     const fake = fakeClaude(FIRST_LAUNCH, {
       previewClaudeIntegration: () => {
+        attempts += 1;
         // eslint-disable-next-line @typescript-eslint/only-throw-error -- Tauri rejects with the serialised error.
-        throw failure("internal", "settings.json is not valid JSON");
+        if (attempts === 1) throw failure("internal", "settings.json is not valid JSON");
+        return PREVIEW;
       },
     });
     await renderApp(shell(), { claude: fake });
@@ -149,6 +196,16 @@ describe("the first launch with Claude Code", () => {
     expect(within(dialog).getByRole("alert")).toHaveTextContent(
       "termx could not tell what would change: settings.json is not valid JSON",
     );
+    const install = within(dialog).getByTestId("claude-install");
+    expect(install).toBeDisabled();
+    fireEvent.click(install);
+    await flush();
+    expect(fake.callsOf("installClaudeIntegration")).toEqual([]);
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Retry" }));
+    await flush();
+    expect(within(dialog).getByTestId("claude-changes")).toBeInTheDocument();
+    expect(within(dialog).getByTestId("claude-install")).toBeEnabled();
   });
 });
 

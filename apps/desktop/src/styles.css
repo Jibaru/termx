@@ -1318,7 +1318,8 @@ body {
   font-size: 12px;
 }
 
-.claude-note {
+.claude-note,
+.claude-later {
   font-size: 12px;
 }
 
