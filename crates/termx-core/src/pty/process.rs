@@ -8,7 +8,11 @@ use std::time::{Duration, Instant};
 use portable_pty::{MasterPty, PtyPair, native_pty_system};
 
 use super::output::{self, OutputSink, PtyOutput};
+#[cfg(unix)]
+use super::tree;
 use super::{ExitStatus, PtyCommand, PtyError, PtySize, lock, reader};
+#[cfg(windows)]
+use crate::diagnostics::tracing::warn;
 
 type Master = Box<dyn MasterPty + Send>;
 type Writer = Box<dyn Write + Send>;
@@ -113,21 +117,110 @@ struct ChildControl {
 #[cfg(unix)]
 struct ChildState {
     child: std::process::Child,
-    /// Sends `SIGHUP` to the child.
-    hangup: Box<dyn portable_pty::ChildKiller + Send + Sync>,
-    /// How long the child gets to exit after `SIGHUP` before `SIGKILL`.
+    /// The terminal, to ask it for its foreground process group.
+    master: Arc<std::fs::File>,
+    /// How long the processes get to exit after `SIGHUP` before `SIGKILL`.
     kill_grace: Duration,
-    /// Set by `kill`: when the waiter thread must send `SIGKILL` if the
-    /// process is still alive.
+    /// Set by `kill`: when the waiter thread must send `SIGKILL` to what is
+    /// still alive of the session.
     force_kill_at: Option<Instant>,
 }
+
+#[cfg(unix)]
+impl ChildState {
+    /// The child, which leads the session of the terminal: its identifier
+    /// is also that of the session and of its own process group.
+    fn leader(&self) -> Option<rustix::process::Pid> {
+        rustix::process::Pid::from_raw(i32::try_from(self.child.id()).ok()?)
+    }
+
+    /// The process groups of the session, the child's first. Only called
+    /// while the child has not been reaped (see [`ChildControl`]).
+    fn groups(&self) -> Vec<rustix::process::Pid> {
+        let Some(leader) = self.leader() else {
+            return Vec::new();
+        };
+        let foreground = rustix::termios::tcgetpgrp(&*self.master).ok();
+        tree::groups_of_session(leader, foreground)
+    }
+
+    /// Sends `SIGHUP` to every process group of the session, as closing a
+    /// terminal window does, and `SIGCONT` so that a stopped job sees it.
+    /// The error is that of signalling the group of the child, which is
+    /// the one that must succeed.
+    fn hang_up(&self) -> Result<(), PtyError> {
+        use rustix::process::{Signal, kill_process_group};
+
+        let groups = self.groups();
+        let leader = groups
+            .first()
+            .copied()
+            .ok_or_else(|| PtyError::Kill(std::io::Error::other("invalid process id")))?;
+        kill_process_group(leader, Signal::HUP).map_err(|error| PtyError::Kill(error.into()))?;
+        tree::signal_groups(&groups[1..], Signal::HUP);
+        tree::signal_groups(&groups, Signal::CONT);
+        Ok(())
+    }
+
+    /// Sends `SIGKILL` to the child and to every process group of its
+    /// session.
+    fn kill_session(&mut self) {
+        let groups = self.groups();
+        let _ = self.child.kill();
+        tree::signal_groups(&groups, rustix::process::Signal::KILL);
+    }
+}
+
+/// What is left to do once the child of a terminal that was killed has
+/// exited: the processes it started may still be there (Unix only).
+#[cfg(unix)]
+struct Sweep {
+    /// The identifier of the session, which was the child's.
+    session: rustix::process::Pid,
+    /// When to send `SIGKILL` to what remains.
+    deadline: Instant,
+}
+
+#[cfg(unix)]
+impl Sweep {
+    /// Waits for the processes of the session to exit, and kills those
+    /// still there at the deadline.
+    ///
+    /// The identifier of the session cannot be handed out again while a
+    /// process belongs to it, so it stays valid for as long as there is
+    /// something to kill (see `tree`).
+    fn run(&self) {
+        loop {
+            if !tree::session_has_members(self.session) {
+                return;
+            }
+            let remaining = self.deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                let groups = tree::groups_of_session(self.session, None);
+                tree::signal_groups(&groups, rustix::process::Signal::KILL);
+                return;
+            }
+            thread::sleep(remaining.min(SWEEP_POLL));
+        }
+    }
+}
+
+/// How often the processes left by a killed terminal are checked for
+/// (Unix only).
+#[cfg(unix)]
+const SWEEP_POLL: Duration = Duration::from_millis(20);
 
 /// On Windows a process is addressed by a handle, which stays valid after the
 /// process exits. The waiter thread owns the child and blocks until it exits,
 /// while this independent handle is used to terminate it.
+///
+/// Everything the process starts belongs to `job` as well (see `job.rs`).
 #[cfg(windows)]
 struct ChildControl {
     killer: Mutex<Box<dyn portable_pty::ChildKiller + Send + Sync>>,
+    /// `None` if the system refused to create it: then only the process
+    /// and what is attached to its console are ended.
+    job: Option<super::job::Job>,
 }
 
 /// How long the end of the output stream is held back for the exit status
@@ -279,8 +372,8 @@ impl Pty {
         let (control, reader_task, waiter_task) = {
             let (poke, pokes) = std::sync::mpsc::channel();
             let state = Arc::new(Mutex::new(ChildState {
-                hangup: portable_pty::ChildKiller::clone_killer(&child),
                 child,
+                master: Arc::clone(&streams.master),
                 kill_grace,
                 force_kill_at: None,
             }));
@@ -310,15 +403,29 @@ impl Pty {
             };
             let waiter_task = {
                 let (state, shared) = (Arc::clone(&state), Arc::clone(&shared));
-                move || shared.finish(poll_exit(&state, &pokes))
+                move || {
+                    let (status, sweep) = poll_exit(&state, &pokes);
+                    shared.finish(status);
+                    if let Some(sweep) = sweep {
+                        sweep.run();
+                    }
+                }
             };
             (ChildControl { state, poke }, reader_task, waiter_task)
         };
 
         #[cfg(windows)]
         let (control, reader_task, waiter_task) = {
+            let job = child.as_raw_handle().and_then(|process| {
+                super::job::Job::containing(process)
+                    .map_err(|error| {
+                        warn!(error = %error, "a terminal could not be put in a job; what it starts may outlive it");
+                    })
+                    .ok()
+            });
             let control = ChildControl {
                 killer: Mutex::new(child.clone_killer()),
+                job,
             };
             let reader_task = {
                 let (sink, shared) = (sink.clone(), Arc::clone(&shared));
@@ -425,13 +532,17 @@ impl Pty {
     /// call from an asynchronous context. Use [`wait`](Self::wait) or
     /// [`wait_timeout`](Self::wait_timeout) to observe the exit.
     ///
-    /// On Unix the process is sent `SIGHUP`, as when a terminal window is
-    /// closed, which lets it save its state and exit on its own. If it is
-    /// still alive after the grace period of its command
-    /// ([`PtyCommand::kill_grace`], three seconds by default), it is sent
-    /// `SIGKILL` in the background. On Windows the process is terminated
-    /// immediately, and the remaining processes attached to the console are
-    /// terminated when the console is closed.
+    /// Everything the process started is ended with it, not only the
+    /// process itself. On Unix every process group of its session is sent
+    /// `SIGHUP`, as when a terminal window is closed, which lets programs
+    /// save their state and exit on their own. Whatever is still alive
+    /// after the grace period of the command ([`PtyCommand::kill_grace`],
+    /// three seconds by default), including processes that ignore
+    /// `SIGHUP`, is sent `SIGKILL` in the background. On Windows the
+    /// process and everything it started are terminated immediately. A
+    /// process that leaves on purpose (a daemon that starts a session of
+    /// its own on Unix, or breaks away from the job on Windows) is not
+    /// followed.
     ///
     /// On macOS a process, even a killed one, only finishes exiting once the
     /// output it has already printed has been read from the terminal. If the
@@ -456,7 +567,7 @@ impl Pty {
                 // A second call neither repeats the signal nor postpones the
                 // forced kill.
                 Ok(None) if state.force_kill_at.is_none() => {
-                    let sent = state.hangup.kill().map_err(PtyError::Kill);
+                    let sent = state.hang_up();
                     if sent.is_ok() {
                         state.force_kill_at = Instant::now().checked_add(state.kill_grace);
                     }
@@ -476,6 +587,9 @@ impl Pty {
             // successful `TerminateProcess` as an error and a failed one as
             // success. The only failure mode is a process that has already
             // exited, which is not an error for this method.
+            if let Some(job) = &self.control.job {
+                job.terminate();
+            }
             let _ = lock(&self.control.killer).kill();
             Ok(())
         }
@@ -745,28 +859,46 @@ fn spawn_thread(
 
 /// Waits for the child to exit by polling it, and returns its status. Also
 /// carries out the forced kill requested by [`Pty::kill`].
+///
+/// When the process was killed, also returns what is left to do for the
+/// processes it started.
 #[cfg(unix)]
-fn poll_exit(state: &Mutex<ChildState>, pokes: &std::sync::mpsc::Receiver<()>) -> ExitStatus {
+fn poll_exit(
+    state: &Mutex<ChildState>,
+    pokes: &std::sync::mpsc::Receiver<()>,
+) -> (ExitStatus, Option<Sweep>) {
     use std::sync::mpsc::RecvTimeoutError;
 
     let mut pause = EXIT_POLL_MIN;
+    // Set once the grace period is over and `SIGKILL` was sent.
+    let mut forced = false;
     loop {
         // The lock is released before pausing, so that `kill` can run.
         let until_forced_kill = {
             let mut state = lock(state);
+            let sweep = |state: &ChildState| {
+                let deadline = state.force_kill_at.or(forced.then(Instant::now))?;
+                Some(Sweep {
+                    session: state.leader()?,
+                    deadline,
+                })
+            };
             match state.child.try_wait() {
-                Ok(Some(status)) => return portable_pty::ExitStatus::from(status).into(),
+                Ok(Some(status)) => {
+                    return (portable_pty::ExitStatus::from(status).into(), sweep(&state));
+                }
                 Ok(None) => {}
                 // Something else reaped the process, for example a host
                 // application ignoring `SIGCHLD`. Its status is lost.
-                Err(_) => return ExitStatus::unknown(),
+                Err(_) => return (ExitStatus::unknown(), sweep(&state)),
             }
             let now = Instant::now();
             if state.force_kill_at.is_some_and(|at| at <= now) {
                 // The grace period is over: `SIGKILL`. The process was just
                 // seen alive under the lock, so its id is still ours.
-                let _ = state.child.kill();
+                state.kill_session();
                 state.force_kill_at = None;
+                forced = true;
                 pause = EXIT_POLL_MIN;
             }
             state

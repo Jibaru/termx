@@ -306,11 +306,11 @@ impl PtyCommand {
     /// dropped), before it is killed by force. The default is
     /// [`DEFAULT_KILL_GRACE`].
     ///
-    /// On Unix the process is first sent `SIGHUP`, and `SIGKILL` only if it
-    /// is still running when the grace period is over. A zero duration
-    /// kills by force right away. Killing never blocks whatever the value;
-    /// only dropping the handle waits, and only for a process that ignores
-    /// the first signal.
+    /// On Unix the processes of the terminal are first sent `SIGHUP`, and
+    /// `SIGKILL` only if they are still running when the grace period is
+    /// over. A zero duration kills by force right away. Killing never
+    /// blocks whatever the value; only dropping the handle waits, and only
+    /// for processes that ignore the first signal.
     ///
     /// Windows has no equivalent of the polite signal: the process is
     /// always terminated immediately and this setting is ignored.

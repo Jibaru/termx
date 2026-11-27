@@ -1046,6 +1046,69 @@ fn dropping_the_output_does_not_block_the_process() {
     });
 }
 
+/// Whether a Windows process with this identifier exists.
+#[cfg(windows)]
+fn windows_process_exists(pid: u32) -> bool {
+    let filter = format!("PID eq {pid}");
+    let output = std::process::Command::new("tasklist")
+        .args(["/FI", &filter, "/FO", "CSV", "/NH"])
+        .output()
+        .expect("cannot run tasklist");
+    String::from_utf8_lossy(&output.stdout).contains(&format!("\"{pid}\""))
+}
+
+#[cfg(windows)]
+#[test]
+fn killing_ends_what_the_process_started_outside_its_console() {
+    guarded(|| {
+        // `Start-Process` gives the grandchild a console of its own: closing
+        // the pseudo-console alone does not end it.
+        let command = PtyCommand::new("powershell.exe").args([
+            "-NoLogo",
+            "-NoProfile",
+            "-Command",
+            "$p = Start-Process -PassThru -WindowStyle Hidden powershell.exe \
+             -ArgumentList '-NoProfile','-Command','Start-Sleep 300'; \
+             Write-Output \"grandchild:$($p.Id):\"; Start-Sleep 300",
+        ]);
+        let mut session = Session::spawn(&command);
+        let grandchild = |text: &str| -> Option<u32> {
+            let rest = text.split("grandchild:").nth(1)?;
+            let (pid, _) = rest.split_once(':')?;
+            pid.trim().parse().ok()
+        };
+        let deadline = Instant::now() + TIMEOUT;
+        let pid = loop {
+            if let Some(pid) = grandchild(&session.text()) {
+                break pid;
+            }
+            assert!(
+                session.pump(Duration::from_millis(100)),
+                "{:?}",
+                session.text()
+            );
+            assert!(
+                Instant::now() < deadline,
+                "no process id in {:?}",
+                session.text()
+            );
+        };
+        assert!(windows_process_exists(pid), "the grandchild never ran");
+
+        session.pty.kill().unwrap();
+        let _ = session.exit_status();
+
+        let deadline = Instant::now() + TIMEOUT;
+        while windows_process_exists(pid) {
+            assert!(
+                Instant::now() < deadline,
+                "the grandchild outlived the kill"
+            );
+            thread::sleep(Duration::from_millis(100));
+        }
+    });
+}
+
 #[cfg(unix)]
 #[test]
 fn background_job_holding_the_terminal_does_not_keep_the_session_open() {

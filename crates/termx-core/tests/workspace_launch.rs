@@ -456,3 +456,131 @@ fn a_shell_session_is_an_interactive_shell_in_the_folder() {
         assert_eq!(exit.code(), Some(4), "{shell:?}");
     });
 }
+
+/// The identifiers of the running processes whose command line is exactly
+/// `sleep <seconds>`, found with `pgrep`. Processes that have exited and
+/// wait to be reaped do not count.
+#[cfg(unix)]
+fn sleeping(seconds: u64) -> Vec<u32> {
+    let output = std::process::Command::new("pgrep")
+        .args(["-f", &format!("^sleep {seconds}$")])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse().ok())
+        .filter(|pid: &u32| {
+            let state = std::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", &pid.to_string()])
+                .output()
+                .unwrap();
+            let state = String::from_utf8_lossy(&state.stdout);
+            !state.trim().is_empty() && !state.trim_start().starts_with('Z')
+        })
+        .collect()
+}
+
+/// Background commands that leave processes behind when only the shell is
+/// signalled: a program that ignores `SIGHUP` in the foreground, in a
+/// subshell, behind `nohup`, in the shell itself, and a job in a process
+/// group of its own.
+#[cfg(unix)]
+fn stubborn_commands(base: u64) -> Vec<(u64, String)> {
+    let line = |offset: u64, pattern: &str| {
+        let seconds = base + offset;
+        (seconds, pattern.replace("N", &seconds.to_string()))
+    };
+    vec![
+        line(1, "sh -c 'trap \"\" HUP; sleep N'; echo done"),
+        line(2, "(trap '' HUP; sleep N) & wait"),
+        line(3, "nohup sleep N >/dev/null 2>&1 & wait"),
+        line(4, "trap '' HUP TERM; sleep N; echo x"),
+        line(5, "sleep N & sleep N"),
+        line(6, "sleep N | cat"),
+    ]
+}
+
+/// Starts the stubborn commands through `shell`, waits until each one has
+/// its `sleep` running, ends them with `end`, and checks that nothing is
+/// left.
+#[cfg(unix)]
+fn nothing_outlives(shell: &Shell, base: u64, end: impl FnOnce(&SessionManager, &[SessionId])) {
+    use std::time::Duration;
+
+    let setup = Setup::new();
+    let launcher = Launcher::new(shell.clone());
+    let manager = SessionManager::new().unwrap();
+    let commands = stubborn_commands(base);
+    let mut ids = Vec::new();
+    for (_, line) in &commands {
+        let mut request = setup.request(SessionKind::Background);
+        request.command = Some(line);
+        let command = setup
+            .isolate(launcher.command(&request).unwrap())
+            .kill_grace(Duration::from_millis(500));
+        ids.push(
+            manager
+                .create(&SessionOptions::new(command), Recorder::default())
+                .unwrap(),
+        );
+    }
+    let deadline = Instant::now() + TIMEOUT;
+    for (seconds, line) in &commands {
+        while sleeping(*seconds).is_empty() {
+            assert!(Instant::now() < deadline, "{line:?} never started");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    let started = Instant::now();
+    end(&manager, &ids);
+    let took = started.elapsed();
+
+    // What was killed may still need a moment to be reaped by the system.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    for (seconds, line) in &commands {
+        while !sleeping(*seconds).is_empty() {
+            assert!(
+                Instant::now() < deadline,
+                "{shell:?}: {line:?} left {:?} running",
+                sleeping(*seconds)
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    assert!(took < Duration::from_secs(10), "ending took {took:?}");
+}
+
+/// The shells whose job control and signal handling differ the most.
+#[cfg(unix)]
+fn job_control_shells() -> Vec<Shell> {
+    ["/bin/zsh", "/bin/bash", "/bin/sh"]
+        .into_iter()
+        .filter(|shell| Path::new(shell).is_file())
+        .map(Shell::new)
+        .collect()
+}
+
+#[cfg(unix)]
+#[test]
+fn closing_a_session_ends_everything_it_started() {
+    guarded(|| {
+        for (index, shell) in job_control_shells().iter().enumerate() {
+            let base = 9_871_000 + 100 * index as u64;
+            nothing_outlives(shell, base, |manager, ids| {
+                assert_eq!(manager.close_all(ids), ids.len());
+            });
+        }
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn shutting_down_ends_everything_the_sessions_started() {
+    guarded(|| {
+        for (index, shell) in job_control_shells().iter().enumerate() {
+            let base = 9_872_000 + 100 * index as u64;
+            nothing_outlives(shell, base, |manager, _| manager.shutdown());
+        }
+    });
+}

@@ -4312,6 +4312,7 @@ version = "0.0.0"
 dependencies = [
  "filedescriptor",
  "flate2",
+ "libc",
  "os_info",
  "portable-pty",
  "rlimit",
@@ -4326,6 +4327,7 @@ dependencies = [
  "tracing",
  "tracing-log",
  "tracing-subscriber",
+ "windows-sys 0.61.2",
  "zip",
 ]
 

@@ -37,12 +37,28 @@ zip = { version = "9.8.2", default-features = false, features = ["deflate-flate2
 [target.'cfg(unix)'.dependencies]
 filedescriptor = "0.8.3"
 rlimit = "0.12"
-# The effective user id, to check who owns the log files. Already part of the
-# dependency tree.
-rustix = { version = "1.1.6", features = ["process"] }
+# The effective user id, to check who owns the log files, and the process
+# groups and sessions of terminals, to end everything a terminal started.
+# Already part of the dependency tree.
+rustix = { version = "1.1.6", features = ["process", "termios"] }
+
+# Lists the processes of the system on macOS, to find what a terminal
+# started (`proc_listallpids`). Already part of the dependency tree.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2.191"
 
 [dev-dependencies]
 tempfile = "3.27.0"
+
+# Job objects, so that closing a terminal ends everything it started.
+# Already part of the dependency tree.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
 
 # Lets a Windows test observe the raw console, to check what the PTY layer
 # does with its start-up query.
