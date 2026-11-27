@@ -86,5 +86,15 @@ jobs:
       - name: Test Rust
         run: cargo test --workspace --locked
 
+      # The hook sender runs for every event of every Claude Code session:
+      # print how long it takes on this platform, in the summary as well.
+      - name: Measure the start of the hook sender
+        shell: bash
+        run: |
+          cargo test -p termx-cli --locked --test hook -- --nocapture --test-threads=1 _quickly_ _at_once_ 2>&1 \
+            | grep -oE 'hook (inside|outside) termx.*runs' \
+            | sed "s/^/${RUNNER_OS}: /" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: Build desktop crate
         run: cargo build -p termx-desktop --locked

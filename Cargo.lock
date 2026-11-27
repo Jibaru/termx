@@ -4580,6 +4580,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "termx-cli"
+version = "0.0.0"
+dependencies = [
+ "serde_json",
+ "tempfile",
+ "termx-core",
+ "termx-protocol",
+]
+
+[[package]]
 name = "termx-core"
 version = "0.0.0"
 dependencies = [
