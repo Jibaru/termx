@@ -291,8 +291,9 @@ pub fn default_title(kind: SessionKind, command: Option<&str>) -> String {
     }
 }
 
-/// Makes a title or a name fit to be shown: control characters are
-/// removed, white space is collapsed and the result is cut at
+/// Makes a title or a name fit to be shown: control characters and
+/// invisible formatting characters ([`is_invisible_format`]) are removed,
+/// white space is collapsed and the result is cut at
 /// [`MAX_TITLE_CHARS`]. With `strip_status`, the glyph Claude Code puts in
 /// front of its title to show that it is working is removed as well, so
 /// that its animation does not count as a change of title.
@@ -305,7 +306,7 @@ pub fn clean_title(raw: &str, strip_status: bool) -> Option<String> {
     for c in raw.chars() {
         if c.is_whitespace() {
             pending_space = !text.is_empty();
-        } else if !c.is_control() {
+        } else if !c.is_control() && !is_invisible_format(c) {
             if pending_space {
                 text.push(' ');
                 pending_space = false;
@@ -328,6 +329,29 @@ pub fn clean_title(raw: &str, strip_status: bool) -> Option<String> {
     let cut: String = rest.chars().take(MAX_TITLE_CHARS).collect();
     let cut = cut.trim_end();
     (!cut.is_empty()).then(|| cut.to_owned())
+}
+
+/// Whether `c` is an invisible character that changes how the text around
+/// it is shown: the bidirectional embeddings, overrides, isolates and
+/// marks, zero-width spaces and word joiners, the byte order mark and the
+/// soft hyphen. A program could use them to make its title look like
+/// another, or to reverse what the sidebar shows after it. The zero-width
+/// joiner and non-joiner stay: emoji sequences and several scripts need
+/// them.
+fn is_invisible_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}'
+            | '\u{061C}'
+            | '\u{180E}'
+            | '\u{200B}'
+            | '\u{200E}'
+            | '\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{FEFF}'
+    )
 }
 
 /// Whether `c` is one of the marks Claude Code animates in front of its
@@ -469,6 +493,38 @@ mod tests {
                 .count(),
             MAX_TITLE_CHARS
         );
+    }
+
+    #[test]
+    fn titles_cannot_reorder_or_hide_text() {
+        // A right-to-left override would show "gpj.exe" as "exe.jpg".
+        assert_eq!(
+            clean_title("invoice\u{202E}gpj.exe", false).unwrap(),
+            "invoicegpj.exe"
+        );
+        for c in [
+            '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{2066}', '\u{2067}', '\u{2068}',
+            '\u{2069}', '\u{200B}', '\u{200E}', '\u{200F}', '\u{061C}', '\u{FEFF}', '\u{2060}',
+            '\u{00AD}',
+        ] {
+            assert_eq!(
+                clean_title(&format!("a{c}b"), false).unwrap(),
+                "ab",
+                "{c:?}"
+            );
+        }
+        assert_eq!(clean_title("\u{202E}\u{2066}", false), None);
+        // What emoji and scripts need is kept.
+        assert_eq!(
+            clean_title("👩\u{200D}💻 work", false).unwrap(),
+            "👩\u{200D}💻 work"
+        );
+        assert_eq!(
+            clean_title("می\u{200C}خواهم", false).unwrap(),
+            "می\u{200C}خواهم"
+        );
+        // Text in a right-to-left script itself is untouched.
+        assert_eq!(clean_title("שלום עולם", false).unwrap(), "שלום עולם");
     }
 
     #[test]
