@@ -717,13 +717,37 @@ describe("after the page was reloaded", () => {
     );
 
     expect(view.of("s-shown")?.autoStart).toBe("reattach");
-    expect(view.of("s-hidden")?.reattach).toHaveBeenCalledTimes(1);
+    // The one off the screen shows as running, and is attached shortly.
+    expect(within(row("s-hidden")).getByTestId("session-status")).toHaveTextContent("Running");
+    await waitFor(() => {
+      expect(view.of("s-hidden")?.reattach).toHaveBeenCalledTimes(1);
+    });
     for (const id of ["s-shown", "s-hidden"]) {
       expect(view.of(id)?.startDetached).not.toHaveBeenCalled();
     }
     expect(screen.queryByTestId("pane-notice")).toBeNull();
     expect(screen.queryByTestId("restore-banner")).toBeNull();
     expect(within(row("s-shown")).getByTestId("session-status")).toHaveTextContent("Running");
+  });
+
+  it("attaches to those on screen first, and to the others a few at a time", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const hidden = Array.from({ length: 10 }, (_, index) =>
+      running(`s-h${String(index)}`, { terminalId: 10 + index }),
+    );
+    const view = await renderApp(workspace([running("s-shown", { terminalId: 3 }), ...hidden]));
+    const attached = () => hidden.filter((each) => view.of(each.id)?.reattach.mock.calls.length);
+
+    expect(view.of("s-shown")?.reattach).toHaveBeenCalledTimes(1);
+    expect(attached()).toHaveLength(0);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(250);
+    });
+    expect(attached()).toHaveLength(4);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(attached()).toHaveLength(10);
   });
 
   it("never restarts a running session without asking", async () => {

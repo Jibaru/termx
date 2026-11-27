@@ -11,7 +11,13 @@ import {
 import { type SessionStore, sessionToRestore } from "../terminal/sessionStore";
 import { describeCommandError, isLive } from "./describe";
 import { beforeFor, buildSidebar } from "./grouping";
-import { type Direction, neighbourPane, paneOfSession, sessionOfPane } from "./layoutTree";
+import {
+  type Direction,
+  neighbourPane,
+  paneOfSession,
+  sessionOfPane,
+  visibleSessions,
+} from "./layoutTree";
 import type { WorkspaceStore } from "./workspaceStore";
 
 /**
@@ -24,6 +30,11 @@ import type { WorkspaceStore } from "./workspaceStore";
  * (`describeCommandError`). Command errors were logged by the Rust side
  * already; anything else that goes wrong is sent to `reportError`.
  */
+
+/** How many running sessions off the screen are attached to at a time after a reload. */
+export const REATTACH_BATCH = 4;
+/** How long between two such batches. */
+export const REATTACH_INTERVAL_MS = 250;
 
 export interface Notice {
   id: number;
@@ -196,30 +207,40 @@ export class Workbench {
         .map((session) => session.id),
     });
     // Sessions that run already: this page was reloaded. Each is attached
-    // to again, on screen or not, so that none is held back or restarted.
-    for (const session of workspace.sessions) {
-      if (isLive(session) && session.terminalId !== null) this.terminals.reattach(session);
-    }
+    // to again, so that none is held back or restarted: those on screen at
+    // once, the others a few at a time (each repaint is up to 256 KiB and
+    // a redraw of its program). In between they show as running, and one
+    // shown before its turn is attached by its pane.
+    const live = workspace.sessions.filter(
+      (session) => isLive(session) && session.terminalId !== null,
+    );
+    const shown = visibleSessions(workspace.layout);
+    for (const session of live) if (shown.has(session.id)) this.terminals.reattach(session);
+    this.reattachLater(
+      live.filter((session) => !shown.has(session.id)).map((session) => session.id),
+    );
     if (workspace.sessions.length === 0) {
       await this.run("bootstrap", () => this.backend.createSession({ kind: "shell" }));
       return;
     }
-    const shown = new Set<SessionId>();
-    const visit = (node: WorkspaceSnapshot["layout"]["root"]) => {
-      if (node.type === "pane") {
-        if (node.session !== null) shown.add(node.session);
-      } else {
-        visit(node.first);
-        visit(node.second);
-      }
-    };
-    visit(workspace.layout.root);
     const restore = sessionToRestore(workspace);
     if (shown.size === 0 && restore) {
       await this.run("bootstrap", () =>
         this.backend.showSession(workspace.layout.focused, restore.id),
       );
     }
+  }
+
+  /** Attaches to running sessions off the screen, `REATTACH_BATCH` at a time. */
+  private reattachLater(queue: SessionId[]): void {
+    if (queue.length === 0) return;
+    setTimeout(() => {
+      for (const id of queue.slice(0, REATTACH_BATCH)) {
+        const session = this.session(id);
+        if (session && isLive(session)) this.terminals.reattach(session);
+      }
+      this.reattachLater(queue.slice(REATTACH_BATCH));
+    }, REATTACH_INTERVAL_MS);
   }
 
   // --- Sessions --------------------------------------------------------------
