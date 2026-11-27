@@ -333,8 +333,9 @@ pub fn clean_title(raw: &str, strip_status: bool) -> Option<String> {
 
 /// Whether `c` is an invisible character that changes how the text around
 /// it is shown: the bidirectional embeddings, overrides, isolates and
-/// marks, zero-width spaces and word joiners, the byte order mark and the
-/// soft hyphen. A program could use them to make its title look like
+/// marks, zero-width spaces and word joiners, the byte order mark, the
+/// soft hyphen, the Hangul fillers (blank letters that show as nothing) and
+/// the interlinear annotation marks. A program could use them to make its title look like
 /// another, or to reverse what the sidebar shows after it. The zero-width
 /// joiner and non-joiner stay: emoji sequences and several scripts need
 /// them.
@@ -351,6 +352,11 @@ fn is_invisible_format(c: char) -> bool {
             | '\u{2060}'..='\u{2064}'
             | '\u{2066}'..='\u{2069}'
             | '\u{FEFF}'
+            | '\u{115F}'
+            | '\u{1160}'
+            | '\u{3164}'
+            | '\u{FFA0}'
+            | '\u{FFF9}'..='\u{FFFB}'
     )
 }
 
@@ -505,7 +511,8 @@ mod tests {
         for c in [
             '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{2066}', '\u{2067}', '\u{2068}',
             '\u{2069}', '\u{200B}', '\u{200E}', '\u{200F}', '\u{061C}', '\u{FEFF}', '\u{2060}',
-            '\u{00AD}',
+            '\u{00AD}', '\u{115F}', '\u{1160}', '\u{3164}', '\u{FFA0}', '\u{FFF9}', '\u{FFFA}',
+            '\u{FFFB}',
         ] {
             assert_eq!(
                 clean_title(&format!("a{c}b"), false).unwrap(),
@@ -523,6 +530,10 @@ mod tests {
             clean_title("می\u{200C}خواهم", false).unwrap(),
             "می\u{200C}خواهم"
         );
+        // A title made only of blank Hangul letters is no title.
+        assert_eq!(clean_title("\u{3164}\u{3164}", false), None);
+        // Hangul itself is untouched.
+        assert_eq!(clean_title("한국어", false).unwrap(), "한국어");
         // Text in a right-to-left script itself is untouched.
         assert_eq!(clean_title("שלום עולם", false).unwrap(), "שלום עולם");
     }
