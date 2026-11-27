@@ -97,6 +97,8 @@ export class FakeTerminal {
 
   constructor(options: Record<string, unknown> = {}) {
     this.options = { ...options };
+    if (typeof options.cols === "number") this.cols = options.cols;
+    if (typeof options.rows === "number") this.rows = options.rows;
     Object.defineProperty(this.unicode, "activeVersion", {
       get: () => this.version,
       set: (version: string) => {
