@@ -4,9 +4,12 @@ import { useApp } from "../src/fixture.ts";
 import { isAlive } from "../src/processes.ts";
 import { inFront, stepTimer, ticksOf, upTo } from "../src/sessions.ts";
 
-/** How many ticks the program prints, one every `TICK_MS`: long enough to reload in between. */
-const TICKS = 120;
-const TICK_MS = 50;
+/**
+ * How many ticks the program prints, one every `TICK_MS`: 12 s, long
+ * enough for the page to reload in between on a slow machine.
+ */
+const TICKS = 300;
+const TICK_MS = 40;
 
 describe("reloading the page", () => {
   const fixture = useApp("reload");
@@ -23,8 +26,11 @@ describe("reloading the page", () => {
     await terminal.waitForLine("a few ticks", (line) => line === `TICK-${id}:3`);
     step("program running");
 
-    // What a reload of the webview, or its crash and return, does.
-    await app.driver.execute("location.reload(); return true;").catch(() => undefined);
+    // What a reload of the webview, or its crash and return, does. From a
+    // timer, so that the script returns before its page goes away: a
+    // script that reloads its own page gets no answer to WebDriver, which
+    // then waits for its own timeout.
+    await app.driver.execute("setTimeout(() => location.reload(), 50); return true;");
 
     const after = await inFront(
       terminal,
