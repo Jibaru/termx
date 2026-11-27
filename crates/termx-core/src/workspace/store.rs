@@ -330,12 +330,14 @@ impl Store {
         let (PersistenceMode::Primary, Some(dir)) = (&self.mode, &self.dir) else {
             return Ok(false);
         };
-        let comparable = encode(state, 0);
+        // A state that cannot be encoded is never written: the previous
+        // file is worth more than an empty one.
+        let comparable = encode(state, 0)?;
         let mut last_written = lock(&self.last_written);
         if last_written.as_ref() == Some(&comparable) {
             return Ok(false);
         }
-        write_atomic(&dir.join(STATE_FILE), &encode(state, now_ms()))?;
+        write_atomic(&dir.join(STATE_FILE), &encode(state, now_ms())?)?;
         *last_written = Some(comparable);
         Ok(true)
     }
@@ -343,7 +345,11 @@ impl Store {
 
 /// The bytes of a state file. `saved_at` is the only part that does not
 /// depend on `state`.
-fn encode(state: &PersistedState, saved_at: u64) -> Vec<u8> {
+///
+/// # Errors
+///
+/// When a part cannot be encoded, such as a path that is not Unicode.
+fn encode(state: &PersistedState, saved_at: u64) -> io::Result<Vec<u8>> {
     let file = FileOut {
         version: CURRENT_VERSION,
         saved_at,
@@ -357,14 +363,10 @@ fn encode(state: &PersistedState, saved_at: u64) -> Vec<u8> {
             .collect(),
         window: &state.window,
     };
-    let mut bytes = serde_json::to_vec_pretty(&file).unwrap_or_else(|error| {
-        // Every part is plain data: this cannot happen, and an empty state
-        // would be worse than the previous file.
-        warn!(error = %error, "the state could not be encoded");
-        Vec::new()
-    });
+    let mut bytes = serde_json::to_vec_pretty(&file)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     bytes.push(b'\n');
-    bytes
+    Ok(bytes)
 }
 
 enum LockOutcome {
@@ -473,7 +475,9 @@ fn load(
             "some entries of the state file were not valid; a copy was kept and they were dropped"
         );
     }
-    let comparable = (rejected == 0 && version == current).then(|| encode(&state, 0));
+    let comparable = (rejected == 0 && version == current)
+        .then(|| encode(&state, 0).ok())
+        .flatten();
     Ok((state, comparable))
 }
 
@@ -923,6 +927,25 @@ mod tests {
         assert!(!store.save(&sample()).unwrap());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_state_that_cannot_be_encoded_is_not_written() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = Store::open(dir.path());
+        store.save(&sample()).unwrap();
+        let before = fs::read(dir.path().join(STATE_FILE)).unwrap();
+        let mut broken = sample();
+        broken.sessions[0].cwd = PathBuf::from(std::ffi::OsStr::from_bytes(b"/not/\xff/unicode"));
+
+        let error = store.save(&broken).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(fs::read(dir.path().join(STATE_FILE)).unwrap(), before);
+        assert_eq!(files(dir.path()), [STATE_FILE, LOCK_FILE]);
+    }
+
     #[test]
     fn a_crash_in_the_middle_of_a_save_leaves_the_previous_state() {
         for stage in [Stage::PartlyWritten, Stage::Synced] {
@@ -937,7 +960,7 @@ mod tests {
             let mut new = sample();
             new.sessions.clear();
 
-            let crashed = write_atomic_with(&path, &encode(&new, 1), &mut |at| {
+            let crashed = write_atomic_with(&path, &encode(&new, 1).unwrap(), &mut |at| {
                 if at == stage {
                     Err(io::Error::other("power failure"))
                 } else {
@@ -1243,7 +1266,7 @@ mod tests {
             .map(|n| {
                 let mut state = sample();
                 state.project_order = vec![format!("writer-{n}"); 200];
-                encode(&state, n)
+                encode(&state, n).unwrap()
             })
             .collect();
         write_atomic(&path, &states[0]).unwrap();
