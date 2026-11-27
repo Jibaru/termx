@@ -134,6 +134,16 @@ jobs:
   #   export CARGO_ENCODED_RUSTFLAGS="$(.github/scripts/release-rustflags.sh)"
   #
   # See .github/scripts/release-rustflags.sh and docs/logging.md.
+  #
+  # NO TEST AUTOMATION, REQUIRED: the cargo feature `e2e` embeds a WebDriver
+  # server that anyone on the machine could drive (see "End-to-end tests" in
+  # CONTRIBUTING.md). The build refuses it (apps/desktop/src-tauri/build.rs
+  # and lib.rs; checked by .github/workflows/e2e.yml), so never set
+  # TERMX_ALLOW_E2E or `--features e2e` here. As a last check, after the
+  # build and before uploading, fail the job if a built binary contains the
+  # strings `wdio` or `TAURI_WEBDRIVER_PORT`, for example:
+  #
+  #   if grep -a -l -E 'wdio|TAURI_WEBDRIVER_PORT' "$binary"; then exit 1; fi
   # ---------------------------------------------------------------------------
 
   release:
