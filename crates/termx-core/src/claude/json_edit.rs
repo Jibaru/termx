@@ -109,6 +109,13 @@ impl Document {
     /// [`EditError::NotAnObject`] when something on the path is not an
     /// object, and [`EditError::Unverified`].
     pub fn set(&mut self, path: &[&str], key: &str, value: &Value) -> Result<(), EditError> {
+        // Already so: the text stays exactly as it is, however it is laid
+        // out.
+        let mut full: Vec<&str> = path.to_vec();
+        full.push(key);
+        if self.get(&full).as_ref() == Some(value) {
+            return Ok(());
+        }
         let mut expected = self.value();
         {
             let mut object = expected
@@ -682,6 +689,21 @@ mod tests {
             document.set(&[], "b", &json!(2)).unwrap();
         });
         assert_eq!(text, "\u{feff}{\"a\": 1, \"b\": 2}");
+    }
+
+    #[test]
+    fn setting_what_is_there_already_changes_no_byte() {
+        let minified = r#"{"a":1,"extraKnownMarketplaces":{"termx":{"source":{"source":"directory","path":"/x"}}}}"#;
+        let text = edit(minified, |document| {
+            document
+                .set(
+                    &["extraKnownMarketplaces"],
+                    "termx",
+                    &json!({"source": {"source": "directory", "path": "/x"}}),
+                )
+                .unwrap();
+        });
+        assert_eq!(text, minified);
     }
 
     #[test]

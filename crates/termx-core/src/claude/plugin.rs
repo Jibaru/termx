@@ -152,6 +152,11 @@ fn pretty(value: &Value) -> String {
     text
 }
 
+/// [`fnv1a`] of `bytes`, as 16 hexadecimal digits.
+pub(crate) fn hash(bytes: &[u8]) -> String {
+    format!("{:016x}", fnv1a(bytes))
+}
+
 /// The 64-bit FNV-1a hash: enough to tell two builds of the hook sender
 /// apart, and free of dependencies.
 fn fnv1a(bytes: &[u8]) -> u64 {

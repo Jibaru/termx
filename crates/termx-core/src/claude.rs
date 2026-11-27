@@ -27,13 +27,45 @@
 //! and written atomically. A file that is not valid JSON is refused, never
 //! "repaired".
 //!
-//! Uninstalling removes exactly those two members (and the objects they
-//! were in, if they are left empty), what Claude Code recorded of this
-//! plugin in its own state (`plugins/known_marketplaces.json`,
-//! `plugins/installed_plugins.json`, `plugins/cache/termx`), and the plugin
-//! directory. The plugin also declares `"defaultEnabled": false`, so that
-//! without its member of `enabledPlugins` it is off even where a copy of it
-//! is left.
+//! A settings file that is read-only, or a link to a file that does not
+//! exist, is refused too. The file is written through a temporary file
+//! renamed over it; just before the rename termx reads the file again, and
+//! starts over once if Claude Code (or anything) changed it meanwhile. What
+//! is left is the instant between that check and the rename: a write by
+//! another program in that instant is lost.
+//!
+//! # Ownership, and giving everything back
+//!
+//! termx only ever removes what it added. When it installs, it records in
+//! [`RECORD_FILE`] (in its state directory, next to the plugin) what was
+//! there before: the whole text of the settings, whether
+//! `extraKnownMarketplaces` and `enabledPlugins` existed, whether
+//! `termx@termx` was already enabled; and a hash of the settings as it left
+//! them. Uninstalling then:
+//!
+//! - when the settings are exactly as termx left them, writes back the text
+//!   they had before, byte for byte (or removes the file it created);
+//! - when they changed since, removes only its two members, and the
+//!   objects that hold them only if termx created those objects;
+//! - never touches a marketplace named `termx` that is not this directory,
+//!   nor a `"termx@termx": false` the user set: those are reported as a
+//!   [`Conflict`](PluginStatus::Conflict), and installing is refused;
+//! - removes what Claude Code recorded of the plugin
+//!   (`plugins/known_marketplaces.json`, `plugins/installed_plugins.json`,
+//!   `plugins/cache/termx`) only when Claude Code recorded it for this
+//!   directory.
+//!
+//! The plugin also declares `"defaultEnabled": false`, so that without its
+//! member of `enabledPlugins` it is off even where a copy of it is left.
+//!
+//! # Hooks turned off by policy
+//!
+//! `allowManagedHooksOnly` in the managed settings of Claude Code blocks
+//! the hooks of every plugin the managed settings do not force-enable, and
+//! `disableAllHooks` blocks them as well. termx reads the managed settings
+//! ([`Paths::managed_settings`]) and the user settings and reports an
+//! installed plugin whose hooks cannot run as
+//! [`Blocked`](PluginStatus::Blocked).
 //!
 //! # Versions
 //!
@@ -41,8 +73,14 @@
 //! that finds the plugin of another version, or files that are not what it
 //! would write (a hook sender that moved), reports it
 //! [`Outdated`](PluginStatus::Outdated); [`Integration::upgrade`] rewrites
-//! the plugin directory. The settings are only touched when they do not
-//! point at the directory any more.
+//! the plugin directory and leaves the settings alone.
+//!
+//! The user-level `extraKnownMarketplaces` with a `directory` source is
+//! documented for project settings; that Claude Code also registers it from
+//! the user settings, without a prompt, rests on the documentation of
+//! plugin loading and on a check with Claude Code 2.1.321, whose
+//! `claude plugin marketplace add` and `install` write the same two
+//! members.
 //!
 //! # Consent
 //!
@@ -71,8 +109,15 @@ pub const CONSENT_FILE: &str = "claude-integration.json";
 /// The directory of the plugin, in the state directory of termx.
 pub const PLUGIN_DIR: &str = "claude-plugin";
 
-/// The copy of the settings made before termx first changes them.
+/// The copy of the settings made before termx first changes them. Never
+/// overwritten: it keeps the settings as they were before the first
+/// install.
 pub const BACKUP_SUFFIX: &str = ".termx-backup";
+
+/// What termx found before it installed (see the
+/// [module documentation](self#ownership-and-giving-everything-back)),
+/// next to [`PLUGIN_DIR`].
+pub const RECORD_FILE: &str = "claude-plugin-install.json";
 
 /// The name of the hook sender, next to the termx executable.
 pub const SENDER: &str = if cfg!(windows) {
@@ -98,6 +143,9 @@ pub struct Paths {
     pub home: Option<PathBuf>,
     /// The `PATH` to look for `claude` on.
     pub search_path: Option<OsString>,
+    /// The managed settings of Claude Code, which can block the hooks of
+    /// plugins: see [`managed_settings_files`].
+    pub managed_settings: Vec<PathBuf>,
 }
 
 impl Paths {
@@ -118,6 +166,7 @@ impl Paths {
             sender,
             home,
             search_path: std::env::var_os("PATH"),
+            managed_settings: managed_settings_files(),
         }
     }
 
@@ -126,6 +175,47 @@ impl Paths {
     pub fn settings(&self) -> PathBuf {
         self.config_dir.join("settings.json")
     }
+
+    /// Where termx records what it found before installing.
+    #[must_use]
+    pub fn record(&self) -> PathBuf {
+        self.plugin_dir
+            .parent()
+            .map_or_else(|| PathBuf::from(RECORD_FILE), |dir| dir.join(RECORD_FILE))
+    }
+}
+
+/// The managed settings files of Claude Code on this system: the file of
+/// the platform, and the files of its `managed-settings.d` directory.
+///
+/// | Platform | File                                                   |
+/// | -------- | ------------------------------------------------------ |
+/// | macOS    | `/Library/Application Support/ClaudeCode/managed-settings.json` |
+/// | Linux    | `/etc/claude-code/managed-settings.json`               |
+/// | Windows  | `C:\Program Files\ClaudeCode\managed-settings.json`    |
+#[must_use]
+pub fn managed_settings_files() -> Vec<PathBuf> {
+    let dir = if cfg!(target_os = "macos") {
+        PathBuf::from("/Library/Application Support/ClaudeCode")
+    } else if cfg!(windows) {
+        PathBuf::from(r"C:\Program Files\ClaudeCode")
+    } else {
+        PathBuf::from("/etc/claude-code")
+    };
+    let mut files = vec![dir.join("managed-settings.json")];
+    if let Ok(entries) = fs::read_dir(dir.join("managed-settings.d")) {
+        let mut more: Vec<PathBuf> = entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "json")
+            })
+            .collect();
+        more.sort();
+        files.extend(more);
+    }
+    files
 }
 
 /// `$CLAUDE_CONFIG_DIR` when it is set, else `~/.claude`.
@@ -160,6 +250,15 @@ pub enum PluginStatus {
     /// Enabled, from another version of termx or with files that are not
     /// what this termx writes: [`Integration::upgrade`].
     Outdated,
+    /// The settings declare another marketplace named `termx`, or the user
+    /// turned the plugin off (`"termx@termx": false`): termx installs
+    /// nothing and removes nothing, the user decides. See
+    /// [`IntegrationStatus::error`].
+    Conflict,
+    /// Installed, but Claude Code does not run its hooks: its managed
+    /// settings allow managed hooks only, or hooks are turned off. See
+    /// [`IntegrationStatus::error`].
+    Blocked,
     /// What is installed cannot be told: see [`IntegrationStatus::error`].
     Error,
 }
@@ -183,12 +282,21 @@ pub enum IntegrationErrorKind {
     /// The settings of Claude Code are not valid JSON (or not an object, or
     /// a member termx needs is not an object). termx changes nothing.
     InvalidSettings,
-    /// The settings already declare a marketplace named `termx` that is
-    /// not this one.
+    /// Another marketplace named `termx`, or the plugin turned off by the
+    /// user. termx changes nothing.
     Conflict,
+    /// Claude Code does not run the hooks of the plugin, by policy.
+    Blocked,
     /// The hook sender is not next to termx (a build without it).
     SenderMissing,
-    /// Reading or writing a file failed.
+    /// A file cannot be written: read-only, or not the user's.
+    PermissionDenied,
+    /// The disk is full.
+    StorageFull,
+    /// A file or folder that is needed is not there (a settings file that
+    /// is a link to nothing).
+    NotFound,
+    /// Reading or writing a file failed otherwise.
     Io,
 }
 
@@ -201,10 +309,17 @@ impl IntegrationError {
     }
 
     fn io(what: &str, path: &Path, error: &io::Error) -> Self {
-        Self::new(
-            IntegrationErrorKind::Io,
-            format!("{what} {}: {error}", redact::path(path)),
-        )
+        let kind = match error.kind() {
+            io::ErrorKind::PermissionDenied | io::ErrorKind::ReadOnlyFilesystem => {
+                IntegrationErrorKind::PermissionDenied
+            }
+            io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded => {
+                IntegrationErrorKind::StorageFull
+            }
+            io::ErrorKind::NotFound => IntegrationErrorKind::NotFound,
+            _ => IntegrationErrorKind::Io,
+        };
+        Self::new(kind, format!("{what} {}: {error}", redact::path(path)))
     }
 }
 
@@ -223,7 +338,8 @@ pub struct IntegrationStatus {
     pub version: Option<String>,
     /// What the user answered.
     pub consent: Consent,
-    /// Why the status is [`PluginStatus::Error`].
+    /// Why the status is [`Conflict`](PluginStatus::Conflict),
+    /// [`Blocked`](PluginStatus::Blocked) or [`Error`](PluginStatus::Error).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<IntegrationError>,
 }
@@ -236,6 +352,43 @@ pub struct Change {
     pub path: String,
     /// What changes in it.
     pub description: String,
+}
+
+/// What termx found before it installed. See the
+/// [module documentation](self#ownership-and-giving-everything-back).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Record {
+    version: u32,
+    /// The plugin directory installed.
+    plugin_dir: PathBuf,
+    /// The text of the settings before, `None` when there was no file.
+    before: Option<String>,
+    /// The hash of the settings as termx last wrote them.
+    after: Option<String>,
+    /// `extraKnownMarketplaces` was there.
+    marketplaces_existed: bool,
+    /// `enabledPlugins` was there.
+    enabled_plugins_existed: bool,
+    /// The marketplace of this directory was declared already.
+    marketplace_before: bool,
+    /// `termx@termx` was `true` already.
+    enabled_before: bool,
+}
+
+/// What the settings say about the plugin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Found {
+    marketplace: Present,
+    /// `enabledPlugins["termx@termx"]`, when it is a boolean.
+    enabled: Option<bool>,
+}
+
+/// What to do with the settings file.
+enum Rewrite {
+    Keep,
+    Write(String),
+    Remove,
 }
 
 /// The termx plugin of Claude Code, for one user. See the
@@ -265,7 +418,17 @@ impl Integration {
         let claude_installed = self.claude_installed();
         let (plugin, version, error) = match self.plugin_status() {
             Ok((status, version)) => (status, version, None),
-            Err(error) => (PluginStatus::Error, None, Some(error)),
+            Err(error) => {
+                let status = match error.kind {
+                    IntegrationErrorKind::Conflict => PluginStatus::Conflict,
+                    IntegrationErrorKind::Blocked => PluginStatus::Blocked,
+                    _ => PluginStatus::Error,
+                };
+                let version = (status == PluginStatus::Blocked)
+                    .then(|| plugin::installed_version(&self.paths.plugin_dir))
+                    .flatten();
+                (status, version, Some(error))
+            }
         };
         IntegrationStatus {
             claude_installed,
@@ -285,7 +448,7 @@ impl Integration {
     pub fn preview(&self) -> Result<Vec<Change>, IntegrationError> {
         let settings = self.paths.settings();
         let document = self.read_settings()?;
-        let (marketplace, enabled) = self.check_settings(document.as_ref())?;
+        let found = self.check_settings(document.as_ref())?;
         let binary = self.sender_binary()?;
         let mut changes = Vec::new();
         if !self.plugin_files_current(&binary) {
@@ -299,13 +462,14 @@ impl Integration {
                 ),
             });
         }
-        if document.is_some() && !marketplace.is_present() && !self.backup_path().exists() {
+        let edits = found.marketplace != Present::Ours || found.enabled != Some(true);
+        if document.is_some() && edits && !self.backup_path().exists() {
             changes.push(Change {
                 path: self.shown(&self.backup_path()),
                 description: "Copy your Claude Code settings here before changing them.".to_owned(),
             });
         }
-        if !matches!(marketplace, Present::Ours) {
+        if found.marketplace != Present::Ours {
             changes.push(Change {
                 path: self.shown(&settings),
                 description: format!(
@@ -314,7 +478,7 @@ impl Integration {
                 ),
             });
         }
-        if !enabled {
+        if found.enabled != Some(true) {
             changes.push(Change {
                 path: self.shown(&settings),
                 description: format!(
@@ -335,17 +499,18 @@ impl Integration {
     /// Those of [`preview`](Self::preview).
     pub fn note(&self) -> Result<Option<String>, IntegrationError> {
         let document = self.read_settings()?;
-        let (marketplace, enabled) = self.check_settings(document.as_ref())?;
+        let found = self.check_settings(document.as_ref())?;
         let binary = self.sender_binary()?;
-        let missing = usize::from(!matches!(marketplace, Present::Ours)) + usize::from(!enabled);
-        let entries = match (matches!(marketplace, Present::Ours), enabled) {
+        let marketplace = found.marketplace == Present::Ours;
+        let enabled = found.enabled == Some(true);
+        let entries = match (marketplace, enabled) {
             (false, false) => {
                 "two entries (the \"termx\" marketplace and \"termx@termx\" in enabledPlugins)"
             }
             (false, true) => "one entry (the \"termx\" marketplace in extraKnownMarketplaces)",
             _ => "one entry (\"termx@termx\" in enabledPlugins)",
         };
-        let note = if missing == 0 {
+        let note = if marketplace && enabled {
             if self.plugin_files_current(&binary) {
                 return Ok(None);
             }
@@ -374,15 +539,42 @@ impl Integration {
     ///
     /// [`IntegrationErrorKind::InvalidSettings`] and
     /// [`IntegrationErrorKind::Conflict`] before anything is written;
-    /// [`IntegrationErrorKind::SenderMissing`];
-    /// [`IntegrationErrorKind::Io`].
+    /// [`IntegrationErrorKind::SenderMissing`]; the kinds of input and
+    /// output errors.
     pub fn install(&self) -> Result<(), IntegrationError> {
         let document = self.read_settings()?;
-        self.check_settings(document.as_ref())?;
+        let found = self.check_settings(document.as_ref())?;
         let binary = self.sender_binary()?;
+        // What was there before, recorded before anything changes. A
+        // record of an earlier install of this directory is kept: it knows
+        // what was there before that one.
+        let record = match self.read_record() {
+            Some(record) => record,
+            None => Record {
+                version: 1,
+                plugin_dir: self.paths.plugin_dir.clone(),
+                before: self.settings_text()?,
+                after: None,
+                marketplaces_existed: document
+                    .as_ref()
+                    .is_some_and(|document| document.get(&["extraKnownMarketplaces"]).is_some()),
+                enabled_plugins_existed: document
+                    .as_ref()
+                    .is_some_and(|document| document.get(&["enabledPlugins"]).is_some()),
+                marketplace_before: found.marketplace == Present::Ours,
+                enabled_before: found.enabled == Some(true),
+            },
+        };
+        self.write_record(&record)?;
         self.write_plugin(&binary)?;
-        self.edit_settings(|document| {
-            let path = self.paths.plugin_dir.to_string_lossy().into_owned();
+        let path = self.paths.plugin_dir.to_string_lossy().into_owned();
+        self.rewrite_settings(|text| {
+            let mut document = Document::parse(
+                text.filter(|text| !text.trim().is_empty())
+                    .unwrap_or("{}\n"),
+            )
+            .map_err(|error| self.settings_error(&error))?;
+            let before = document.text();
             document
                 .set(
                     &["extraKnownMarketplaces"],
@@ -392,8 +584,18 @@ impl Integration {
                 .map_err(|error| self.settings_error(&error))?;
             document
                 .set(&["enabledPlugins"], plugin::PLUGIN_ID, &Value::Bool(true))
-                .map_err(|error| self.settings_error(&error))
+                .map_err(|error| self.settings_error(&error))?;
+            let edited = document.text();
+            Ok(if text.is_some() && edited == before {
+                Rewrite::Keep
+            } else {
+                Rewrite::Write(edited)
+            })
         })?;
+        let after = self
+            .settings_text()?
+            .map(|text| plugin::hash(text.as_bytes()));
+        self.write_record(&Record { after, ..record })?;
         info!(version = %plugin::version(), "claude code plugin installed");
         Ok(())
     }
@@ -406,47 +608,117 @@ impl Integration {
     ///
     /// Those of [`install`](Self::install).
     pub fn upgrade(&self) -> Result<bool, IntegrationError> {
-        if self.plugin_status()?.0 != PluginStatus::Outdated {
-            return Ok(false);
+        match self.plugin_status() {
+            Ok((PluginStatus::Outdated, _)) => {}
+            // Not this termx's to change, or nothing to do.
+            Ok(_) => return Ok(false),
+            Err(error)
+                if matches!(
+                    error.kind,
+                    IntegrationErrorKind::Conflict | IntegrationErrorKind::Blocked
+                ) =>
+            {
+                return Ok(false);
+            }
+            Err(error) => return Err(error),
         }
         self.install()?;
         Ok(true)
     }
 
-    /// Removes the plugin: its two members of the settings, its entry in
-    /// the state of Claude Code, its directory. Doing it again changes
-    /// nothing.
+    /// Removes what termx installed, and only that, giving the settings
+    /// back as they were: see the
+    /// [module documentation](self#ownership-and-giving-everything-back).
+    /// Doing it again changes nothing.
     ///
     /// # Errors
     ///
     /// [`IntegrationErrorKind::InvalidSettings`] before anything is
-    /// changed, and [`IntegrationErrorKind::Io`].
+    /// changed, and the kinds of input and output errors.
     pub fn uninstall(&self) -> Result<(), IntegrationError> {
+        let record = self.read_record();
         let document = self.read_settings()?;
-        let ours = document
-            .as_ref()
-            .is_some_and(|document| self.marketplace_in(document) == Present::Ours);
-        self.edit_settings(|document| {
-            document
-                .remove(&["enabledPlugins"], plugin::PLUGIN_ID, true)
-                .map_err(|error| self.settings_error(&error))?;
-            if ours {
-                document
-                    .remove(&["extraKnownMarketplaces"], plugin::NAME, true)
-                    .map_err(|error| self.settings_error(&error))?;
-            }
-            Ok(())
-        })?;
-        self.forget_in_claude_state();
-        match fs::remove_dir_all(&self.paths.plugin_dir) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(IntegrationError::io(
-                    "could not remove",
-                    &self.paths.plugin_dir,
-                    &error,
-                ));
+        let found = match &document {
+            Some(document) => Found {
+                marketplace: self.marketplace_in(document),
+                enabled: document
+                    .get(&["enabledPlugins", plugin::PLUGIN_ID])
+                    .and_then(|value| value.as_bool()),
+            },
+            None => Found {
+                marketplace: Present::Absent,
+                enabled: None,
+            },
+        };
+        // Installed by termx: recorded, or pointing at its directory.
+        let ours = found.marketplace != Present::Other
+            && (record.is_some() || found.marketplace == Present::Ours);
+        if ours {
+            self.rewrite_settings(|text| {
+                let Some(text) = text else {
+                    return Ok(Rewrite::Keep);
+                };
+                // Untouched since termx wrote it: as it was before.
+                if let Some(record) = &record
+                    && record.after.as_deref() == Some(plugin::hash(text.as_bytes()).as_str())
+                {
+                    return Ok(match &record.before {
+                        Some(before) => Rewrite::Write(before.clone()),
+                        None => Rewrite::Remove,
+                    });
+                }
+                let mut document =
+                    Document::parse(text).map_err(|error| self.settings_error(&error))?;
+                let original = document.text();
+                let created =
+                    |existed: fn(&Record) -> bool| record.as_ref().is_some_and(|r| !existed(r));
+                if found.marketplace == Present::Ours
+                    && !record
+                        .as_ref()
+                        .is_some_and(|record| record.marketplace_before)
+                {
+                    document
+                        .remove(
+                            &["extraKnownMarketplaces"],
+                            plugin::NAME,
+                            created(|record| record.marketplaces_existed),
+                        )
+                        .map_err(|error| self.settings_error(&error))?;
+                }
+                // A `false` is the user's: left as it is.
+                if found.enabled == Some(true)
+                    && !record.as_ref().is_some_and(|record| record.enabled_before)
+                {
+                    document
+                        .remove(
+                            &["enabledPlugins"],
+                            plugin::PLUGIN_ID,
+                            created(|record| record.enabled_plugins_existed),
+                        )
+                        .map_err(|error| self.settings_error(&error))?;
+                }
+                let edited = document.text();
+                Ok(if edited == original {
+                    Rewrite::Keep
+                } else {
+                    Rewrite::Write(edited)
+                })
+            })?;
+            self.forget_in_claude_state();
+        }
+        for (path, directory) in [
+            (&self.paths.plugin_dir, true),
+            (&self.paths.record(), false),
+        ] {
+            let removed = if directory {
+                fs::remove_dir_all(path)
+            } else {
+                fs::remove_file(path)
+            };
+            match removed {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(IntegrationError::io("could not remove", path, &error)),
             }
         }
         info!("claude code plugin uninstalled");
@@ -472,7 +744,7 @@ impl Integration {
     ///
     /// # Errors
     ///
-    /// [`IntegrationErrorKind::Io`].
+    /// The kinds of input and output errors.
     pub fn set_consent(&self, consent: Consent) -> Result<(), IntegrationError> {
         let Some(file) = &self.paths.consent_file else {
             return Ok(());
@@ -489,21 +761,20 @@ impl Integration {
     /// The status of the plugin and its version.
     fn plugin_status(&self) -> Result<(PluginStatus, Option<String>), IntegrationError> {
         let document = self.read_settings()?;
+        let found = self.check_settings(document.as_ref())?;
         let Some(document) = document else {
             return Ok((PluginStatus::NotInstalled, None));
         };
-        let enabled = document
-            .get(&["enabledPlugins", plugin::PLUGIN_ID])
-            .is_some_and(|value| value == Value::Bool(true));
-        let marketplace = self.marketplace_in(&document);
-        if !enabled || marketplace == Present::Absent {
+        if found.marketplace == Present::Absent || found.enabled != Some(true) {
             return Ok((PluginStatus::NotInstalled, None));
         }
+        if let Some(blocked) = self.blocked_by_policy(&document) {
+            return Err(blocked);
+        }
         let version = plugin::installed_version(&self.paths.plugin_dir);
-        let current = marketplace == Present::Ours
-            && self
-                .sender_binary()
-                .is_ok_and(|binary| self.plugin_files_current(&binary));
+        let current = self
+            .sender_binary()
+            .is_ok_and(|binary| self.plugin_files_current(&binary));
         let status = if current {
             PluginStatus::Installed
         } else {
@@ -512,14 +783,61 @@ impl Integration {
         Ok((status, version))
     }
 
-    /// The marketplace `termx` the settings declare, and whether the plugin
-    /// is enabled. Refuses settings termx cannot change safely.
-    fn check_settings(
-        &self,
-        document: Option<&Document>,
-    ) -> Result<(Present, bool), IntegrationError> {
+    /// Why Claude Code does not run the hooks of the plugin, if it does
+    /// not: see the [module documentation](self#hooks-turned-off-by-policy).
+    fn blocked_by_policy(&self, user: &Document) -> Option<IntegrationError> {
+        let managed: Vec<Value> = self
+            .paths
+            .managed_settings
+            .iter()
+            .filter_map(|file| fs::read(file).ok())
+            .filter_map(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .collect();
+        let forced = managed
+            .iter()
+            .any(|settings| settings["enabledPlugins"][plugin::PLUGIN_ID] == Value::Bool(true));
+        let blocked = |message: &str| {
+            Some(IntegrationError::new(
+                IntegrationErrorKind::Blocked,
+                message,
+            ))
+        };
+        if managed
+            .iter()
+            .any(|settings| settings["disableAllHooks"] == Value::Bool(true))
+        {
+            return blocked(
+                "The managed settings of Claude Code on this computer turn every hook off (disableAllHooks): the plugin is installed but cannot report anything.",
+            );
+        }
+        if forced {
+            return None;
+        }
+        if managed
+            .iter()
+            .any(|settings| settings["allowManagedHooksOnly"] == Value::Bool(true))
+        {
+            return blocked(
+                "The managed settings of Claude Code on this computer allow managed hooks only (allowManagedHooksOnly): the plugin is installed but its hooks do not run.",
+            );
+        }
+        if user.get(&["disableAllHooks"]) == Some(Value::Bool(true)) {
+            return blocked(
+                "Your Claude Code settings turn hooks off (disableAllHooks): the plugin is installed but its hooks do not run.",
+            );
+        }
+        None
+    }
+
+    /// What the settings say about the plugin. Refuses settings termx
+    /// cannot change safely, and a conflict: another marketplace named
+    /// `termx`, or the plugin turned off by the user.
+    fn check_settings(&self, document: Option<&Document>) -> Result<Found, IntegrationError> {
         let Some(document) = document else {
-            return Ok((Present::Absent, false));
+            return Ok(Found {
+                marketplace: Present::Absent,
+                enabled: None,
+            });
         };
         for member in ["extraKnownMarketplaces", "enabledPlugins"] {
             if document
@@ -540,15 +858,36 @@ impl Integration {
             return Err(IntegrationError::new(
                 IntegrationErrorKind::Conflict,
                 format!(
-                    "{} already declares another marketplace named \"termx\"",
+                    "{} already declares another marketplace named \"termx\": termx leaves it alone. Remove it or rename it to install the termx plugin.",
                     self.shown(&self.paths.settings())
                 ),
             ));
         }
-        let enabled = document
-            .get(&["enabledPlugins", plugin::PLUGIN_ID])
-            .is_some_and(|value| value == Value::Bool(true));
-        Ok((marketplace, enabled))
+        let enabled = document.get(&["enabledPlugins", plugin::PLUGIN_ID]);
+        match enabled {
+            Some(Value::Bool(false)) => Err(IntegrationError::new(
+                IntegrationErrorKind::Conflict,
+                format!(
+                    "The termx plugin is turned off in {} (\"termx@termx\": false). termx leaves that choice to you: turn it on with /plugin in Claude Code, or remove that line, then try again.",
+                    self.shown(&self.paths.settings())
+                ),
+            )),
+            Some(Value::Bool(true)) => Ok(Found {
+                marketplace,
+                enabled: Some(true),
+            }),
+            None => Ok(Found {
+                marketplace,
+                enabled: None,
+            }),
+            Some(_) => Err(IntegrationError::new(
+                IntegrationErrorKind::InvalidSettings,
+                format!(
+                    "\"termx@termx\" in {} is not true or false: termx does not change it",
+                    self.shown(&self.paths.settings())
+                ),
+            )),
+        }
     }
 
     /// Whether the settings declare the marketplace `termx`, and whether it
@@ -567,17 +906,8 @@ impl Integration {
 
     /// The settings, or `None` when there is no file.
     fn read_settings(&self) -> Result<Option<Document>, IntegrationError> {
-        let path = self.paths.settings();
-        let text = match fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(error) if error.kind() == io::ErrorKind::InvalidData => {
-                return Err(IntegrationError::new(
-                    IntegrationErrorKind::InvalidSettings,
-                    format!("{} is not text", self.shown(&path)),
-                ));
-            }
-            Err(error) => return Err(IntegrationError::io("could not read", &path, &error)),
+        let Some(text) = self.settings_text()? else {
+            return Ok(None);
         };
         if text.trim().is_empty() {
             return Ok(Some(
@@ -587,6 +917,35 @@ impl Integration {
         Document::parse(&text)
             .map(Some)
             .map_err(|error| self.settings_error(&error))
+    }
+
+    /// The text of the settings, or `None` when there is no file.
+    fn settings_text(&self) -> Result<Option<String>, IntegrationError> {
+        let path = self.paths.settings();
+        match fs::read_to_string(&path) {
+            Ok(text) => Ok(Some(text)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                if fs::symlink_metadata(&path).is_ok() {
+                    return Err(self.dangling_link());
+                }
+                Ok(None)
+            }
+            Err(error) if error.kind() == io::ErrorKind::InvalidData => Err(IntegrationError::new(
+                IntegrationErrorKind::InvalidSettings,
+                format!("{} is not text", self.shown(&path)),
+            )),
+            Err(error) => Err(IntegrationError::io("could not read", &path, &error)),
+        }
+    }
+
+    fn dangling_link(&self) -> IntegrationError {
+        IntegrationError::new(
+            IntegrationErrorKind::NotFound,
+            format!(
+                "{} is a link to a file that does not exist: termx does not replace it. Restore the file it points to, or remove the link.",
+                self.shown(&self.paths.settings())
+            ),
+        )
     }
 
     fn settings_error(&self, error: &EditError) -> IntegrationError {
@@ -599,18 +958,26 @@ impl Integration {
         )
     }
 
-    /// Changes the settings with `change`, if that changes anything: backs
-    /// them up the first time, writes them atomically, and does it again
-    /// if Claude Code wrote them in the meantime.
-    fn edit_settings(
+    /// Rewrites the settings with what `produce` makes of their text
+    /// (`None` when there is no file). Backs them up the first time,
+    /// refuses a read-only file and a link to nothing, writes atomically
+    /// through a link, and starts over once if the file changed just
+    /// before the rename.
+    fn rewrite_settings(
         &self,
-        change: impl Fn(&mut Document) -> Result<(), IntegrationError>,
+        produce: impl Fn(Option<&str>) -> Result<Rewrite, IntegrationError>,
     ) -> Result<(), IntegrationError> {
         let settings = self.paths.settings();
+        let is_link =
+            fs::symlink_metadata(&settings).is_ok_and(|meta| meta.file_type().is_symlink());
         // A link (to a repository of dotfiles) stays a link: its target
         // is what changes.
-        let target = fs::canonicalize(&settings).unwrap_or_else(|_| settings.clone());
-        for _ in 0..3 {
+        let target = if is_link {
+            fs::canonicalize(&settings).map_err(|_| self.dangling_link())?
+        } else {
+            settings.clone()
+        };
+        for _ in 0..2 {
             let before = match fs::read(&target) {
                 Ok(bytes) => Some(bytes),
                 Err(error) if error.kind() == io::ErrorKind::NotFound => None,
@@ -618,20 +985,22 @@ impl Integration {
                     return Err(IntegrationError::io("could not read", &settings, &error));
                 }
             };
+            let modified = fs::metadata(&target).and_then(|meta| meta.modified()).ok();
             let text = before
                 .as_deref()
-                .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
-                .filter(|text| !text.trim().is_empty())
-                .unwrap_or_else(|| "{}\n".to_owned());
-            let mut document =
-                Document::parse(&text).map_err(|error| self.settings_error(&error))?;
-            change(&mut document)?;
-            let edited = document.text();
-            if edited == text {
+                .map(|bytes| String::from_utf8_lossy(bytes).into_owned());
+            let wanted = produce(text.as_deref())?;
+            if matches!(wanted, Rewrite::Keep) {
                 return Ok(());
             }
-            if before.is_none() && edited.trim().replace(char::is_whitespace, "") == "{}" {
-                return Ok(());
+            if fs::metadata(&target).is_ok_and(|meta| meta.permissions().readonly()) {
+                return Err(IntegrationError::new(
+                    IntegrationErrorKind::PermissionDenied,
+                    format!(
+                        "{} is read-only: termx does not change it. Make it writable to install or remove the plugin.",
+                        self.shown(&settings)
+                    ),
+                ));
             }
             if let Some(before) = &before {
                 self.back_up(before)?;
@@ -640,13 +1009,35 @@ impl Integration {
                 fs::create_dir_all(dir)
                     .map_err(|error| IntegrationError::io("could not create", dir, &error))?;
             }
-            // Claude Code may have written the file since it was read.
-            let now = fs::read(&target).ok();
-            if now != before {
-                continue;
+            let unchanged = || {
+                fs::read(&target).ok() == before
+                    && fs::metadata(&target).and_then(|meta| meta.modified()).ok() == modified
+            };
+            let done = match &wanted {
+                Rewrite::Write(text) => replace_if(&target, text.as_bytes(), unchanged)
+                    .map_err(|error| IntegrationError::io("could not write", &settings, &error))?,
+                Rewrite::Remove => {
+                    if unchanged() {
+                        match fs::remove_file(&target) {
+                            Ok(()) => true,
+                            Err(error) if error.kind() == io::ErrorKind::NotFound => true,
+                            Err(error) => {
+                                return Err(IntegrationError::io(
+                                    "could not remove",
+                                    &settings,
+                                    &error,
+                                ));
+                            }
+                        }
+                    } else {
+                        false
+                    }
+                }
+                Rewrite::Keep => true,
+            };
+            if done {
+                return Ok(());
             }
-            return write_atomic(&target, edited.as_bytes(), Some(&target))
-                .map_err(|error| IntegrationError::io("could not write", &settings, &error));
         }
         Err(IntegrationError::new(
             IntegrationErrorKind::Io,
@@ -657,7 +1048,8 @@ impl Integration {
         ))
     }
 
-    /// Copies the settings before termx first changes them.
+    /// Copies the settings before termx first changes them. An existing
+    /// copy is kept: it is the original.
     fn back_up(&self, content: &[u8]) -> Result<(), IntegrationError> {
         let backup = self.backup_path();
         if backup.exists() {
@@ -671,6 +1063,28 @@ impl Integration {
         let mut name = self.paths.settings().into_os_string();
         name.push(BACKUP_SUFFIX);
         PathBuf::from(name)
+    }
+
+    /// The record of an install of this plugin directory, if there is one.
+    fn read_record(&self) -> Option<Record> {
+        let bytes = fs::read(self.paths.record()).ok()?;
+        let record: Record = serde_json::from_slice(&bytes).ok()?;
+        (record.version == 1 && same_path(&record.plugin_dir, &self.paths.plugin_dir))
+            .then_some(record)
+    }
+
+    /// Writes the record, readable by the user only: it holds the text of
+    /// the settings.
+    fn write_record(&self, record: &Record) -> Result<(), IntegrationError> {
+        let path = self.paths.record();
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir)
+                .map_err(|error| IntegrationError::io("could not create", dir, &error))?;
+        }
+        let bytes = serde_json::to_vec_pretty(record).unwrap_or_default();
+        write_atomic(&path, &bytes, None)
+            .and_then(|()| make_private(&path))
+            .map_err(|error| IntegrationError::io("could not write", &path, &error))
     }
 
     /// The hook sender, read.
@@ -743,12 +1157,12 @@ impl Integration {
     }
 
     /// Removes what Claude Code recorded of the plugin in its own state
-    /// (`plugins/` of its configuration directory), when it is this one:
-    /// the marketplace in `known_marketplaces.json`, the plugin in
-    /// `installed_plugins.json`, and its copy in `cache/termx`. Otherwise an
-    /// installed copy could keep running hooks whose program is gone. Best
-    /// effort: these files belong to Claude Code, and only the entries of
-    /// termx are touched.
+    /// (`plugins/` of its configuration directory), when Claude Code
+    /// recorded it for this directory: the marketplace in
+    /// `known_marketplaces.json`, and then the plugin in
+    /// `installed_plugins.json` and its copy in `cache/termx`. Best effort:
+    /// these files belong to Claude Code, and only the entries of termx are
+    /// touched.
     fn forget_in_claude_state(&self) {
         let plugins = self.paths.config_dir.join("plugins");
         let known = plugins.join("known_marketplaces.json");
@@ -759,11 +1173,9 @@ impl Integration {
                 .is_some_and(|path| same_path(&path, &self.paths.plugin_dir));
             ours && document.remove(&[], plugin::NAME, false).unwrap_or(false)
         });
-        // The cache of the marketplace "termx" holds copies of this plugin
-        // only when the marketplace was this one.
-        let cache = plugins.join("cache").join(plugin::NAME);
-        let cached_is_ours = ours || is_termx_cache(&cache.join(plugin::NAME));
-        if !cached_is_ours {
+        // The cache and the installs of the marketplace "termx" are this
+        // plugin's only when the marketplace Claude Code knew was this one.
+        if !ours {
             return;
         }
         self.edit_claude_state(&plugins.join("installed_plugins.json"), |document| {
@@ -771,6 +1183,7 @@ impl Integration {
                 .remove(&["plugins"], plugin::PLUGIN_ID, false)
                 .unwrap_or(false)
         });
+        let cache = plugins.join("cache").join(plugin::NAME);
         if let Err(error) = fs::remove_dir_all(&cache)
             && error.kind() != io::ErrorKind::NotFound
         {
@@ -852,29 +1265,6 @@ enum Present {
     Other,
 }
 
-impl Present {
-    fn is_present(self) -> bool {
-        self != Self::Absent
-    }
-}
-
-/// Whether `dir`, a directory of the cache of Claude Code, holds copies of
-/// the termx plugin: its versions have the manifest termx writes.
-fn is_termx_cache(dir: &Path) -> bool {
-    let Ok(versions) = fs::read_dir(dir) else {
-        return false;
-    };
-    versions.flatten().any(|version| {
-        fs::read(version.path().join(".claude-plugin").join("plugin.json"))
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-            .is_some_and(|manifest| {
-                manifest["name"] == plugin::NAME
-                    && manifest["homepage"] == "https://github.com/Jibaru/termx"
-            })
-    })
-}
-
 /// Whether two paths name the same directory, the second existing or not.
 fn same_path(a: &Path, b: &Path) -> bool {
     if a == b {
@@ -886,16 +1276,46 @@ fn same_path(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// Writes `bytes` to `path` through a temporary file in the same directory,
-/// renamed over it, so that a reader never sees half a file. The file gets
-/// the permissions of `like`, when it exists.
-fn write_atomic(path: &Path, bytes: &[u8], like: Option<&Path>) -> io::Result<()> {
+/// Writes `bytes` over `path` like [`write_atomic`], but only if
+/// `unchanged` still says so once the temporary file is ready, right
+/// before the rename. Returns whether it wrote.
+fn replace_if(path: &Path, bytes: &[u8], unchanged: impl Fn() -> bool) -> io::Result<bool> {
+    let temporary = temporary_next_to(path);
+    let result = (|| {
+        let mut file = fs::File::create(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        if let Ok(meta) = fs::metadata(path) {
+            fs::set_permissions(&temporary, meta.permissions())?;
+        }
+        if !unchanged() {
+            return Ok(false);
+        }
+        fs::rename(&temporary, path)?;
+        Ok(true)
+    })();
+    if !matches!(result, Ok(true)) {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+/// A name for a temporary file next to `path`.
+fn temporary_next_to(path: &Path) -> PathBuf {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     let name = path
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let temporary = dir.join(format!(".{name}.termx-{}", crate::workspace::random_hex()));
+    dir.join(format!(".{name}.termx-{}", crate::workspace::random_hex()))
+}
+
+/// Writes `bytes` to `path` through a temporary file in the same directory,
+/// renamed over it, so that a reader never sees half a file. The file gets
+/// the permissions of `like`, when it exists.
+fn write_atomic(path: &Path, bytes: &[u8], like: Option<&Path>) -> io::Result<()> {
+    let temporary = temporary_next_to(path);
     let result = (|| {
         let mut file = fs::File::create(&temporary)?;
         file.write_all(bytes)?;
@@ -915,6 +1335,18 @@ fn write_atomic(path: &Path, bytes: &[u8], like: Option<&Path>) -> io::Result<()
     result
 }
 
+/// Makes `path` readable and writable by the user only (macOS, Linux).
+#[cfg(unix)]
+fn make_private(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+fn make_private(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
 #[cfg(unix)]
 fn make_executable(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -924,4 +1356,25 @@ fn make_executable(path: &Path) -> io::Result<()> {
 #[cfg(not(unix))]
 fn make_executable(_path: &Path) -> io::Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_file_changed_just_before_the_rename_is_not_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        fs::write(&path, "{\"by\": \"claude\"}").unwrap();
+
+        let wrote = replace_if(&path, b"{\"by\": \"termx\"}", || false).unwrap();
+
+        assert!(!wrote);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{\"by\": \"claude\"}");
+        // No temporary file is left behind.
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+        assert!(replace_if(&path, b"{}", || true).unwrap());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{}");
+    }
 }
