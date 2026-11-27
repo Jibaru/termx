@@ -400,8 +400,7 @@ export class App {
    * the process ended.
    */
   async quit(): Promise<ExitInfo> {
-    // The answer is lost when the server goes away with the application.
-    await this.driver.closeWindow().catch(() => undefined);
+    this.requestClose();
     return waitFor(
       async () => {
         if (this.exit) return this.exit;
@@ -413,6 +412,16 @@ export class App {
         timeoutMs: EXIT_TIMEOUT_MS,
       },
     );
+  }
+
+  /**
+   * Asks the window to close, without waiting for the answer: while termx
+   * asks to confirm, the window stays open, and some drivers (WebView2's)
+   * only answer once it has closed, or after their own 60 s timeout. The
+   * answer is lost anyway when the server goes away with the application.
+   */
+  private requestClose(): void {
+    void this.driver.closeWindow().catch(() => undefined);
   }
 
   /** Says yes to the confirmation before quitting, if it is shown. */
@@ -429,7 +438,7 @@ export class App {
   /** Ends the application whatever its state, and removes its home if it made it. */
   async dispose(): Promise<void> {
     if (!this.exitInfo()) {
-      await this.driver.closeWindow().catch(() => undefined);
+      this.requestClose();
       const deadline = Date.now() + 5_000;
       while (!this.exitInfo() && Date.now() < deadline) {
         await this.confirmQuit();
