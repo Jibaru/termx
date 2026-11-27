@@ -173,6 +173,16 @@ export class Terminal {
     if (!taken) throw new Error("the application did not take the paste event");
   }
 
+  /** Starts recording the input xterm.js hands the application. */
+  recordInput(): Promise<void> {
+    return this.call("recordInput");
+  }
+
+  /** The input recorded since `recordInput`, in hexadecimal. */
+  recordedInput(): Promise<string> {
+    return this.call("recordedInput");
+  }
+
   throwUncaught(message: string): Promise<void> {
     return this.call("throwUncaught", message);
   }
