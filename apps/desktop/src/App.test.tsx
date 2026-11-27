@@ -165,6 +165,25 @@ describe("the sidebar", () => {
     );
   });
 
+  it("shows each state as an icon of its own shape, not a coloured dot", async () => {
+    await renderApp(
+      workspace([
+        running("s-1"),
+        session("s-2", { state: { status: "dormant" } }),
+        session("s-3", { state: { status: "exited", code: 1, signal: null, failure: null } }),
+      ]),
+    );
+
+    const shape = (id: string) =>
+      within(row(id)).getByTestId("session-status").querySelector("svg")?.dataset.shape;
+    expect([shape("s-1"), shape("s-2"), shape("s-3")]).toEqual([
+      "status-running",
+      "status-dormant",
+      "status-exitedError",
+    ]);
+    expect(document.querySelector(".status-dot")).toBeNull();
+  });
+
   it("keeps the agent slot empty while the agent reports nothing, and loud while it waits", async () => {
     const view = await renderApp(workspace([running("s-1"), running("s-2")]));
 

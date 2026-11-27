@@ -10,7 +10,8 @@ import {
 import type { SessionKind } from "../lib/ipc";
 import { useWorkbench, useWorkspace } from "../workspace/context";
 import { describeCommandError, folderName, KIND_LABELS } from "../workspace/describe";
-import { CloseIcon, KindIcon } from "./icons";
+import { CloseIcon, FolderIcon } from "../icons/glyphs";
+import { KindIcon } from "../icons/KindIcon";
 import { Modal } from "./Modal";
 
 const KINDS: SessionKind[] = ["claude", "shell", "background"];
@@ -180,6 +181,7 @@ export function NewSessionDialog() {
                   submit();
                 }}
               >
+                <FolderIcon size={12} className="folder-icon" />
                 <span className="folder-name" dir="auto">
                   {each === null ? "Home folder" : folderName(each)}
                 </span>

@@ -1,7 +1,7 @@
 import { type CoreVersionState, useCoreVersion } from "../lib/useCoreVersion";
 import { useShortcut, useWorkbench, useWorkspaceState, withShortcut } from "../workspace/context";
 import { DiagnosticsActions } from "./DiagnosticsActions";
-import { PlusIcon, SidebarIcon } from "./icons";
+import { PlusIcon, SidebarIcon } from "../icons/glyphs";
 import { SessionTree } from "./SessionTree";
 
 function describeCoreVersion(state: CoreVersionState): string {

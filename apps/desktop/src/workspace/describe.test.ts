@@ -7,7 +7,9 @@ import {
   describeCommandError,
   describeState,
   folderName,
+  agentStatusOf,
   persistenceMessage,
+  statusOf,
   relativeTime,
   relativeTimeLong,
 } from "./describe";
@@ -73,6 +75,38 @@ describe("the state of a session", () => {
   it("treats a status it does not know as running", () => {
     const unknown = session("s", { state: { status: "hibernating" } as never });
     expect(describeState(unknown).label).toBe("Running");
+  });
+});
+
+describe("the status icon of a session", () => {
+  const exited = (code: number | null, extra: object = {}) =>
+    session("s", { state: { status: "exited", code, signal: null, failure: null, ...extra } });
+
+  it("follows the state of its process", () => {
+    expect(statusOf(session("s", { state: { status: "dormant" } }))).toBe("dormant");
+    expect(statusOf(session("s", { state: { status: "starting" } }))).toBe("starting");
+    expect(statusOf(session("s", { state: { status: "running" } }))).toBe("running");
+    expect(
+      statusOf(
+        session("s", {
+          state: { status: "running" },
+          warning: { kind: "launchUnconfirmed", message: "" },
+        }),
+      ),
+    ).toBe("warning");
+    expect(statusOf(exited(0))).toBe("exitedOk");
+    expect(statusOf(exited(null))).toBe("exitedOk");
+    expect(statusOf(exited(2))).toBe("exitedError");
+    expect(statusOf(exited(null, { signal: "Hangup" }))).toBe("exitedError");
+    expect(statusOf(exited(127, { failure: { kind: "claudeNotFound", message: "" } }))).toBe(
+      "failed",
+    );
+    expect(statusOf(session("s", { state: { status: "hibernating" } as never }))).toBe("running");
+  });
+
+  it("shows an agent state it does not know as unknown", () => {
+    expect(agentStatusOf({ status: "waitingForInput", waitingSince: 1 })).toBe("waitingForInput");
+    expect(agentStatusOf({ status: "compacting", waitingSince: null } as never)).toBe("unknown");
   });
 });
 

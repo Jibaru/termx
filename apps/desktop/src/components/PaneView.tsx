@@ -2,10 +2,12 @@ import { type DragEvent, useEffect, useState } from "react";
 
 import type { PaneEdge, Session, SessionId, WorkspaceSnapshot } from "../lib/ipc";
 import { useShortcut, useUi, useWorkbench, withShortcut } from "../workspace/context";
-import { describeState, failureLabel } from "../workspace/describe";
+import { describeState, failureLabel, statusOf } from "../workspace/describe";
 import { buildSidebar } from "../workspace/grouping";
 import { visibleSessions } from "../workspace/layoutTree";
-import { BranchIcon, CloseIcon, KindIcon, SplitDownIcon, SplitRightIcon } from "./icons";
+import { BranchIcon, CloseIcon, ResumeIcon, SplitDownIcon, SplitRightIcon } from "../icons/glyphs";
+import { KindIcon } from "../icons/KindIcon";
+import { StatusIcon } from "../icons/StatusIcon";
 import { TerminalView } from "./TerminalView";
 
 interface PaneViewProps {
@@ -63,7 +65,7 @@ export function PaneView({ pane, sessionId, workspace, focused, alone }: PaneVie
               </span>
             )}
             <span className="row-status" data-tone={describeState(session).tone}>
-              <span className="status-dot" aria-hidden="true" />
+              <StatusIcon status={statusOf(session)} size={12} decorative />
               {describeState(session).label}
             </span>
           </>
@@ -137,6 +139,7 @@ function PaneNotice({ session }: { session: Session }) {
   if (state.status === "dormant") {
     return (
       <div className="pane-notice" data-testid="pane-notice" data-tone="neutral">
+        <StatusIcon status="dormant" decorative />
         <span>
           Not running.{" "}
           {session.kind === "claude"
@@ -151,6 +154,7 @@ function PaneNotice({ session }: { session: Session }) {
             workbench.resume(session.id);
           }}
         >
+          <ResumeIcon size={12} />
           Resume
         </button>
         <span className="pane-notice-hint">or press Enter</span>
@@ -162,6 +166,7 @@ function PaneNotice({ session }: { session: Session }) {
     const claude = session.kind === "claude";
     return (
       <div className="pane-notice" data-testid="pane-notice" data-tone={status.tone}>
+        <StatusIcon status={statusOf(session)} decorative />
         <span title={status.detail}>{status.label}.</span>
         <button
           type="button"
@@ -180,6 +185,7 @@ function PaneNotice({ session }: { session: Session }) {
   if (session.warning) {
     return (
       <div className="pane-notice" data-testid="pane-notice" data-tone="warn" role="status">
+        <StatusIcon status="warning" decorative />
         <span title={session.warning.message}>{failureLabel(session.warning)}.</span>
       </div>
     );

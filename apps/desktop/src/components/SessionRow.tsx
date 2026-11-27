@@ -15,11 +15,14 @@ import {
   KIND_LABELS,
   relativeTime,
   relativeTimeLong,
+  statusOf,
 } from "../workspace/describe";
 import { isComposing } from "../terminal/keymap";
 import { AgentSlot } from "./AgentSlot";
 import { rowElementId } from "./elementIds";
-import { BranchIcon, KindIcon } from "./icons";
+import { BranchIcon, ResumeIcon, WorktreeIcon } from "../icons/glyphs";
+import { KindIcon } from "../icons/KindIcon";
+import { StatusIcon } from "../icons/StatusIcon";
 
 export interface SessionRowProps {
   session: Session;
@@ -161,7 +164,8 @@ export const SessionRow = memo(function SessionRow(props: SessionRowProps) {
             data-testid="worktree-marker"
             title={`Worktree ${session.git.worktree}`}
           >
-            wt:{session.git.worktree}
+            <WorktreeIcon size={12} />
+            {session.git.worktree}
           </span>
         )}
         <span
@@ -170,7 +174,7 @@ export const SessionRow = memo(function SessionRow(props: SessionRowProps) {
           data-testid="session-status"
           title={status.detail ?? status.label}
         >
-          <span className="status-dot" aria-hidden="true" />
+          <StatusIcon status={statusOf(session)} size={12} title={status.detail} />
           {status.label}
         </span>
         {dormant && (
@@ -184,6 +188,7 @@ export const SessionRow = memo(function SessionRow(props: SessionRowProps) {
               actions.resume(session.id);
             }}
           >
+            <ResumeIcon size={12} />
             Resume
           </button>
         )}

@@ -2,7 +2,7 @@ import { useEffect } from "react";
 
 import { useUi, useWorkbench, useWorkspace } from "../workspace/context";
 import { persistenceMessage } from "../workspace/describe";
-import { CloseIcon } from "./icons";
+import { CloseIcon, InfoIcon, WarningIcon } from "../icons/glyphs";
 
 /**
  * A strip that stays for as long as the workspace is not saved: saving
@@ -21,6 +21,7 @@ export function PersistenceBanner() {
       data-testid="persistence-warning"
       role="status"
     >
+      <WarningIcon className="banner-icon" />
       <span className="banner-text" title={message}>
         {message}
       </span>
@@ -43,6 +44,7 @@ export function RestoreBanner() {
   const count = waiting.length;
   return (
     <div className="banner" data-tone="info" data-testid="restore-banner" role="status">
+      <InfoIcon className="banner-icon" />
       <span className="banner-text">
         {count === 1
           ? "1 session was restored from the last run and is not running."
@@ -93,6 +95,7 @@ export function Notices() {
     <div className="notices" data-testid="notices">
       {notices.map((notice) => (
         <div key={notice.id} className="notice" role="alert">
+          <WarningIcon className="notice-icon" tone="danger" />
           <span>{notice.text}</span>
           <button
             type="button"
