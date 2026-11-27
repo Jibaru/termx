@@ -68,8 +68,11 @@ shell, so `claude` must be a program on `PATH` rather than an alias.
 
 Closing a session, or quitting termx, ends everything the session started,
 including programs that ignore the hang-up signal and programs started in
-the background. A program that detaches on purpose, as a daemon does, is
-left alone.
+the background. When a Claude Code session or a background command ends on
+its own, what it left running is ended too, since nothing can reach it any
+more. When the shell of a shell session exits, the jobs it left keep
+running, as in other terminals, until you quit termx. A program that
+detaches on purpose, as a daemon does, is left alone.
 
 ## When it is saved
 
