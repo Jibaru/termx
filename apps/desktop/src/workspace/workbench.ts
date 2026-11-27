@@ -56,7 +56,11 @@ export type DialogState =
       running: number;
       /** Counts the requests, so that a repeat shows the question afresh. */
       asked: number;
-    };
+    }
+  /** What the Claude Code integration does and changes, to install it. */
+  | { kind: "claudeSetup" }
+  /** Asks before removing the Claude Code integration. */
+  | { kind: "claudeRemove" };
 
 /** Something said once: `id` tells two equal texts apart. */
 export interface Message {
@@ -503,6 +507,41 @@ export class Workbench {
         return;
       }
     }
+  };
+
+  // --- The Claude Code integration ---------------------------------------------
+
+  /** Opens the dialog that explains the integration and installs it. */
+  openClaudeSetup = (): void => {
+    this.claude.clearError();
+    void this.claude.loadPreview();
+    this.setUi({ dialog: { kind: "claudeSetup" } });
+  };
+
+  /** Installs (or updates, or repairs) the plugin, from the setup dialog. */
+  installClaude = async (): Promise<void> => {
+    const installed = await this.claude.install();
+    if (!installed) return;
+    if (this.ui.dialog.kind === "claudeSetup") this.closeDialog();
+    this.hint("Claude Code integration installed: sessions now show what their agent does.");
+  };
+
+  /** Not now: closes the setup dialog, and termx stops asking. */
+  declineClaude = async (): Promise<void> => {
+    if (this.ui.dialog.kind === "claudeSetup") this.closeDialog();
+    await this.claude.decline();
+  };
+
+  openClaudeRemove = (): void => {
+    this.claude.clearError();
+    this.setUi({ dialog: { kind: "claudeRemove" } });
+  };
+
+  removeClaude = async (): Promise<void> => {
+    const removed = await this.claude.uninstall();
+    if (!removed) return;
+    if (this.ui.dialog.kind === "claudeRemove") this.closeDialog();
+    this.hint("Claude Code integration removed.");
   };
 
   /** Moves a session up or down among the sessions of its group. */

@@ -2,6 +2,11 @@ import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState }
 
 import { Hint, LiveRegion, Notices, PersistenceBanner, RestoreBanner } from "./components/Banners";
 import {
+  ClaudeConsentBanner,
+  ClaudeRemoveDialog,
+  ClaudeSetupDialog,
+} from "./components/ClaudeIntegration";
+import {
   ConfirmCloseDialog,
   ConfirmQuitDialog,
   ConfirmRestartDialog,
@@ -303,6 +308,7 @@ function Window() {
       )}
       <main className="main-area" aria-label="Terminals">
         <PersistenceBanner />
+        <ClaudeConsentBanner />
         <RestoreBanner />
         <div className="layout-root">
           {workspace && <LayoutView node={workspace.layout.root} workspace={workspace} />}
@@ -319,6 +325,8 @@ function Window() {
       {ui.dialog.kind === "newSession" && <NewSessionDialog />}
       {ui.dialog.kind === "confirmClose" && <ConfirmCloseDialog session={ui.dialog.session} />}
       {ui.dialog.kind === "confirmRestart" && <ConfirmRestartDialog session={ui.dialog.session} />}
+      {ui.dialog.kind === "claudeSetup" && <ClaudeSetupDialog />}
+      {ui.dialog.kind === "claudeRemove" && <ClaudeRemoveDialog />}
       {ui.dialog.kind === "confirmQuit" && (
         // A repeated close or quit shows it afresh, with the focus on Quit.
         <ConfirmQuitDialog key={ui.dialog.asked} running={ui.dialog.running} />

@@ -333,6 +333,26 @@ describe("notifications from the window", () => {
     await flush();
     expect(view.callsOf("showSession")).toEqual([[1, "s-2"]]);
   });
+
+  it("follow the toggle of the sidebar footer", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const fake = fakeClaude();
+    const view = await renderApp(workspace([claude("s-1"), claude("s-2")]), { claude: fake });
+
+    const toggle = screen.getByTestId("notify-waiting");
+    expect(toggle).toBeChecked();
+    expect(screen.getByTestId("notify-done")).not.toBeChecked();
+    fireEvent.click(toggle);
+    expect(toggle).not.toBeChecked();
+
+    view.update(claude("s-2", { agent: agent("waitingForPermission") }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SETTLE_MS);
+    });
+
+    expect(fake.callsOf("notify")).toEqual([]);
+    expect(window.localStorage.getItem("termx.notifyWhenWaiting")).toBe("false");
+  });
 });
 
 function withFirst(layout: Layout, id: string): Layout["root"] {
