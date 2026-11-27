@@ -120,11 +120,13 @@ mod driver;
 mod flow;
 mod manager;
 mod pump;
+mod replay;
 
 pub use batch::{BATCH_MAX_BYTES, BATCH_WINDOW, BOUNDARY_HOLD_MAX};
 pub use flow::{ACK_BATCH_BYTES, HIGH_WATERMARK_BYTES, LOW_WATERMARK_BYTES};
 pub use manager::{SHUTDOWN_CLOSE_WAIT, SessionManager, SessionOptions};
 pub use pump::{PTY_BUFFER_BYTES, STALL_TIMEOUT, STALL_WRITE_OFFS_MAX};
+pub use replay::{REPLAY_BUFFER_BYTES, ReplayBuffer};
 
 use crate::pty::ExitStatus;
 pub use crate::pty::SessionId;
