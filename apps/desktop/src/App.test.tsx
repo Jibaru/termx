@@ -16,7 +16,7 @@ import type { TerminalController } from "./terminal/TerminalController";
 function storeOfFakeTerminals(restored: WorkspaceSnapshot = workspace()) {
   const controllers: {
     sessionId: SessionId;
-    autoStart: LaunchMode;
+    autoStart: LaunchMode | "dormant";
     attach: ReturnType<typeof vi.fn>;
     detach: ReturnType<typeof vi.fn>;
   }[] = [];
@@ -103,7 +103,7 @@ describe("App", () => {
     expect(controllers[0]?.attach).toHaveBeenCalledExactlyOnceWith(host);
   });
 
-  it("resumes the session of the last run instead of opening a new one", async () => {
+  it("shows the session of the last run, waiting to be started, instead of a new one", async () => {
     mockIPC(() => "0.0.0");
     const restored = workspace([session("s-last", { state: { status: "dormant" } })]);
     const { store, controllers } = storeOfFakeTerminals(restored);
@@ -113,7 +113,7 @@ describe("App", () => {
     await waitFor(() => {
       expect(controllers).toHaveLength(1);
     });
-    expect(controllers[0]).toMatchObject({ sessionId: "s-last", autoStart: "resume" });
+    expect(controllers[0]).toMatchObject({ sessionId: "s-last", autoStart: "dormant" });
     await waitFor(() => {
       expect(controllers[0]?.attach).toHaveBeenCalledTimes(1);
     });

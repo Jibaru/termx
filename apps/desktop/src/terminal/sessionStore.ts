@@ -74,7 +74,7 @@ export class SessionStore {
   constructor(
     private readonly createController: (
       sessionId: SessionId,
-      autoStart: LaunchMode,
+      autoStart: LaunchMode | "dormant",
     ) => TerminalController = (sessionId, autoStart) =>
       new TerminalController({ sessionId, autoStart }),
     private readonly backend: WorkspaceBackend = TAURI_WORKSPACE,
@@ -96,11 +96,12 @@ export class SessionStore {
 
   /**
    * Opens a terminal for a session and puts it on screen. Its process is
-   * started when the terminal is first shown: from scratch, or resuming
-   * for a session restored from the previous run. A session that has a
+   * started when the terminal is first shown, from scratch or resuming,
+   * except for a session restored from the previous run (`dormant`),
+   * which waits for the user to press Enter. A session that has a
    * terminal already is only put on screen.
    */
-  open(sessionId: SessionId, autoStart: LaunchMode = "fresh"): SessionId {
+  open(sessionId: SessionId, autoStart: LaunchMode | "dormant" = "fresh"): SessionId {
     if (this.controllers.has(sessionId)) {
       this.activate(sessionId);
       return sessionId;
@@ -112,8 +113,8 @@ export class SessionStore {
 
   /**
    * Opens the first terminal, unless there is one already: for the session
-   * termx last had on screen, which is resumed, or else for a new shell in
-   * the home directory. Asking again while that is in progress changes
+   * termx last had on screen, which waits for Enter to be resumed, or else
+   * for a new shell in the home directory, which starts at once. Asking again while that is in progress changes
    * nothing. A failure was logged where it happened; asking again tries
    * again.
    */
@@ -132,9 +133,10 @@ export class SessionStore {
     const session =
       sessionToRestore(workspace) ?? (await this.backend.createSession({ kind: "shell" }));
     if (this.controllers.size > 0) return;
-    // Nothing runs after a restart of termx: a session that was restored
-    // carries on where it was, in its folder.
-    this.open(session.id, session.state.status === "dormant" ? "resume" : "fresh");
+    // Nothing runs after a restart of termx, and nothing is started on its
+    // own: a restored session carries on where it was, in its folder, once
+    // the user asks for it.
+    this.open(session.id, session.state.status === "dormant" ? "dormant" : "fresh");
   }
 
   /** Puts another terminal on screen. */
