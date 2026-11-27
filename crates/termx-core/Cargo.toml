@@ -40,7 +40,7 @@ rlimit = "0.12"
 # The effective user id, to check who owns the log files, and the process
 # groups and sessions of terminals, to end everything a terminal started.
 # Already part of the dependency tree.
-rustix = { version = "1.1.6", features = ["process", "termios"] }
+rustix = { version = "1.1.6", features = ["fs", "process", "termios"] }
 
 # Lists the processes of the system on macOS, to find what a terminal
 # started (`proc_listallpids`). Already part of the dependency tree.
