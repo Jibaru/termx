@@ -37,8 +37,12 @@ crates/
 apps/
   desktop/                 The desktop application
     src/                   Frontend (React, TypeScript, Vite)
-      components/          UI components
+      components/          UI components: sidebar, panes, dialogs, banners
+      keybindings/         Every shortcut of the window, per platform, and the keys
+                           that must always reach the terminal
       terminal/            The xterm.js terminal: controller, key map, look, session store
+      workspace/           The workspace as the window sees it: its store, what the
+                           user can do (workbench), grouping, layout, wording
       lib/ipc.ts           Typed wrappers around the Tauri commands, and their types
       lib/ipc.contract.json  Examples of what the two sides exchange (generated)
     src-tauri/             Tauri shell (Rust), depends on termx-core
