@@ -9,9 +9,17 @@ use tauri::{Manager, WindowEvent};
 use termx_core::diagnostics::tracing;
 
 // The hooks of the end-to-end suite must never ship: see the `e2e` module.
+// Two independent guards, both checked in CI (`.github/workflows/e2e.yml`).
 #[cfg(all(feature = "e2e", not(debug_assertions)))]
 compile_error!(
     "the `e2e` feature adds test-only automation and cannot be enabled in a release build"
+);
+// Set by `build.rs` only when `TERMX_ALLOW_E2E=1` and the profile does not
+// inherit from `release`, which also covers a release profile with debug
+// assertions forced on and `tauri build --debug --features e2e`.
+#[cfg(all(feature = "e2e", not(termx_e2e_allowed)))]
+compile_error!(
+    "the `e2e` feature is only for the builds of the end-to-end suite: build it with `pnpm e2e:build`, which sets TERMX_ALLOW_E2E=1"
 );
 
 /// The commands exposed to the frontend. Register every command here.

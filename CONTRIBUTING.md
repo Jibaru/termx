@@ -169,9 +169,12 @@ logged. CI uploads the same directory as an artifact of the failed job.
 - a marker that makes the frontend expose its terminals, so that a test can
   read the buffer of xterm.js (`apps/desktop/src/test/e2eHook.ts`).
 
-None of this can ship. The feature is off by default, and enabling it in a
-build without debug assertions, which a release is, is a compile error.
-Without the marker the frontend exposes nothing. The capabilities and the
+None of this can ship. The feature is off by default, and it is a compile
+error in a build without debug assertions, which a release is, in any
+profile that inherits from `release`, and in any build that does not set
+`TERMX_ALLOW_E2E=1`, which only `pnpm e2e:build` (`e2e/build.mjs`) and the
+End-to-end workflow do; that workflow checks the three refusals. Without
+the marker the frontend exposes nothing. The capabilities and the
 content security policy of the application are the same with and without the
 feature. Keep it that way: a hook for the tests goes behind the feature, in
 `e2e.rs`.
