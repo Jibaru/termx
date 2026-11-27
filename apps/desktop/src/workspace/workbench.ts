@@ -1,4 +1,6 @@
 import { attentionQueue } from "../attention/agent";
+import { AttentionMonitor } from "../attention/monitor";
+import { NotificationPrefs } from "../attention/notificationPrefs";
 import { type ClaudeBackend, NO_CLAUDE } from "../claude/backend";
 import { ClaudeIntegrationStore } from "../claude/integration";
 import { reportError } from "../lib/errorReporting";
@@ -93,6 +95,8 @@ const INITIAL_UI: UiState = {
 export interface WorkbenchOptions {
   /** The commands of the Claude Code integration; none when omitted. */
   claude?: ClaudeBackend;
+  /** Whether the window has the focus. */
+  windowFocused?: () => boolean;
 }
 
 export class Workbench {
@@ -103,6 +107,10 @@ export class Workbench {
   private bootstrapped: Promise<void> | null = null;
   /** The Claude Code integration: whether agents report, and its setup. */
   readonly claude: ClaudeIntegrationStore;
+  /** When to send OS notifications. */
+  readonly notificationPrefs = new NotificationPrefs();
+  /** Notifications, the badge and announcements about sessions that wait. */
+  readonly attention: AttentionMonitor;
 
   constructor(
     readonly workspace: WorkspaceStore,
@@ -110,6 +118,13 @@ export class Workbench {
     options: WorkbenchOptions = {},
   ) {
     this.claude = new ClaudeIntegrationStore(options.claude ?? NO_CLAUDE);
+    this.attention = new AttentionMonitor({
+      workspace,
+      claude: this.claude,
+      prefs: this.notificationPrefs,
+      windowFocused: options.windowFocused ?? (() => document.hasFocus()),
+      announce: this.announce,
+    });
   }
 
   private get backend() {
@@ -238,6 +253,7 @@ export class Workbench {
   }
 
   private async bootstrapOnce(): Promise<void> {
+    this.attention.start();
     void this.claude.load();
     const workspace = await this.workspace.start();
     if (!workspace) {

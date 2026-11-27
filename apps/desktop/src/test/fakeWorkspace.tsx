@@ -162,6 +162,8 @@ export async function renderApp(
     bindings?: Binding[];
     /** The Claude Code integration; installed, with consent, when omitted. */
     claude?: ReturnType<typeof fakeClaude>;
+    /** Whether the window has the focus; yes when omitted. */
+    windowFocused?: () => boolean;
   } = {},
 ) {
   const ipc = recordIPC((command) => (command === "core_version" ? "0.0.0" : undefined));
@@ -170,6 +172,7 @@ export async function renderApp(
   const claude = options.claude ?? fakeClaude();
   const workbench = new Workbench(new WorkspaceStore(fake.backend), terminals.store, {
     claude: claude.backend,
+    windowFocused: options.windowFocused ?? (() => true),
   });
   const view = render(
     <App
