@@ -1,3 +1,4 @@
+import type { AgentIconStatus, ProcessStatus } from "../icons/statusText";
 import {
   type AgentState,
   type CommandError,
@@ -71,6 +72,30 @@ export function describeState(session: Session): StatusText {
       }
       return { label: "Running", tone: "ok" };
   }
+}
+
+/** Which status icon shows the state of the process of a session. */
+export function statusOf(session: Session): ProcessStatus {
+  const state = session.state;
+  switch (state.status) {
+    case "dormant":
+      return "dormant";
+    case "starting":
+      return "starting";
+    case "exited":
+      if (state.failure) return "failed";
+      if (state.signal !== null || (state.code !== null && state.code !== 0)) return "exitedError";
+      return "exitedOk";
+    default:
+      return session.warning ? "warning" : "running";
+  }
+}
+
+/** Which status icon shows what the agent of a session does. */
+export function agentStatusOf(agent: AgentState): AgentIconStatus {
+  const known: readonly string[] = ["working", "waitingForPermission", "waitingForInput", "done"];
+  // A status this version does not know arrives typed as a known one.
+  return known.includes(agent.status) ? agent.status : "unknown";
 }
 
 /** Whether a session has a process, or is about to. */

@@ -31,3 +31,6 @@ default: minor
 - On macOS, termx has a menu bar with the main actions and their
   shortcuts. Cmd+W closes the focused pane, never the window, and closing
   the window or quitting while sessions run asks first.
+- States, kinds of session and the controls of the window are drawn with
+  icons of their own, whose shapes tell the states apart without colour,
+  in one palette shared with the terminal.

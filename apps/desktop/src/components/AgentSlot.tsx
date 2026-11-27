@@ -1,6 +1,7 @@
 import type { AgentState } from "../lib/ipc";
 import { useNow } from "../workspace/clock";
-import { describeAgent, relativeTime } from "../workspace/describe";
+import { StatusIcon } from "../icons/StatusIcon";
+import { agentStatusOf, describeAgent, relativeTime } from "../workspace/describe";
 
 /**
  * What the agent of a session does: working, waiting for the user, done.
@@ -26,6 +27,7 @@ export function AgentSlot({ agent }: { agent: AgentState | null }) {
       data-tone={text.tone}
       title={`Agent: ${text.label}`}
     >
+      <StatusIcon status={agentStatusOf(agent)} size={12} decorative />
       {text.label}
       {waiting}
     </span>

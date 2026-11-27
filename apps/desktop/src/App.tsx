@@ -6,7 +6,7 @@ import {
   ConfirmQuitDialog,
   ConfirmRestartDialog,
 } from "./components/ConfirmCloseDialog";
-import { PlusIcon, SidebarIcon } from "./components/icons";
+import { PlusIcon, SidebarIcon } from "./icons/glyphs";
 import { LayoutView } from "./components/LayoutView";
 import { NewSessionDialog } from "./components/NewSessionDialog";
 import { Sidebar } from "./components/Sidebar";

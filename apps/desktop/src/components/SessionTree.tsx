@@ -14,7 +14,7 @@ import { useShortcut, useUi, useWorkbench } from "../workspace/context";
 import { isLive } from "../workspace/describe";
 import { buildSidebar, dropIndex } from "../workspace/grouping";
 import { sessionOfPane, visibleSessions } from "../workspace/layoutTree";
-import { ChevronIcon, PlusIcon } from "./icons";
+import { ChevronIcon, PlusIcon } from "../icons/glyphs";
 import { Menu, type MenuItem } from "./Menu";
 import { groupElementId, rowElementId } from "./elementIds";
 import { type RowActions, SessionRow } from "./SessionRow";
