@@ -309,6 +309,10 @@ impl Pty {
     ) -> Result<(Self, PtyOutput), PtyError> {
         let size = size.validate()?;
         let builder = command.to_builder()?;
+        // Ctrl+C must interrupt the programs of the terminal, however termx
+        // itself was started.
+        #[cfg(windows)]
+        super::ctrl_c::restore_default_handling();
 
         let PtyPair { slave, master } = open_pty(size)?;
         let child = slave

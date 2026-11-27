@@ -60,28 +60,18 @@ describe.runIf(process.platform === "win32")(
     const fixture = useApp("ctrl-c-ignored", { ignoringCtrlC: true });
     let programPid: number | undefined;
 
-    // Everything up to the bug must work, and is checked here rather than
-    // in the test below: there, any failure would count as the expected one.
+    // Everything up to the interruption is checked on its own, so that a
+    // failure says which step broke.
     it("delivers Ctrl+C to the session of the terminal", async () => {
       programPid = await pressCtrlCOnIdleProgram(fixture.terminal);
     });
 
-    // EXPECTED FAILURE, a bug of the application: termx passes the ignored
-    // Ctrl+C on to the shells of its terminals, and Ctrl+C then interrupts
-    // nothing in them. A terminal should give its shells the default handling
-    // back (SetConsoleCtrlHandler(NULL, FALSE) before it starts them).
-    // Explained in https://github.com/Jibaru/termx/pull/6, under "Bugs of the
-    // application found by the suite".
-    //
-    // The only thing in this test that can fail is the check that the
-    // program is gone: the program started and Ctrl+C reached its session
-    // (the test above), and it is still running 10 s later. Remove `.fails`
-    // with the fix, which turns this test into a failure as a reminder.
-    it.fails("interrupts the program in the terminal", async ({ skip }) => {
-      if (programPid === undefined) {
-        skip("Ctrl+C was not delivered: see the test above");
-        return;
-      }
+    // termx gives its terminals the default handling of Ctrl+C back before
+    // it starts them (`SetConsoleCtrlHandler(NULL, FALSE)`, in
+    // crates/termx-core/src/pty/ctrl_c.rs). Without that, the program would
+    // still run 10 s after Ctrl+C.
+    it("interrupts the program in the terminal", async () => {
+      if (programPid === undefined) throw new Error("Ctrl+C was not delivered: see the test above");
       const survived = await survivesCtrlC(programPid);
       expect(survived, "the program is still running after Ctrl+C").toBe(false);
     });
