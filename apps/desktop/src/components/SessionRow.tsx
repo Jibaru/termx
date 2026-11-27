@@ -1,6 +1,13 @@
-import { type DragEvent, type KeyboardEvent, type MouseEvent, useEffect, useRef } from "react";
+import {
+  type DragEvent,
+  type KeyboardEvent,
+  memo,
+  type MouseEvent,
+  useEffect,
+  useRef,
+} from "react";
 
-import type { Session } from "../lib/ipc";
+import type { Session, SessionId } from "../lib/ipc";
 import { useNow } from "../workspace/clock";
 import {
   describeAgent,
@@ -26,17 +33,27 @@ export interface SessionRowProps {
   dropAt: "before" | "after" | null;
   /** Shows the project name: in the background section, rows mix projects. */
   showProject?: boolean;
-  onActivate: () => void;
-  onRename: (name: string) => void;
-  onCancelRename: () => void;
-  onStartRename: () => void;
-  onResume: () => void;
-  onContextMenu: (event: MouseEvent) => void;
-  onFocus: () => void;
-  onDragStart: (event: DragEvent) => void;
-  onDragOver: (event: DragEvent) => void;
-  onDrop: (event: DragEvent) => void;
-  onDragEnd: () => void;
+  /** What the row does, the same object for every row and every render. */
+  actions: RowActions;
+}
+
+/**
+ * What a row can do, by the id of its session. The tree passes one object
+ * that never changes, so that a row only renders again when its session or
+ * its own flags change.
+ */
+export interface RowActions {
+  activate: (id: SessionId) => void;
+  rename: (id: SessionId, name: string) => void;
+  cancelRename: () => void;
+  startRename: (id: SessionId) => void;
+  resume: (id: SessionId) => void;
+  contextMenu: (id: SessionId, event: MouseEvent) => void;
+  focus: (id: SessionId) => void;
+  dragStart: (id: SessionId, event: DragEvent) => void;
+  dragOver: (id: SessionId, event: DragEvent) => void;
+  drop: (id: SessionId, event: DragEvent) => void;
+  dragEnd: () => void;
 }
 
 /**
@@ -47,8 +64,8 @@ export interface SessionRowProps {
  *        branch  worktree        status       last activity
  * ```
  */
-export function SessionRow(props: SessionRowProps) {
-  const { session } = props;
+export const SessionRow = memo(function SessionRow(props: SessionRowProps) {
+  const { session, actions } = props;
   const now = useNow();
   const status = describeState(session);
   const agent = describeAgent(session.agent);
@@ -89,28 +106,38 @@ export function SessionRow(props: SessionRowProps) {
       onClick={(event) => {
         if (props.renaming) return;
         event.stopPropagation();
-        props.onActivate();
+        actions.activate(session.id);
       }}
       onDoubleClick={(event) => {
         event.stopPropagation();
-        props.onStartRename();
+        actions.startRename(session.id);
       }}
-      onContextMenu={props.onContextMenu}
+      onContextMenu={(event) => {
+        actions.contextMenu(session.id, event);
+      }}
       onFocus={(event) => {
-        if (event.target === event.currentTarget) props.onFocus();
+        if (event.target === event.currentTarget) actions.focus(session.id);
       }}
-      onDragStart={props.onDragStart}
-      onDragOver={props.onDragOver}
-      onDrop={props.onDrop}
-      onDragEnd={props.onDragEnd}
+      onDragStart={(event) => {
+        actions.dragStart(session.id, event);
+      }}
+      onDragOver={(event) => {
+        actions.dragOver(session.id, event);
+      }}
+      onDrop={(event) => {
+        actions.drop(session.id, event);
+      }}
+      onDragEnd={actions.dragEnd}
     >
       <div className="row-line">
         <KindIcon kind={session.kind} />
         {props.renaming ? (
           <RenameInput
             session={session}
-            onCommit={props.onRename}
-            onCancel={props.onCancelRename}
+            onCommit={(name) => {
+              actions.rename(session.id, name);
+            }}
+            onCancel={actions.cancelRename}
           />
         ) : (
           <span className="row-title" title={session.title}>
@@ -153,7 +180,7 @@ export function SessionRow(props: SessionRowProps) {
             data-testid="row-resume"
             onClick={(event) => {
               event.stopPropagation();
-              props.onResume();
+              actions.resume(session.id);
             }}
           >
             Resume
@@ -169,7 +196,7 @@ export function SessionRow(props: SessionRowProps) {
       </div>
     </li>
   );
-}
+});
 
 function RenameInput({
   session,
