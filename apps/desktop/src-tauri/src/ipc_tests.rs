@@ -318,6 +318,42 @@ fn a_session_is_started_driven_and_closed() {
 }
 
 #[test]
+fn a_running_session_is_attached_to_again_without_a_restart() {
+    let home = tempfile::tempdir().unwrap();
+    let app = Harness::new(home.path());
+    let session = app.ok(
+        "session_create",
+        json!({ "request": { "kind": "background", "command": waiting_line() } }),
+    );
+    let id = session["id"].as_str().unwrap().to_owned();
+    let started = app.ok(
+        "session_start",
+        json!({ "id": id, "request": { "cols": 80, "rows": 24 }, "onEvent": channel(2) }),
+    );
+
+    let attached = app.ok(
+        "session_attach",
+        json!({ "id": id, "cols": 100, "rows": 30, "onEvent": channel(3) }),
+    );
+
+    // The same terminal: nothing was started again.
+    assert_eq!(attached["terminal"], started["terminal"]);
+    assert!(attached["ackBatchBytes"].as_u64().unwrap() > 0);
+    assert_eq!(app.state_of(&id), SessionState::Running);
+
+    // A session that does not run has nothing to attach to.
+    app.ok("session_stop", json!({ "id": id }));
+    let refused = app
+        .invoke(
+            "session_attach",
+            json!({ "id": id, "cols": 100, "rows": 30, "onEvent": channel(4) }),
+        )
+        .unwrap_err();
+    assert_eq!(refused["command"], "session_attach");
+    assert_eq!(refused["kind"], "notFound");
+}
+
+#[test]
 fn a_session_that_ends_on_its_own_is_exited_with_its_code() {
     let home = tempfile::tempdir().unwrap();
     let app = Harness::new(home.path());

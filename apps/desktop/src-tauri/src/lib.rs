@@ -44,6 +44,7 @@ macro_rules! command_handlers {
             crate::commands::session::session_reorder,
             crate::commands::session::project_reorder,
             crate::commands::session::session_start,
+            crate::commands::session::session_attach,
             crate::commands::session::session_close,
             crate::commands::session::session_stop,
             crate::commands::session::session_remove,
@@ -109,11 +110,13 @@ pub fn run() {
             Ok(())
         })
         // A page that loads has no terminal yet: terminals that are still
-        // running for this window belong to a page that was reloaded, and
-        // nothing can display them any more. Their sessions stay, dormant.
+        // running for this window belong to a page that was reloaded (or a
+        // webview that crashed). They keep running, and the new page
+        // attaches to them again (`session_attach`). Only closing the
+        // window ends them.
         .on_page_load(|webview, payload| {
             if payload.event() == PageLoadEvent::Started {
-                release_window(webview.app_handle(), webview.label());
+                release_page(webview.app_handle(), webview.label());
             }
         })
         .on_window_event(|window, event| match event {
@@ -173,6 +176,17 @@ fn raise_open_file_limit() {
 
 /// Label of the window of the application, as in `tauri.conf.json`.
 const MAIN_WINDOW: &str = "main";
+
+/// Lets go of the page of the window `label`, which is loading again: its
+/// subscription to the workspace ends, its terminals keep running.
+fn release_page(app: &tauri::AppHandle, label: &str) {
+    if let Some(workspace) = app.try_state::<workspace::WorkspaceState>() {
+        workspace.unsubscribe(label);
+    }
+    if let Some(terminal) = app.try_state::<terminal::TerminalState>() {
+        terminal.release_page(label);
+    }
+}
 
 /// Ends what the window `label` was shown: its subscription to the
 /// workspace and its terminals.

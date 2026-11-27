@@ -225,6 +225,45 @@ pub fn session_start<R: Runtime>(
     })
 }
 
+/// Attaches this page to the terminal a session runs in, after the page was
+/// reloaded: `on_event` receives the recent output of the terminal, then
+/// what follows. Nothing is started or restarted. The terminal is resized
+/// to `cols` by `rows`, which makes a full-screen program redraw.
+///
+/// # Errors
+///
+/// Fails with `notFound` when the session does not exist or does not run.
+#[tauri::command]
+pub fn session_attach<R: Runtime>(
+    webview: Webview<R>,
+    terminals: State<'_, TerminalState>,
+    state: State<'_, WorkspaceState>,
+    id: SessionKey,
+    cols: u16,
+    rows: u16,
+    on_event: Channel<InvokeResponseBody>,
+) -> CommandResult<StartedSession> {
+    logged("session_attach", || {
+        let terminal = state
+            .workspace()
+            .session(&id)
+            .and_then(|session| session.terminal_id)
+            .ok_or_else(|| Failure::new(ErrorKind::NotFound, "the session does not run"))?;
+        let terminal = SessionId::from_raw(terminal);
+        terminals.attach(
+            webview.label(),
+            terminal,
+            PtySize::new(cols, rows),
+            on_event,
+        )?;
+        Ok::<_, Failure>(StartedSession {
+            terminal: terminal.as_u64(),
+            ack_batch_bytes: ACK_BATCH_BYTES,
+            windows_build_number: windows_build_number(),
+        })
+    })
+}
+
 /// Closes a session for good: its process is killed and it leaves the
 /// sidebar and its pane. Closing a session that does not exist does
 /// nothing.
@@ -381,9 +420,8 @@ pub fn session_resize(
     rows: u16,
 ) -> CommandResult<()> {
     logged("session_resize", || {
-        let resized = state
-            .manager()?
-            .resize(SessionId::from_raw(id), PtySize::new(cols, rows));
+        state.manager()?;
+        let resized = state.resize(SessionId::from_raw(id), PtySize::new(cols, rows));
         ignore_ended_session("resize", id, resized)
     })
 }
@@ -397,8 +435,7 @@ pub fn session_resize(
 #[tauri::command]
 pub fn session_ack(state: State<'_, TerminalState>, id: u64, bytes: u64) -> CommandResult<()> {
     logged("session_ack", || {
-        state.manager()?.acknowledge(SessionId::from_raw(id), bytes);
-        Ok::<_, String>(())
+        state.acknowledge(SessionId::from_raw(id), bytes)
     })
 }
 
