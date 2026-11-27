@@ -484,6 +484,19 @@ impl TerminalState {
         }
     }
 
+    /// Tells the workspace what was typed in the terminal `id`, so that an
+    /// answer to a permission prompt of Claude Code ends the wait at once
+    /// (see `termx_core::workspace::agent::is_answer`). Nothing is kept or
+    /// logged.
+    pub fn report_input(&self, id: SessionId, bytes: &[u8]) {
+        let link = lock(&self.owners)
+            .get(&id)
+            .and_then(|owner| owner.session.clone());
+        if let Some(link) = link {
+            link.workspace.report_input(&link.key, bytes);
+        }
+    }
+
     /// The window a terminal belongs to.
     #[cfg(test)]
     fn owner_of(&self, id: SessionId) -> Option<String> {

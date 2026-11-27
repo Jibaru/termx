@@ -397,6 +397,7 @@ pub async fn session_write(
     logged_async("session_write", async {
         let manager = state.manager()?.clone();
         let bytes = input_bytes(data, binary.unwrap_or(false));
+        state.report_input(SessionId::from_raw(id), &bytes);
         let written = tauri::async_runtime::spawn_blocking(move || {
             manager.write(SessionId::from_raw(id), &bytes)
         })

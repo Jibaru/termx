@@ -1446,6 +1446,26 @@ impl Workspace {
         Ok(outcome)
     }
 
+    /// Records what the user typed in the terminal of the session `key`,
+    /// as far as the agent state goes: an answer to a permission prompt
+    /// ([`agent::is_answer`]) ends the wait at once, rather than when the
+    /// approved tool has run, which can be minutes later. Cheap: call it
+    /// for every write. Unknown sessions are ignored.
+    pub fn report_input(&self, key: &SessionKey, input: &[u8]) {
+        if !agent::is_answer(input) {
+            return;
+        }
+        self.shared.mutate(|state, mutation| {
+            let Ok(entry) = state.entry(key) else {
+                return;
+            };
+            if entry.agent.user_answered(now_ms()) {
+                entry.session.agent = entry.agent.state().cloned();
+                mutation.changes.session(key);
+            }
+        });
+    }
+
     /// Moves a session just before the session `before` in the order of
     /// the sessions, or to the end.
     ///
