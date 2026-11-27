@@ -166,7 +166,7 @@ logged. CI uploads the same directory as an artifact of the failed job.
   WebdriverIO Tauri service. It is used on the three platforms so that there
   is one harness: macOS has no WebDriver for its webview, which rules out
   `tauri-driver` there. It only listens when `TAURI_WEBDRIVER_PORT` is set,
-  and only on the loopback interface;
+  and only on the loopback interface (`127.0.0.1`);
 - `TERMX_E2E_SHELL`, which names the program the terminals run instead of
   your login shell;
 - a marker that makes the frontend expose its terminals, so that a test can
@@ -181,6 +181,19 @@ the marker the frontend exposes nothing. The capabilities and the
 content security policy of the application are the same with and without the
 feature. Keep it that way: a hook for the tests goes behind the feature, in
 `e2e.rs`.
+
+**The WebDriver server has no authentication**, and does not check the
+`Host` header of a request; the plugin offers no setting for either, nor
+for the address it listens on. While the suite runs, any process of your
+user, or of another user of the machine, can drive the application under
+test, which runs a shell: that is anything you could do in a terminal. A web
+page open in your browser could too, through DNS rebinding (a name of its
+own that it makes resolve to `127.0.0.1`), if it found the port, which is
+chosen at random for each start and open for a few seconds. The application
+under test has an empty home directory, but its shell can reach your files.
+Do not run the suite on a machine you share, and close untrusted pages
+while it runs if that matters to you. Release builds are not affected: they
+cannot contain the server.
 
 **Keys are not physical key presses.** No tool can press keys in the webview
 of the three platforms, so the suite delivers `KeyboardEvent`s to the
