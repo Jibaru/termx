@@ -326,6 +326,14 @@ fn saying_no_to_quitting_is_heard() {
     // `app_quit` itself is not called: it would end the test.
     assert_eq!(app.ok("app_quit_shown", json!({})), Value::Null);
     assert_eq!(app.ok("app_quit_cancel", json!({})), Value::Null);
+    // Without a menu bar there is nothing to give shortcuts to.
+    assert_eq!(
+        app.ok(
+            "menu_set_shortcuts",
+            json!({ "shortcuts": [{ "command": "splitRight", "accelerator": "Cmd+KeyD" }] }),
+        ),
+        Value::Null
+    );
 }
 
 #[test]

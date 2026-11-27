@@ -17,7 +17,7 @@ export function isInTerminal(target: EventTarget | null): boolean {
 }
 
 /** Whether the key event happens in a field the user types in. */
-function isInTextField(target: EventTarget | null): boolean {
+export function isInTextField(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
   return (
     target instanceof HTMLInputElement ||
@@ -32,7 +32,8 @@ function isInTextField(target: EventTarget | null): boolean {
  * The listener is on the window, in the capture phase, so that it sees a
  * key before xterm.js does: a key that is a shortcut never reaches the
  * terminal, and every other key is left alone, untouched, for the program
- * in it. In a terminal or a text field only `global` bindings apply.
+ * in it. In a terminal only `global` bindings apply; in a text field
+ * (renaming a session, the command of the new-session dialog) none does.
  * `enabled` is false while a dialog has the keyboard.
  */
 export function useKeybindings(
@@ -50,8 +51,10 @@ export function useKeybindings(
     const onKeyDown = (event: KeyboardEvent) => {
       const { bindings: current, run: handler, enabled: on } = latest.current;
       if (!on) return;
-      const restricted = isInTerminal(event.target) || isInTextField(event.target);
-      const command = matchBinding(current, event, restricted);
+      const inTerminal = isInTerminal(event.target);
+      // Typing in a field (a name, a command line) keeps every key.
+      if (!inTerminal && isInTextField(event.target)) return;
+      const command = matchBinding(current, event, inTerminal);
       if (command === null) return;
       event.preventDefault();
       event.stopPropagation();

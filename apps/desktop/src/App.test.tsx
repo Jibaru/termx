@@ -781,6 +781,43 @@ describe("the menu bar and quitting", () => {
     expect(view.callsOf("splitPane")).toEqual([[1, "row"]]);
   });
 
+  it("gives the menu bar the shortcuts of the bindings", async () => {
+    const view = await renderApp(workspace([running("s-1")]), { platform: "macos" });
+
+    const [[shortcuts]] = view.callsOf("setMenuShortcuts") as [[{ command: string }[]]];
+    expect(shortcuts).toContainEqual({ command: "splitRight", accelerator: "Cmd+KeyD" });
+  });
+
+  it("runs a key once when the menu bar sees it too", async () => {
+    const view = await renderApp(workspace([running("s-1")]), { platform: "macos" });
+
+    key(window, { code: "KeyD", key: "d", metaKey: true });
+    act(() => {
+      view.events.menu?.("splitRight");
+    });
+    await flush();
+
+    expect(view.callsOf("splitPane")).toHaveLength(1);
+  });
+
+  it("keeps every key, the menu's included, while a name is typed", async () => {
+    const view = await renderApp(workspace([running("s-1")]), { platform: "macos" });
+    fireEvent.doubleClick(row("s-1"));
+    const input = screen.getByTestId("rename-input");
+
+    key(input, { code: "KeyB", key: "b", metaKey: true });
+    key(input, { code: "KeyD", key: "d", metaKey: true });
+    act(() => {
+      view.events.menu?.("toggleSidebar");
+      view.events.menu?.("splitRight");
+    });
+    await flush();
+
+    expect(screen.getByTestId("sidebar")).toBeInTheDocument();
+    expect(view.callsOf("splitPane")).toEqual([]);
+    expect(screen.getByTestId("rename-input")).toBeInTheDocument();
+  });
+
   it("closes a pane with Cmd+W, and never the only one", async () => {
     const view = await renderApp(workspace([running("s-1")]), { platform: "macos" });
 

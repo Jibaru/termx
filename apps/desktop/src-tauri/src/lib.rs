@@ -33,6 +33,7 @@ macro_rules! command_handlers {
             crate::commands::app::app_quit,
             crate::commands::app::app_quit_cancel,
             crate::commands::app::app_quit_shown,
+            crate::commands::app::menu_set_shortcuts,
             crate::commands::diagnostics::log_frontend_event,
             crate::commands::diagnostics::open_log_folder,
             crate::commands::diagnostics::export_diagnostics,
