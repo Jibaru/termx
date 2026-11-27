@@ -809,3 +809,47 @@ fn what_a_command_leaves_behind_when_it_exits_is_ended() {
         }
     });
 }
+
+#[cfg(unix)]
+#[test]
+fn a_shell_whose_start_up_leaves_a_job_holding_its_output_does_not_hang_the_launch() {
+    use std::time::Duration;
+
+    guarded(|| {
+        let setup = Setup::new();
+        setup.install_stand_in();
+        let elsewhere = setup.dir.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::rename(
+            setup.bin().join(Setup::STAND_IN),
+            elsewhere.join(Setup::STAND_IN),
+        )
+        .unwrap();
+        // Its start-up files start a job that keeps the output open.
+        let shell = setup.dir.path().join("termx-test-busy-shell");
+        write_script(
+            &shell,
+            &format!(
+                "#!/bin/sh\nsleep 9876543 &\nPATH=\"{}:$PATH\"; export PATH\nexec /bin/sh \"$@\"\n",
+                elsewhere.display()
+            ),
+        );
+        let launcher = Launcher::new(Shell::new(&shell)).claude_program(Setup::STAND_IN);
+
+        let started = Instant::now();
+        let command = launcher
+            .command(&setup.request(SessionKind::Claude))
+            .unwrap();
+        let took = started.elapsed();
+
+        assert!(took < Duration::from_secs(3), "the launch waited {took:?}");
+        // What it printed was used, and its job was ended.
+        let (output, exit) = run(setup.isolate(command));
+        assert!(output.contains("stand-in-ran:"), "printed {output:?}");
+        assert_eq!(exit.code(), Some(7));
+        assert!(
+            sleeping(9_876_543).is_empty(),
+            "the job of the probe survived"
+        );
+    });
+}

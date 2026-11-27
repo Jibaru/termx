@@ -670,11 +670,15 @@ impl Launcher {
 /// `printenv` when it runs a command. Asked once per shell and remembered;
 /// `None` when the shell does not answer within [`PATH_CAPTURE_TIMEOUT`] or
 /// answers something that is not a `PATH`. Never logged.
+///
+/// The whole question is bounded in time, reading included: the shell runs
+/// in a process group of its own, and once it has exited, or the time is
+/// up, that group is killed, so a job its start-up files left holding the
+/// output cannot keep termx waiting.
 #[cfg(unix)]
 fn path_of(shell: &Path) -> Option<std::ffi::OsString> {
     use std::collections::HashMap;
     use std::os::unix::ffi::OsStringExt;
-    use std::process::{Command, Stdio};
     use std::sync::Mutex;
 
     static KNOWN: Mutex<Option<HashMap<PathBuf, Option<std::ffi::OsString>>>> = Mutex::new(None);
@@ -685,32 +689,16 @@ fn path_of(shell: &Path) -> Option<std::ffi::OsString> {
         return known.clone();
     }
 
-    let asked = (|| {
-        let mut child = Command::new(shell)
-            .args(["-c", "printenv PATH"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .ok()?;
-        let deadline = std::time::Instant::now() + PATH_CAPTURE_TIMEOUT;
-        loop {
-            match child.try_wait() {
-                Ok(Some(_)) => break,
-                Ok(None) if std::time::Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                _ => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return None;
-                }
-            }
-        }
-        let mut output = Vec::new();
-        std::io::Read::read_to_end(&mut child.stdout.take()?, &mut output).ok()?;
-        // What the shell's start-up files print comes first: the `PATH` is
-        // the last line.
+    let output = ask_for_path(shell, PATH_CAPTURE_TIMEOUT);
+    if output.is_none() {
+        crate::diagnostics::tracing::warn!(
+            shell = %shell.display(),
+            "the shell did not tell its PATH in time; sessions start with the login PATH of sh"
+        );
+    }
+    // What the shell's start-up files print comes first: the `PATH` is the
+    // last line.
+    let asked = output.and_then(|output| {
         let line = output
             .split(|&b| b == b'\n')
             .rev()
@@ -718,12 +706,94 @@ fn path_of(shell: &Path) -> Option<std::ffi::OsString> {
             .to_vec();
         let valid = line.first() == Some(&b'/') && !line.contains(&0) && !line.contains(&b'\r');
         valid.then(|| std::ffi::OsString::from_vec(line))
-    })();
+    });
 
     crate::pty::lock(&KNOWN)
         .get_or_insert_with(HashMap::new)
         .insert(shell.to_owned(), asked.clone());
     asked
+}
+
+/// Runs `<shell> -c 'printenv PATH'` and returns what it printed, or
+/// `None` if it did not exit within `timeout`. Never waits longer than
+/// `timeout`, plus a moment for the output once the shell has exited.
+#[cfg(unix)]
+fn ask_for_path(shell: &Path, timeout: Duration) -> Option<Vec<u8>> {
+    use std::io::Read;
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+    use std::sync::{Arc, Mutex};
+    use std::time::Instant;
+
+    /// How long the output may still take once the shell has exited.
+    const AFTER_EXIT: Duration = Duration::from_millis(200);
+    /// Most of the output that is kept.
+    const MAX_OUTPUT: u64 = 64 * 1024;
+
+    let mut child = Command::new(shell)
+        .args(["-c", "printenv PATH"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .ok()?;
+    let group = i32::try_from(child.id())
+        .ok()
+        .and_then(rustix::process::Pid::from_raw);
+    let end_group = || {
+        if let Some(group) = group {
+            let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+        }
+    };
+
+    // Read on a thread of its own, which may stay blocked if something
+    // outside the group holds the output: it is not waited for.
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    if let Some(stdout) = child.stdout.take() {
+        let output = Arc::clone(&output);
+        let spawned = std::thread::Builder::new()
+            .name("termx-path-probe".to_owned())
+            .spawn(move || {
+                let mut bytes = Vec::new();
+                let _ = stdout.take(MAX_OUTPUT).read_to_end(&mut bytes);
+                *crate::pty::lock(&output) = bytes;
+                let _ = done_tx.send(());
+            });
+        if spawned.is_err() {
+            end_group();
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+    }
+
+    let deadline = Instant::now() + timeout;
+    let exited = loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break true,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            _ => break false,
+        }
+    };
+    if exited {
+        let wait = AFTER_EXIT.min(deadline.saturating_duration_since(Instant::now()) + AFTER_EXIT);
+        let _ = done_rx.recv_timeout(wait);
+    }
+    // Ends what the start-up files left running in the group, which also
+    // closes the output they held.
+    end_group();
+    if !exited {
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
+    }
+    let _ = done_rx.recv_timeout(AFTER_EXIT);
+    let bytes = crate::pty::lock(&output).clone();
+    Some(bytes)
 }
 
 /// Encodes a script for the `-EncodedCommand` option of PowerShell: its
