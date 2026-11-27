@@ -15,7 +15,8 @@
 //!   split by the sibling. There are no empty splits.
 //! - Every ratio is finite and within [`MIN_RATIO`]..=[`MAX_RATIO`].
 //! - Pane and split identifiers are unique within the layout and are never
-//!   reused.
+//!   reused. They stay at most [`MAX_ID`]: a layout read from disk with
+//!   larger ones is renumbered.
 //! - A session is shown in at most one pane.
 //! - The focused pane exists.
 //! - There are at most [`MAX_PANES`] panes.
@@ -23,6 +24,11 @@
 use serde::{Deserialize, Serialize};
 
 use super::SessionKey;
+
+/// Largest identifier a layout read from disk may use. A layout of
+/// [`MAX_PANES`] panes that is edited for years stays far below it; one
+/// above it is renumbered from 1, so that identifiers can never run out.
+pub const MAX_ID: u32 = 1 << 24;
 
 /// Smallest share of a split its first child can be given.
 pub const MIN_RATIO: f64 = 0.1;
@@ -263,11 +269,11 @@ impl Layout {
         if self.pane_count() >= MAX_PANES {
             return Err(LayoutError::TooManyPanes);
         }
+        let first = self.take_ids(2)?;
         if let Some(session) = &session {
             self.remove_session(session);
         }
-        let new_pane = PaneId(self.take_id());
-        let split = SplitId(self.take_id());
+        let (new_pane, split) = (PaneId(first), SplitId(first + 1));
         let leaf = Node::Pane {
             id: new_pane,
             session,
@@ -334,8 +340,8 @@ impl Layout {
         };
         // Two distinct panes exist, so the root is a split and `pane` has a
         // sibling to leave behind.
+        let split = SplitId(self.take_ids(1)?);
         let (leaf, _) = detach(&mut self.root, pane).ok_or(LayoutError::UnknownPane(pane))?;
-        let split = SplitId(self.take_id());
         insert_beside(&mut self.root, target, leaf, split, direction, placement);
         self.focused = pane;
         Ok(())
@@ -426,6 +432,9 @@ impl Layout {
         if !self.panes().iter().any(|(id, _)| *id == self.focused) {
             self.focused = first_pane(&self.root);
         }
+        if self.next_id > MAX_ID {
+            self.renumber();
+        }
         *self != before
     }
 
@@ -457,10 +466,45 @@ impl Layout {
         }
     }
 
-    fn take_id(&mut self) -> u32 {
-        let id = self.next_id;
-        self.next_id = self.next_id.saturating_add(1);
-        id
+    /// Hands out `count` new identifiers, the first of which is returned.
+    ///
+    /// Running out takes billions of operations in one run, since
+    /// [`sanitize`](Self::sanitize) keeps a restored layout below
+    /// [`MAX_ID`]; should it happen, the operation is refused rather than
+    /// an identifier handed out twice.
+    fn take_ids(&mut self, count: u32) -> Result<u32, LayoutError> {
+        let first = self.next_id;
+        self.next_id = first.checked_add(count).ok_or(LayoutError::TooManyPanes)?;
+        Ok(first)
+    }
+
+    /// Gives every node a new identifier, from 1 in reading order, and
+    /// keeps the focus on the same pane.
+    fn renumber(&mut self) {
+        fn walk(node: &mut Node, next: &mut u32, focused: PaneId, new_focus: &mut PaneId) {
+            match node {
+                Node::Pane { id, .. } => {
+                    if *id == focused {
+                        *new_focus = PaneId(*next);
+                    }
+                    id.0 = *next;
+                    *next += 1;
+                }
+                Node::Split {
+                    id, first, second, ..
+                } => {
+                    id.0 = *next;
+                    *next += 1;
+                    walk(first, next, focused, new_focus);
+                    walk(second, next, focused, new_focus);
+                }
+            }
+        }
+        let mut next = 1;
+        let mut focused = PaneId(1);
+        walk(&mut self.root, &mut next, self.focused, &mut focused);
+        self.focused = focused;
+        self.next_id = next;
     }
 }
 
@@ -1034,6 +1078,38 @@ mod tests {
 
         // A valid layout is left alone.
         assert!(!layout.sanitize(|session| session.as_str() == "s-a"));
+    }
+
+    #[test]
+    fn identifiers_near_the_end_of_their_range_are_renumbered() {
+        let mut layout: Layout = serde_json::from_value(serde_json::json!({
+            "root": {
+                "type": "split", "id": 4_294_967_293_u32, "direction": "row", "ratio": 0.5,
+                "first": { "type": "pane", "id": 4_294_967_294_u32, "session": "s-a" },
+                "second": { "type": "pane", "id": 7, "session": "s-b" },
+            },
+            "focused": 7,
+            "nextId": 4_294_967_295_u32,
+        }))
+        .unwrap();
+
+        assert!(layout.sanitize(|_| true));
+
+        layout.check_invariants().unwrap();
+        assert_eq!(ids(&layout), [PaneId(2), PaneId(3)]);
+        assert_eq!(layout.focused(), PaneId(3));
+        assert_eq!(
+            shown(&layout),
+            [Some("s-a".to_owned()), Some("s-b".to_owned())]
+        );
+        // Splitting hands out identifiers no node has.
+        for _ in 0..3 {
+            let focused = layout.focused();
+            layout
+                .split(focused, Direction::Row, Placement::After, None)
+                .unwrap();
+            layout.check_invariants().unwrap();
+        }
     }
 
     #[test]
