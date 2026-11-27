@@ -18,6 +18,25 @@
       "version": "0.0.9+plugin.1"
     },
     {
+      "claudeInstalled": true,
+      "consent": "accepted",
+      "error": {
+        "kind": "conflict",
+        "message": "The termx plugin is turned off in ~/.claude/settings.json"
+      },
+      "plugin": "conflict"
+    },
+    {
+      "claudeInstalled": true,
+      "consent": "accepted",
+      "error": {
+        "kind": "blocked",
+        "message": "The managed settings of Claude Code allow managed hooks only"
+      },
+      "plugin": "blocked",
+      "version": "0.1.0+plugin.1"
+    },
+    {
       "claudeInstalled": false,
       "consent": "declined",
       "error": {
@@ -93,7 +112,12 @@
     },
     {
       "command": "session_start",
-      "kind": "settingsConflict",
+      "kind": "conflict",
+      "message": "what happened, for the user"
+    },
+    {
+      "command": "session_start",
+      "kind": "permissionDenied",
       "message": "what happened, for the user"
     },
     {
@@ -238,6 +262,16 @@
       "bottom",
       "center"
     ],
+    "integrationErrorKind": [
+      "invalidSettings",
+      "conflict",
+      "blocked",
+      "senderMissing",
+      "permissionDenied",
+      "storageFull",
+      "notFound",
+      "io"
+    ],
     "launchMode": [
       "fresh",
       "resume"
@@ -250,6 +284,8 @@
       "notInstalled",
       "installed",
       "outdated",
+      "conflict",
+      "blocked",
       "error"
     ],
     "projectKind": [

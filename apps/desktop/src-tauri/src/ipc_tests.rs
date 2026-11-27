@@ -125,6 +125,7 @@ fn claude_paths(home: &Path) -> termx_core::claude::Paths {
         sender,
         home: Some(home.to_owned()),
         search_path: None,
+        managed_settings: Vec::new(),
     }
 }
 
