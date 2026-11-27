@@ -354,6 +354,18 @@ impl Store {
     }
 }
 
+impl Drop for Store {
+    /// Releases the lock explicitly instead of only closing the file. A
+    /// process being started at that moment holds a copy of the descriptor
+    /// until it runs its program, and with it the lock: another instance,
+    /// or the next run of a test, would find the state taken.
+    fn drop(&mut self) {
+        if let Some(lock) = &self._lock {
+            let _ = lock.unlock();
+        }
+    }
+}
+
 /// The bytes of a state file. `saved_at` is the only part that does not
 /// depend on `state`.
 ///
