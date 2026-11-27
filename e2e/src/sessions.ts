@@ -37,6 +37,18 @@ export function inFront(
 }
 
 /**
+ * Waits for a shell that was just started to show its first prompt, then
+ * for it to answer. Typing before the first prompt is unsafe: cmd.exe
+ * drops what arrives while it starts.
+ */
+export async function shellReady(terminal: Terminal): Promise<void> {
+  await terminal.waitForLine("the first prompt of the shell", (line) =>
+    /^termx-e2e[$>]\s*$/.test(line),
+  );
+  await terminal.waitForPrompt();
+}
+
+/**
  * Starts another shell from the new-session dialog, in the most recent
  * folder, and waits for it to be in front at its prompt. Returns its id.
  */
@@ -55,7 +67,7 @@ export async function newShell(sidebar: Sidebar, terminal: Terminal): Promise<st
     "the new session to run in front",
     (state) => state.session === created.id && state.status.kind === "running",
   );
-  await terminal.waitForPrompt();
+  await shellReady(terminal);
   return created.id;
 }
 
