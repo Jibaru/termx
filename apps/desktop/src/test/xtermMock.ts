@@ -241,12 +241,32 @@ export class FakeWebglAddon {
     FakeWebglAddon.instances.push(this);
   }
 
-  activate(): void {
+  /** Contexts lost with `WEBGL_lose_context`, over every instance. */
+  static lostContexts = 0;
+  canvas: HTMLCanvasElement | undefined;
+
+  activate(terminal: FakeTerminal): void {
     if (FakeWebglAddon.unavailable) throw new Error("WebGL2 not supported");
+    // The canvas of the renderer, with a context that can be lost.
+    const canvas = document.createElement("canvas");
+    const context = {
+      getExtension: (name: string) =>
+        name === "WEBGL_lose_context"
+          ? {
+              loseContext: () => {
+                FakeWebglAddon.lostContexts += 1;
+              },
+            }
+          : null,
+    };
+    Object.defineProperty(canvas, "getContext", { value: () => context });
+    terminal.element?.appendChild(canvas);
+    this.canvas = canvas;
   }
 
   dispose(): void {
     this.disposed = true;
+    this.canvas?.remove();
   }
 
   /** The browser took the WebGL context away. */
@@ -304,6 +324,7 @@ export function resetXtermMocks(): void {
   FakeTerminal.instances = [];
   FakeWebglAddon.instances = [];
   FakeWebglAddon.unavailable = false;
+  FakeWebglAddon.lostContexts = 0;
   FakeFitAddon.proposed = { cols: 80, rows: 24 };
   FakeResizeObserver.instances = [];
 }

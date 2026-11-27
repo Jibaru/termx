@@ -28,6 +28,7 @@ import {
 import { detectPlatform, type Platform } from "../lib/platform";
 import { DEFAULT_TERMINAL_CONFIG, type TerminalConfig } from "./config";
 import { isComposing, mapKey, OptionKeys, sanitizePaste } from "./keymap";
+import { loseContexts, type WebglBudget, webglBudget, type WebglHolder } from "./webglBudget";
 import { clipboardTextFromOsc52 } from "./osc52";
 
 /**
@@ -63,7 +64,10 @@ export const RESIZE_DEBOUNCE_MS = 50;
 export const MIN_FIT_WIDTH_PX = 48;
 export const MIN_FIT_HEIGHT_PX = 24;
 
-/** How often WebGL is started again after its context was lost (`webgl`). */
+/**
+ * How often WebGL is started again after its context was lost: at once
+ * with `webgl`, the next time the terminal is shown with `auto`.
+ */
 export const MAX_WEBGL_RESTARTS = 3;
 
 /**
@@ -169,6 +173,8 @@ export interface TerminalControllerOptions {
    * when omitted.
    */
   size?: { cols: number; rows: number };
+  /** The WebGL contexts the terminals share. The one of the window by default. */
+  webglBudget?: WebglBudget;
 }
 
 interface PendingInput {
@@ -234,7 +240,7 @@ function xtermOptions(config: TerminalConfig): ITerminalOptions {
   };
 }
 
-export class TerminalController {
+export class TerminalController implements WebglHolder {
   readonly terminal: Terminal;
 
   private readonly config: TerminalConfig;
@@ -246,7 +252,10 @@ export class TerminalController {
 
   private readonly fitAddon = new FitAddon();
   private webglAddon: WebglAddon | null = null;
-  /** WebGL could not be used, or is not to be used again after a loss. */
+  /** The canvases of `webglAddon`, whose contexts are lost explicitly. */
+  private webglCanvases: HTMLCanvasElement[] = [];
+  private readonly webglBudget: WebglBudget;
+  /** WebGL cannot be used, or was lost too often to be tried again. */
   private webglGivenUp = false;
   /** How often WebGL was started again after losing its context. */
   private webglRestarts = 0;
@@ -288,6 +297,7 @@ export class TerminalController {
     this.backend = options.backend ?? TAURI_BACKEND;
     this.sessionId = options.sessionId;
     this.autoStart = options.autoStart ?? "fresh";
+    this.webglBudget = options.webglBudget ?? webglBudget;
 
     this.terminal = new Terminal({
       ...xtermOptions(this.config),
@@ -370,8 +380,9 @@ export class TerminalController {
     if (this.opened) {
       // xterm.js can only be opened once; afterwards its element is moved.
       if (this.terminal.element) container.appendChild(this.terminal.element);
-      // WebGL is let go of while the terminal is off the screen.
-      if (!this.webglAddon) this.enableWebgl();
+      // A terminal that lost its context while off the screen gets one again.
+      if (this.webglAddon) this.webglBudget.shown(this);
+      else this.enableWebgl();
     } else {
       this.terminal.open(container);
       this.opened = true;
@@ -409,13 +420,11 @@ export class TerminalController {
    * output keeps being parsed and acknowledged, so that its scrollback is
    * complete when it is shown again and its program is never held back.
    *
-   * Its WebGL context is released: a window can only hold a few of them,
-   * and one per hidden session would soon cost the visible ones theirs. It
-   * is made again when the terminal is shown; in between, xterm.js keeps
-   * the buffer and draws nothing.
+   * It keeps its WebGL context, so that showing it again is instant, until
+   * a terminal on screen needs the context (see `webglBudget.ts`).
    */
   detach(): void {
-    this.releaseWebgl();
+    if (this.webglAddon) this.webglBudget.hidden(this);
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
     if (this.resizeTimer !== null) {
@@ -447,6 +456,7 @@ export class TerminalController {
     this.disposed = true;
     this.generation += 1;
     this.detach();
+    this.releaseWebgl();
     if (this.titleTimer !== null) clearTimeout(this.titleTimer);
     this.titleTimer = null;
     this.terminalId = null;
@@ -843,44 +853,53 @@ export class TerminalController {
   // --- Renderer ------------------------------------------------------------
 
   /**
-   * Draws with WebGL unless the configuration says `dom`. Without WebGL,
-   * xterm.js draws with its DOM renderer, which is slower but works
-   * everywhere.
+   * Draws with WebGL unless the configuration says `dom`, within the
+   * budget of contexts of the window. Without WebGL, xterm.js draws with
+   * its DOM renderer, which is slower but works everywhere.
    *
    * When the context is lost (the GPU process restarted, the machine woke
-   * up...), `auto` stays on the DOM renderer; `webgl` starts WebGL again, a
-   * few times at most, so that a machine that keeps losing it does not
-   * loop.
+   * up, the webview dropped it...), `webgl` starts WebGL again at once and
+   * `auto` the next time the terminal is shown, a few times at most, so
+   * that a machine that keeps losing it does not loop. A loss is never
+   * the end of WebGL for the terminal by itself.
    */
   private enableWebgl(): void {
     if (this.config.renderer === "dom" || this.webglGivenUp || this.disposed) return;
+    if (!this.webglBudget.acquire(this)) return;
+    const element = this.terminal.element;
+    const before = new Set(element ? element.querySelectorAll("canvas") : []);
     try {
       const addon = new WebglAddon();
       addon.onContextLoss(() => {
+        // A context given back on purpose is not a loss.
+        if (this.webglAddon !== addon) return;
+        this.webglAddon = null;
+        this.webglCanvases = [];
+        this.webglBudget.release(this);
         addon.dispose();
-        if (this.webglAddon === addon) this.webglAddon = null;
-        const restart =
-          this.config.renderer === "webgl" &&
-          this.webglRestarts < MAX_WEBGL_RESTARTS &&
-          !this.disposed;
+        const retry = this.webglRestarts < MAX_WEBGL_RESTARTS && !this.disposed;
         void logFrontendEvent({
           level: "warn",
           source: "terminal-renderer",
-          message: restart
-            ? "the WebGL context was lost; starting WebGL again"
-            : "the WebGL context was lost; the terminal now uses the DOM renderer",
+          message: retry
+            ? "the WebGL context was lost; WebGL will be started again"
+            : "the WebGL context was lost too often; the terminal now uses the DOM renderer",
         });
-        if (restart) {
-          this.webglRestarts += 1;
-          this.enableWebgl();
-        } else {
+        if (!retry) {
           this.webglGivenUp = true;
+          return;
         }
+        this.webglRestarts += 1;
+        if (this.config.renderer === "webgl") this.enableWebgl();
       });
       this.terminal.loadAddon(addon);
       this.webglAddon = addon;
+      this.webglCanvases = element
+        ? [...element.querySelectorAll("canvas")].filter((canvas) => !before.has(canvas))
+        : [];
     } catch (error) {
       this.webglAddon = null;
+      this.webglBudget.release(this);
       this.webglGivenUp = true;
       void logFrontendEvent({
         level: "warn",
@@ -892,10 +911,19 @@ export class TerminalController {
     }
   }
 
+  /** The budget needs the context of this terminal for one on screen. */
+  evictWebgl(): void {
+    this.releaseWebgl();
+  }
+
+  /** Gives the WebGL context back, explicitly, and draws with the DOM renderer. */
   private releaseWebgl(): void {
     const addon = this.webglAddon;
     if (!addon) return;
     this.webglAddon = null;
+    this.webglBudget.release(this);
+    loseContexts(this.webglCanvases);
+    this.webglCanvases = [];
     addon.dispose();
   }
 
