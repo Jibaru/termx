@@ -216,30 +216,37 @@ pub struct Session {
 /// [`Workspace::set_claude_session_id`](super::Workspace::set_claude_session_id)):
 /// it adds fields and statuses, never changes these, and never touches
 /// [`SessionState`]. A frontend shows nothing about the agent while it is
-/// `null`, and treats a status it does not know as
-/// [`Working`](AgentStatus::Working).
+/// `null`. A status it does not know is shown as unknown: neutral, neither
+/// busy nor asking for attention, since guessing either way misleads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct AgentState {
     /// What the agent does.
     pub status: AgentStatus,
-    /// Since when it waits for the user, while it does. Milliseconds since
-    /// 1970.
+    /// Since when it waits for the user, while its status is one of the
+    /// `WaitingFor...` ones. Milliseconds since 1970.
     pub waiting_since: Option<u64>,
 }
 
 /// What the agent of a session does. See [`AgentState`].
+///
+/// What it waits for is part of the status, rather than a field next to
+/// it: a frontend needs both to decide how loudly to ask for attention,
+/// and one value cannot be half set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub enum AgentStatus {
     /// It works on what it was asked.
     Working,
-    /// It waits for the user: an answer, a permission.
-    Waiting,
-    /// It finished and has nothing to do.
-    Idle,
+    /// It waits for the user to allow something it wants to do (a
+    /// command, an edit). The session cannot go on without them.
+    WaitingForPermission,
+    /// It waits for the user's next message or answer to a question.
+    WaitingForInput,
+    /// It finished what it was asked and has nothing to do.
+    Done,
 }
 
 impl AgentState {
@@ -421,6 +428,22 @@ mod tests {
         assert!(SessionState::Starting.is_active());
         assert!(SessionState::Running.is_active());
         assert!(!SessionState::Dormant.is_active());
+    }
+
+    #[test]
+    fn an_agent_says_what_it_waits_for() {
+        let json = |status| serde_json::to_value(AgentState::new(status, Some(5))).unwrap();
+
+        assert_eq!(
+            json(AgentStatus::WaitingForPermission),
+            serde_json::json!({ "status": "waitingForPermission", "waitingSince": 5 })
+        );
+        assert_eq!(
+            json(AgentStatus::WaitingForInput)["status"],
+            "waitingForInput"
+        );
+        assert_eq!(json(AgentStatus::Working)["status"], "working");
+        assert_eq!(json(AgentStatus::Done)["status"], "done");
     }
 
     #[test]

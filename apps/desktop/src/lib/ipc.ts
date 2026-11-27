@@ -239,22 +239,31 @@ export const SESSION_STATUSES = [
  * report it. Reserved: `Session.agent` is always `null` until termx
  * installs those hooks. That version only fills it in, adding fields and
  * statuses; `SessionState` stays about the process. Show nothing about
- * the agent while it is `null`, and treat a status you do not know as
- * `working`.
+ * the agent while it is `null`. Show a status you do not know as unknown:
+ * neutral, neither busy nor asking for attention.
  */
 export interface AgentState {
   status: AgentStatus;
-  /** Since when it waits for the user, while it does. */
+  /** Since when it waits for the user, while its status is `waitingFor...`. */
   waitingSince: number | null;
 }
 
-/** What the agent does: works, waits for the user, or has finished. */
-export type AgentStatus = "working" | "waiting" | "idle";
+/**
+ * What the agent does:
+ *
+ * - `working`: on what it was asked.
+ * - `waitingForPermission`: for the user to allow something (a command, an
+ *   edit); it cannot go on without them.
+ * - `waitingForInput`: for the user's next message or answer.
+ * - `done`: it finished and has nothing to do.
+ */
+export type AgentStatus = "working" | "waitingForPermission" | "waitingForInput" | "done";
 
 export const AGENT_STATUSES = [
   "working",
-  "waiting",
-  "idle",
+  "waitingForPermission",
+  "waitingForInput",
+  "done",
 ] as const satisfies readonly AgentStatus[];
 
 /** What groups sessions in the sidebar. */

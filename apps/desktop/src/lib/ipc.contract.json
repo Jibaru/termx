@@ -105,7 +105,7 @@
       "sessions": [
         {
           "agent": {
-            "status": "waiting",
+            "status": "waitingForPermission",
             "waitingSince": 1795716005000
           },
           "autoTitle": "Fix the login",
@@ -150,7 +150,7 @@
     }
   ],
   "enums": {
-    "agentStatus": ["working", "waiting", "idle"],
+    "agentStatus": ["working", "waitingForPermission", "waitingForInput", "done"],
     "direction": ["row", "column"],
     "edge": ["left", "right", "top", "bottom", "center"],
     "launchMode": ["fresh", "resume"],
@@ -296,7 +296,7 @@
     "sessions": [
       {
         "agent": {
-          "status": "waiting",
+          "status": "waitingForPermission",
           "waitingSince": 1795716005000
         },
         "autoTitle": "Fix the login",
