@@ -1,5 +1,6 @@
 import { createContext, useContext, useSyncExternalStore } from "react";
 
+import type { IntegrationSnapshot } from "../claude/integration";
 import type { Binding, CommandId } from "../keybindings/keybindings";
 import { shortcutOf } from "../keybindings/keybindings";
 import type { WorkspaceSnapshot } from "../lib/ipc";
@@ -40,6 +41,20 @@ export function useWorkspace(): WorkspaceSnapshot | null {
 export function useUi(): UiState {
   const workbench = useWorkbench();
   return useSyncExternalStore(workbench.subscribe, workbench.getUi);
+}
+
+/** Where the Claude Code integration stands, and its install or removal. */
+export function useClaudeIntegration(): IntegrationSnapshot {
+  const { claude } = useWorkbench();
+  return useSyncExternalStore(claude.subscribe, claude.getSnapshot);
+}
+
+/** Whether the plugin of Claude Code reports: agent states can be shown. */
+export function useAgentsReported(): boolean {
+  const workbench = useWorkbench();
+  // Renders again when the integration changes.
+  useClaudeIntegration();
+  return workbench.claude.reporting;
 }
 
 /** The shortcut of a command as the user types it, or `null`. */

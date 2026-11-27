@@ -9,6 +9,7 @@ import { type ControllerFactory, SessionStore } from "../terminal/sessionStore";
 import type { AutoStart, TerminalController, TerminalStatus } from "../terminal/TerminalController";
 import { Workbench } from "../workspace/workbench";
 import { type WorkspaceBackend, WorkspaceStore } from "../workspace/workspaceStore";
+import { fakeClaude } from "./fakeClaude";
 import { recordIPC } from "./ipcRecorder";
 import { settle } from "./terminalHarness";
 
@@ -155,12 +156,21 @@ export function fakeTerminals() {
 /** Renders the window on a fake workspace, and waits for it to load. */
 export async function renderApp(
   workspace: WorkspaceSnapshot,
-  options: { responders?: Responders; platform?: Platform; bindings?: Binding[] } = {},
+  options: {
+    responders?: Responders;
+    platform?: Platform;
+    bindings?: Binding[];
+    /** The Claude Code integration; installed, with consent, when omitted. */
+    claude?: ReturnType<typeof fakeClaude>;
+  } = {},
 ) {
   const ipc = recordIPC((command) => (command === "core_version" ? "0.0.0" : undefined));
   const fake = fakeWorkspace(workspace, options.responders);
   const terminals = fakeTerminals();
-  const workbench = new Workbench(new WorkspaceStore(fake.backend), terminals.store);
+  const claude = options.claude ?? fakeClaude();
+  const workbench = new Workbench(new WorkspaceStore(fake.backend), terminals.store, {
+    claude: claude.backend,
+  });
   const view = render(
     <App
       workbench={workbench}
@@ -181,7 +191,7 @@ export async function renderApp(
   const update = (...sessions: Session[]) => {
     push({ sessions });
   };
-  return { ...fake, ...terminals, ipc, workbench, view, push, update };
+  return { ...fake, ...terminals, ipc, workbench, view, push, update, claude };
 }
 
 /** Lets the calls in flight finish, inside `act`. */

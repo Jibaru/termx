@@ -112,3 +112,45 @@ export function Notices() {
     </div>
   );
 }
+
+/** How long a hint stays on screen. */
+export const HINT_MS = 2_500;
+
+/**
+ * A short, quiet hint at the bottom of the main area, such as "No session
+ * needs you right now". Screen readers hear it through `LiveRegion`.
+ */
+export function Hint() {
+  const workbench = useWorkbench();
+  const { hint } = useUi();
+
+  useEffect(() => {
+    if (!hint) return;
+    const timer = setTimeout(() => {
+      workbench.dismissHint(hint.id);
+    }, HINT_MS);
+    return () => {
+      clearTimeout(timer);
+    };
+  }, [hint, workbench]);
+
+  if (!hint) return null;
+  return (
+    <div className="hint" data-testid="hint" aria-hidden="true">
+      {hint.text}
+    </div>
+  );
+}
+
+/**
+ * What screen readers are told, politely, without moving the focus: a
+ * session that starts to need the user, a hint.
+ */
+export function LiveRegion() {
+  const { announcement } = useUi();
+  return (
+    <div className="visually-hidden" role="status" aria-live="polite" data-testid="live-region">
+      {announcement && <span key={announcement.id}>{announcement.text}</span>}
+    </div>
+  );
+}

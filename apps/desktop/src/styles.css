@@ -21,6 +21,7 @@
   --color-warning: #ffaf00;
   --color-attention: #ff5fff;
   --color-attention-text: #0a0a0a;
+  --color-attention-bg: #2a0f2a;
   --color-muted: #8a8a8a;
   --color-kind-claude: #ffaf5f;
   --color-kind-shell: #b2b2b2;
@@ -369,9 +370,34 @@ body {
   border-left-color: var(--color-accent);
 }
 
-/* An agent that cannot go on without the user: loud on purpose. */
+/* An agent that cannot go on without the user: loud on purpose, and
+   still readable without colour (the bar, the bold title, the icon). */
 .session-row[data-attention] {
   border-left-color: var(--color-attention);
+  background-color: var(--color-attention-bg);
+}
+
+.session-row[data-attention][aria-selected="true"] {
+  background-color: var(--color-selected);
+}
+
+.session-row[data-attention] .row-title {
+  font-weight: 600;
+}
+
+/* A collapsed group that hides sessions waiting for the user says how many. */
+.group-attention {
+  flex: none;
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background-color: var(--color-attention);
+  color: var(--color-attention-text);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
 }
 
 .row-line {
@@ -552,6 +578,106 @@ body {
 .agent-slot[data-tone="attention"] {
   border-color: var(--color-attention);
   color: var(--color-attention);
+}
+
+/* A report that is no longer fresh: dimmed, neutral, still. */
+.agent-slot[data-stale] {
+  border-style: dashed;
+  opacity: 0.6;
+}
+
+.agent-slot[data-stale] .icon {
+  color: var(--color-muted);
+}
+
+.agent-slot[data-stale] .icon-breathe,
+.agent-slot[data-stale] .icon-pulse > circle {
+  animation: none;
+}
+
+/* --- Needs you: the sessions waiting for the user ----------------------- */
+
+.attention-queue {
+  flex: none;
+  margin: 6px 8px 2px;
+  padding: 4px 0;
+  border: 1px solid var(--color-attention);
+  border-radius: 6px;
+}
+
+.attention-queue-title {
+  margin: 0;
+  padding: 0 8px 2px;
+  color: var(--color-attention);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.attention-queue-count {
+  font-family: var(--font-mono);
+}
+
+.attention-queue-list {
+  max-height: 160px;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.attention-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 3px 8px;
+  border: 0;
+  background: none;
+  color: var(--color-text);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.attention-item:hover {
+  background-color: var(--color-hover);
+}
+
+.attention-item:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: -2px;
+}
+
+.attention-item[data-active] {
+  background-color: var(--color-selected);
+}
+
+.attention-item-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  unicode-bidi: isolate;
+}
+
+.attention-item-project {
+  flex: none;
+  max-width: 40%;
+  overflow: hidden;
+  color: var(--color-text-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  unicode-bidi: isolate;
+}
+
+.attention-item-time {
+  flex: none;
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
 }
 
 /* --- Menus and dialogs -------------------------------------------------- */
@@ -966,6 +1092,12 @@ body {
   color: var(--color-text);
 }
 
+/* The session of the pane waits for the user. */
+.pane[data-attention] .pane-header {
+  border-bottom-color: var(--color-attention);
+  box-shadow: inset 3px 0 0 var(--color-attention);
+}
+
 .pane-title {
   min-width: 0;
   overflow: hidden;
@@ -1117,6 +1249,107 @@ body {
   gap: 2px;
   padding: 8px 12px 10px;
   border-top: 1px solid var(--color-border);
+}
+
+.claude-status {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  margin-top: 4px;
+}
+
+.claude-status-text {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+.claude-status-text[data-tone="error"] {
+  color: var(--color-danger);
+}
+
+.notification-toggles {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--color-text-muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.toggle input {
+  margin: 0;
+  accent-color: var(--color-accent);
+}
+
+.claude-changes {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 6px;
+  list-style: none;
+}
+
+.claude-change {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.claude-change-path {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.claude-change-description {
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+.claude-note {
+  font-size: 12px;
+}
+
+/* A quiet hint at the bottom of the main area, gone after a moment. */
+.hint {
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  z-index: 10;
+  max-width: calc(100% - 24px);
+  padding: 4px 12px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 12px;
+  background-color: var(--color-surface-raised);
+  color: var(--color-text-muted);
+  font-size: 12px;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+/* Read by screen readers, not shown. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
 }
 
 /* The pane of a terminal. The padding is on the element of xterm.js, where

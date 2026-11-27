@@ -1,13 +1,21 @@
 import { type DragEvent, useEffect, useState } from "react";
 
+import { isWaiting } from "../attention/agent";
 import type { PaneEdge, Session, SessionId, WorkspaceSnapshot } from "../lib/ipc";
-import { useShortcut, useUi, useWorkbench, withShortcut } from "../workspace/context";
+import {
+  useAgentsReported,
+  useShortcut,
+  useUi,
+  useWorkbench,
+  withShortcut,
+} from "../workspace/context";
 import { describeState, failureLabel, statusOf } from "../workspace/describe";
 import { buildSidebar } from "../workspace/grouping";
 import { visibleSessions } from "../workspace/layoutTree";
 import { BranchIcon, CloseIcon, ResumeIcon, SplitDownIcon, SplitRightIcon } from "../icons/glyphs";
 import { KindIcon } from "../icons/KindIcon";
 import { StatusIcon } from "../icons/StatusIcon";
+import { AgentSlot } from "./AgentSlot";
 import { TerminalView } from "./TerminalView";
 
 interface PaneViewProps {
@@ -33,6 +41,9 @@ export function PaneView({ pane, sessionId, workspace, focused, alone }: PaneVie
   const splitDown = useShortcut("splitDown");
   const closePane = useShortcut("closePane");
   const controller = session ? workbench.terminals.controllerFor(session) : undefined;
+  const agentsShown = useAgentsReported();
+  const agent = agentsShown ? (session?.agent ?? null) : null;
+  const attention = agent !== null && session !== undefined && isWaiting(session);
 
   // The focused pane gives the keyboard to its terminal when it becomes so.
   useEffect(() => {
@@ -46,7 +57,10 @@ export function PaneView({ pane, sessionId, workspace, focused, alone }: PaneVie
       data-pane-id={pane}
       data-focused={focused || undefined}
       data-alone={alone || undefined}
-      aria-label={session ? `Pane: ${session.title}` : "Empty pane"}
+      data-attention={attention || undefined}
+      aria-label={
+        session ? `Pane: ${session.title}${attention ? ", needs you" : ""}` : "Empty pane"
+      }
       onMouseDown={() => {
         void workbench.focusPane(pane);
       }}
@@ -68,6 +82,7 @@ export function PaneView({ pane, sessionId, workspace, focused, alone }: PaneVie
               <StatusIcon status={statusOf(session)} size={12} decorative />
               {describeState(session).label}
             </span>
+            <AgentSlot agent={agent} testId="pane-agent" />
           </>
         ) : (
           <span className="pane-title pane-title-empty">Empty pane</span>

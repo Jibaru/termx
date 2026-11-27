@@ -59,6 +59,11 @@ describe("default key bindings", () => {
     expect(chordOf(bindings, "toggleSidebar")).toEqual({ code: "KeyB", meta: true });
     // Cmd+W closes a pane, never the window and its sessions.
     expect(chordOf(bindings, "closePane")).toEqual({ code: "KeyW", meta: true });
+    expect(chordOf(bindings, "jumpToWaitingSession")).toEqual({
+      code: "KeyA",
+      meta: true,
+      shift: true,
+    });
   });
 
   it.each(["windows", "linux"] as const)("use Ctrl+Shift on %s", (platform) => {
@@ -73,6 +78,11 @@ describe("default key bindings", () => {
     });
     expect(chordOf(bindings, "jumpToSession1")).toEqual({
       code: "Digit1",
+      ctrl: true,
+      shift: true,
+    });
+    expect(chordOf(bindings, "jumpToWaitingSession")).toEqual({
+      code: "KeyA",
       ctrl: true,
       shift: true,
     });
@@ -102,6 +112,11 @@ describe("default key bindings", () => {
         `${JSON.stringify(reserved)} is taken`,
       ).toBeNull();
     }
+  });
+
+  it.each(PLATFORMS)("leave Ctrl+Shift+U to the Unicode input of GTK and IBus (%s)", (platform) => {
+    const unicode = { code: "KeyU", ctrl: true, shift: true };
+    expect(matchBinding(defaultBindings(platform), event(unicode), true)).toBeNull();
   });
 
   it.each(PLATFORMS)("leave copy and paste to the terminal (%s)", (platform) => {
@@ -170,6 +185,9 @@ describe("the menu bar of macOS", () => {
     expect(shortcuts.get("closePane")).toBe("Cmd+KeyW");
     expect(shortcuts.get("newSession")).toBe("Shift+Cmd+KeyT");
     expect(shortcuts.get("nextSession")).toBe("Shift+Cmd+BracketRight");
+    expect(shortcuts.get("jumpToWaitingSession")).toBe("Shift+Cmd+KeyA");
+    // In the menu, without a key of its own.
+    expect(shortcuts.get("nextWaitingSession")).toBeNull();
     // F2 belongs to the program in a terminal: the menu does not take it.
     expect(shortcuts.get("renameSession")).toBeNull();
 
