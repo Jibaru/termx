@@ -15,6 +15,8 @@
 //! - [`Session`], [`SessionKind`], [`SessionState`]: the model of a
 //!   session.
 //! - [`project`]: which project a folder belongs to, and its Git branch.
+//! - [`agent`]: what the agent of Claude Code in a session does, from the
+//!   hooks of Claude Code.
 //! - [`launch`]: what to run for each kind of session, through the user's
 //!   shell so that it has the user's environment.
 //! - [`layout`]: the split tree of panes of the main area.
@@ -105,6 +107,7 @@
 //! renaming), and would still miss a repository that appears later. The
 //! reads above amount to a few `stat` calls per session every ten seconds.
 
+pub mod agent;
 pub mod launch;
 pub mod layout;
 mod model;
@@ -123,9 +126,10 @@ pub use model::{
 pub use notify::{ChangeSet, Subscription};
 pub use project::{GitInfo, Project, ProjectKind};
 pub use service::{
-    ACTIVITY_COALESCE, ActivityHandle, Delta, GIT_DETECT_BUDGET, GIT_POLL_INTERVAL,
-    LAUNCH_CONFIRM_TIMEOUT, Launch, NewSession, SAVE_DEBOUNCE, SAVE_MAX_WAIT, SAVE_RETRY,
-    SHUTDOWN_WAIT, Snapshot, Workspace, WorkspaceConfig, WorkspaceError, parse_reported_cwd,
+    ACTIVITY_COALESCE, ActivityHandle, AgentChannel, Delta, GIT_DETECT_BUDGET, GIT_POLL_INTERVAL,
+    HookOutcome, LAUNCH_CONFIRM_TIMEOUT, Launch, NewSession, SAVE_DEBOUNCE, SAVE_MAX_WAIT,
+    SAVE_RETRY, SHUTDOWN_WAIT, Snapshot, Workspace, WorkspaceConfig, WorkspaceError,
+    parse_reported_cwd,
 };
 pub use store::{PersistenceMode, WindowGeometry};
 

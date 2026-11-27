@@ -105,7 +105,9 @@ describe("the status icon of a session", () => {
   });
 
   it("shows an agent state it does not know as unknown", () => {
-    expect(agentStatusOf({ status: "waitingForInput", waitingSince: 1 })).toBe("waitingForInput");
+    expect(
+      agentStatusOf({ status: "waitingForInput", waitingSince: 1, since: 1, stale: false }),
+    ).toBe("waitingForInput");
     expect(agentStatusOf({ status: "compacting", waitingSince: null } as never)).toBe("unknown");
   });
 });

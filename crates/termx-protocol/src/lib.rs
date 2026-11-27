@@ -29,7 +29,7 @@
 //! ```json
 //! {"v":1,"ticket":"<ENV_TICKET>","op":"ping"}
 //! {"v":1,"ticket":"<ENV_TICKET>","op":"hook","session":"s-0123456789abcdef",
-//!  "event":{"name":"PreToolUse","claudeSessionId":"0b9d...","subagent":false,
+//!  "event":{"name":"PreToolUse","claudeSessionId":"0b9d...",
 //!           "pid":4242,"at":1795716005340123}}
 //! ```
 //!
@@ -120,6 +120,8 @@ impl<'a> Request<'a> {
 /// The operations of the protocol.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "camelCase")]
+// Requests are read one at a time: their size does not matter.
+#[allow(clippy::large_enum_variant)]
 pub enum Op {
     /// Is termx there, and which protocol does it speak?
     Ping,
@@ -160,9 +162,10 @@ pub struct HookEvent {
     /// `prompt_input_exit`, `other`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
-    /// The hook ran for a subagent (`agent_id` was present).
-    #[serde(default)]
-    pub subagent: bool,
+    /// `agent_id`, when the hook ran for a subagent: an identifier Claude
+    /// Code draws for each subagent. `None` for the main agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
     /// The process of Claude Code that ran the hook, when the hook could
     /// tell. See [`parent`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -325,7 +328,7 @@ mod tests {
                     tool: None,
                     source: None,
                     reason: None,
-                    subagent: false,
+                    agent: None,
                     pid: Some(7),
                     at: 5,
                 },
@@ -341,7 +344,7 @@ mod tests {
             json,
             serde_json::json!({
                 "v": 1, "ticket": "t", "op": "hook", "session": "s-1",
-                "event": {"name": "Stop", "claudeSessionId": "abc", "subagent": false, "pid": 7, "at": 5}
+                "event": {"name": "Stop", "claudeSessionId": "abc", "pid": 7, "at": 5}
             })
         );
         assert_eq!(

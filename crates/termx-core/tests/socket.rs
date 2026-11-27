@@ -70,7 +70,7 @@ fn hook(session: &str, name: &str) -> Op {
             tool: None,
             source: None,
             reason: None,
-            subagent: false,
+            agent: None,
             pid: None,
             at: 1,
         },

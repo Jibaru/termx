@@ -236,17 +236,33 @@ export const SESSION_STATUSES = [
 ] as const satisfies readonly SessionState["status"][];
 
 /**
- * What the agent of a session is doing, as the hooks of Claude Code will
- * report it. Reserved: `Session.agent` is always `null` until termx
- * installs those hooks. That version only fills it in, adding fields and
- * statuses; `SessionState` stays about the process. Show nothing about
- * the agent while it is `null`. Show a status you do not know as unknown:
- * neutral, neither busy nor asking for attention.
+ * What the agent of Claude Code in a session is doing, as its hooks report
+ * it (`termx_core::workspace::agent` has the table of events). `null` while
+ * nothing reported anything: no Claude Code runs, the termx plugin is not
+ * installed, or the session was just restored. Never saved. Show nothing
+ * about the agent while it is `null`. Show a status you do not know as
+ * `unknown`: neutral, neither busy nor asking for attention.
+ *
+ * Times are milliseconds since 1970, like every other time of the
+ * workspace.
  */
 export interface AgentState {
   status: AgentStatus;
-  /** Since when it waits for the user, while its status is `waitingFor...`. */
+  /**
+   * Since when it waits for the user, while its status is
+   * `waitingForPermission`, `waitingForInput` or `done`; kept while it goes
+   * from one of them to another, `null` otherwise. The session that has
+   * waited longest has the smallest value.
+   */
   waitingSince: number | null;
+  /** Since when it has this status. */
+  since: number;
+  /**
+   * termx can no longer vouch for what the agent does: its Claude Code is
+   * gone without saying so, or it was working and has been silent for too
+   * long. The status is then `unknown`.
+   */
+  stale: boolean;
 }
 
 /**
@@ -255,16 +271,22 @@ export interface AgentState {
  * - `working`: on what it was asked.
  * - `waitingForPermission`: for the user to allow something (a command, an
  *   edit); it cannot go on without them.
- * - `waitingForInput`: for the user's next message or answer.
- * - `done`: it finished and has nothing to do.
+ * - `waitingForInput`: it needs the user to go on: an answer to a
+ *   question, a plan to approve, a turn that failed (a rate limit, an
+ *   error of the API).
+ * - `done`: its turn ended; it waits for the next message.
+ * - `unknown`: Claude Code runs and termx does not know what it does:
+ *   nothing was asked yet, or termx lost track (`stale`). Neutral.
  */
-export type AgentStatus = "working" | "waitingForPermission" | "waitingForInput" | "done";
+export type AgentStatus =
+  "working" | "waitingForPermission" | "waitingForInput" | "done" | "unknown";
 
 export const AGENT_STATUSES = [
   "working",
   "waitingForPermission",
   "waitingForInput",
   "done",
+  "unknown",
 ] as const satisfies readonly AgentStatus[];
 
 /** What groups sessions in the sidebar. */
@@ -314,10 +336,7 @@ export interface Session {
   createdAt: number;
   /** When it last printed something, or was last started. */
   lastActivityAt: number;
-  /**
-   * What the agent of a Claude Code session is doing. Always `null` for
-   * now: see `AgentState`.
-   */
+  /** What the agent of Claude Code in the session is doing: see `AgentState`. */
   agent: AgentState | null;
   /** The conversation Claude Code resumes, once known. */
   claudeSessionId: string | null;

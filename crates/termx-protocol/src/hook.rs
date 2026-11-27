@@ -133,7 +133,8 @@ struct RawHook {
     source: Text,
     #[serde(default)]
     reason: Text,
-    agent_id: Option<IgnoredAny>,
+    #[serde(default)]
+    agent_id: Text,
 }
 
 /// A field that is used when it is a string, and skipped otherwise: a
@@ -216,7 +217,7 @@ pub fn extract(input: impl Read, at: u64) -> Option<HookEvent> {
             .filter(|tool| REPORTED_TOOLS.contains(&tool.as_str())),
         source: raw.source.0.filter(|value| is_word(value)),
         reason: raw.reason.0.filter(|value| is_word(value)),
-        subagent: raw.agent_id.is_some(),
+        agent: raw.agent_id.0.filter(|id| is_claude_session_id(id)),
         pid: None,
         at,
     })
@@ -328,7 +329,7 @@ mod tests {
                 tool: None,
                 source: None,
                 reason: None,
-                subagent: false,
+                agent: None,
                 pid: None,
                 at: 42,
             }
@@ -390,7 +391,7 @@ mod tests {
             "hook_event_name": "PostToolUse", "session_id": "a", "agent_id": "agent-1",
             "agent_type": "Explore", "tool_name": "Read", "tool_response": {"content": "x"},
         }));
-        assert!(subagent.subagent);
+        assert_eq!(subagent.agent.as_deref(), Some("agent-1"));
         assert_eq!(subagent.tool, None);
     }
 
