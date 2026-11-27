@@ -295,6 +295,7 @@ fn a_session_is_started_driven_and_closed() {
         .invoke("session_remove", json!({ "id": id }))
         .unwrap_err();
     assert_eq!(refused["command"], "session_remove");
+    assert_eq!(refused["kind"], "sessionRunning");
     app.ok("session_stop", json!({ "id": id }));
     assert_eq!(app.state_of(&id), SessionState::Dormant);
     app.ok("session_stop", json!({ "id": id }));
@@ -413,7 +414,7 @@ fn a_command_that_fails_rejects_with_its_name_and_a_message() {
         .unwrap_err();
     assert_eq!(
         unknown,
-        json!({ "command": "session_start", "message": "no session with id s-ghost" })
+        json!({ "command": "session_start", "kind": "notFound", "message": "no session with id s-ghost" })
     );
 
     let gone = home.path().join("gone");
@@ -424,6 +425,7 @@ fn a_command_that_fails_rejects_with_its_name_and_a_message() {
         )
         .unwrap_err();
     assert_eq!(missing["command"], "session_create");
+    assert_eq!(missing["kind"], "folderMissing");
     assert!(
         missing["message"]
             .as_str()
@@ -437,7 +439,7 @@ fn a_command_that_fails_rejects_with_its_name_and_a_message() {
         .unwrap_err();
     assert_eq!(
         refused,
-        json!({ "command": "layout_close_pane", "message": "no pane with id 99" })
+        json!({ "command": "layout_close_pane", "kind": "notFound", "message": "no pane with id 99" })
     );
     let no_command = app
         .invoke(
@@ -446,6 +448,7 @@ fn a_command_that_fails_rejects_with_its_name_and_a_message() {
         )
         .unwrap_err();
     assert_eq!(no_command["command"], "session_create");
+    assert_eq!(no_command["kind"], "invalidCommand");
 
     // An identifier that is not one is refused before the command runs.
     assert!(

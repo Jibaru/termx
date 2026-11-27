@@ -34,9 +34,50 @@ export interface FrontendEvent {
   command?: string;
 }
 
+/**
+ * What kind of failure a command had, to act on without reading the
+ * message. Mirrors `ErrorKind` in Rust. More may be added: treat a kind you
+ * do not know as `internal`.
+ *
+ * - `claudeNotFound`, `folderMissing`, `invalidCommand`, `spawnFailed`,
+ *   `launchUnconfirmed`: as the `LaunchFailure` of the same kind.
+ * - `storageFull`: the disk is full.
+ * - `notFound`: the session, project, pane or split does not exist.
+ * - `invalidArgument`: an argument is not acceptable.
+ * - `sessionRunning`: the session runs, and the operation needs it stopped.
+ * - `internal`: anything else, including a command that panicked.
+ */
+export type CommandErrorKind =
+  | "claudeNotFound"
+  | "folderMissing"
+  | "invalidCommand"
+  | "spawnFailed"
+  | "launchUnconfirmed"
+  | "storageFull"
+  | "notFound"
+  | "invalidArgument"
+  | "sessionRunning"
+  | "internal";
+
+export const COMMAND_ERROR_KINDS = [
+  "claudeNotFound",
+  "folderMissing",
+  "invalidCommand",
+  "spawnFailed",
+  "launchUnconfirmed",
+  "storageFull",
+  "notFound",
+  "invalidArgument",
+  "sessionRunning",
+  "internal",
+] as const satisfies readonly CommandErrorKind[];
+
 /** What a failed command rejects with. Mirrors `CommandError` in Rust. */
 export interface CommandError {
+  /** The name of the command. */
   command: string;
+  kind: CommandErrorKind;
+  /** What happened, for the user. */
   message: string;
 }
 
@@ -737,6 +778,7 @@ export function isCommandError(error: unknown): error is CommandError {
     typeof error === "object" &&
     error !== null &&
     typeof (error as Partial<CommandError>).command === "string" &&
+    typeof (error as Partial<CommandError>).kind === "string" &&
     typeof (error as Partial<CommandError>).message === "string"
   );
 }

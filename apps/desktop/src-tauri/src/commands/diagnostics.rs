@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, Runtime, State};
 use termx_core::diagnostics::{Diagnostics, Severity, tracing};
 
-use super::error::{CommandResult, logged};
+use super::error::{CommandResult, ErrorKind, Failure, logged};
 use crate::logging::{DiagnosticsState, FRONTEND_TARGET, log_dropped_frontend_records};
 
 /// Longest `source` kept from a frontend event, in characters.
@@ -136,12 +136,14 @@ fn running(state: &DiagnosticsState) -> Result<&Diagnostics, String> {
         .ok_or_else(|| "logging is not running, so there are no logs".to_owned())
 }
 
-fn export_bundle(state: &DiagnosticsState, destination: Option<&Path>) -> Result<PathBuf, String> {
+fn export_bundle(state: &DiagnosticsState, destination: Option<&Path>) -> Result<PathBuf, Failure> {
     let diagnostics = running(state)?;
-    let destination = destination.ok_or("the Downloads folder could not be found")?;
-    let bundle = diagnostics
-        .export_bundle(destination)
-        .map_err(|error| error.to_string())?;
+    let destination = destination.ok_or(Failure::new(
+        ErrorKind::NotFound,
+        "the Downloads folder could not be found",
+    ))?;
+    // A full disk is worth telling apart.
+    let bundle = diagnostics.export_bundle(destination)?;
     tracing::info!(path = %bundle.display(), "diagnostics bundle exported");
     Ok(bundle)
 }

@@ -44,6 +44,8 @@ use termx_core::workspace::{
     ActivityHandle, LaunchFailure, LaunchMode, SessionKey, SessionState, Workspace,
 };
 
+use crate::commands::error::{ErrorKind, Failure};
+
 /// A message about a session, sent on its channel as JSON. Output is not
 /// one of them: it is sent as raw bytes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -171,11 +173,9 @@ impl TerminalState {
         mode: LaunchMode,
         size: PtySize,
         channel: Channel<InvokeResponseBody>,
-    ) -> Result<SessionId, String> {
+    ) -> Result<SessionId, Failure> {
         self.manager()?;
-        let launch = workspace
-            .begin_launch(key, mode)
-            .map_err(|source| source.to_string())?;
+        let launch = workspace.begin_launch(key, mode)?;
         if let Some(previous) = launch.previous_terminal {
             self.close(SessionId::from_raw(previous));
         }
@@ -191,19 +191,19 @@ impl TerminalState {
         let id = match self.spawn(owner, &options, filter, channel, Some(link)) {
             Ok(id) => id,
             Err(reason) => {
-                workspace.launch_failed(
-                    key,
-                    launch.generation,
-                    LaunchFailure::spawn_failed(reason.trim_end_matches('.')),
-                );
-                return Err(reason);
+                let failure = LaunchFailure::spawn_failed(reason.trim_end_matches('.'));
+                workspace.launch_failed(key, launch.generation, failure.clone());
+                return Err(failure.into());
             }
         };
         if !workspace.terminal_started(key, launch.generation, id.as_u64()) {
             // Closed or started again in the meantime: nobody wants this
             // terminal any more.
             self.close(id);
-            return Err("the session was closed while it was starting".to_owned());
+            return Err(Failure::new(
+                ErrorKind::NotFound,
+                "the session was closed while it was starting",
+            ));
         }
         Ok(id)
     }
@@ -905,7 +905,8 @@ mod tests {
             )
             .unwrap_err();
 
-        assert!(error.contains("does not exist any more"), "{error}");
+        assert!(error.message.contains("does not exist any more"), "{error}");
+        assert_eq!(error.kind, ErrorKind::FolderMissing);
         assert!(state.manager().unwrap().is_empty());
         assert_eq!(
             workspace.session(&session.id).unwrap().state,
@@ -929,7 +930,8 @@ mod tests {
                 unused,
             )
             .unwrap_err();
-        assert!(error.contains("no session"), "{error}");
+        assert!(error.message.contains("no session"), "{error}");
+        assert_eq!(error.kind, ErrorKind::NotFound);
     }
 
     #[test]
