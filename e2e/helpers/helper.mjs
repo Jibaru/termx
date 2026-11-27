@@ -31,7 +31,88 @@ function requireTerminal() {
   process.exit(2);
 }
 
+/**
+ * What Claude Code gives a hook on its standard input for `event`, shaped as
+ * the documentation describes it, with a prompt and tool inputs that must
+ * never reach termx.
+ */
+function hookInput(event, conversation) {
+  const common = {
+    session_id: conversation,
+    transcript_path: `/home/someone/.claude/projects/x/${conversation}.jsonl`,
+    cwd: process.cwd(),
+    permission_mode: "default",
+    hook_event_name: event,
+  };
+  const bash = { command: "rm -rf build && echo secret-e2e-value", description: "Clean" };
+  switch (event) {
+    case "SessionStart":
+      return { ...common, source: "startup", model: "claude" };
+    case "UserPromptSubmit":
+      return { ...common, prompt: "a private prompt of the e2e suite" };
+    case "PreToolUse":
+      return { ...common, tool_name: "Bash", tool_input: bash, tool_use_id: "toolu_e2e" };
+    case "PermissionRequest":
+      return { ...common, tool_name: "Bash", tool_input: bash };
+    case "PostToolUse":
+      return {
+        ...common,
+        tool_name: "Bash",
+        tool_input: bash,
+        tool_response: { stdout: "secret-e2e-value" },
+        tool_use_id: "toolu_e2e",
+      };
+    case "AskUserQuestion":
+      return {
+        ...common,
+        hook_event_name: "PreToolUse",
+        tool_name: "AskUserQuestion",
+        tool_input: { questions: [{ question: "Which one?" }] },
+        tool_use_id: "toolu_e2e_2",
+      };
+    default:
+      return common;
+  }
+}
+
 const commands = {
+  /**
+   * Plays Claude Code for the hooks of the termx plugin: reads the hooks
+   * the plugin installed (its `hooks/hooks.json`, the first argument), and
+   * runs the hook command of each event the test types, one per line, with
+   * the input Claude Code would give it: `FAKE-CLAUDE-<id>:<event>` once it
+   * ran. `die` ends the program at once, without a final hook, as a Claude
+   * Code that was killed.
+   */
+  async "fake-claude"() {
+    const { readFileSync } = await import("node:fs");
+    const { spawnSync } = await import("node:child_process");
+    const { createInterface } = await import("node:readline");
+    const hooks = JSON.parse(readFileSync(rest[0], "utf8")).hooks;
+    const conversation = `e2e-${id}`;
+    const fire = (step) => {
+      const event = step === "AskUserQuestion" ? "PreToolUse" : step;
+      for (const group of hooks[event] ?? []) {
+        for (const hook of group.hooks) {
+          const run = spawnSync(hook.command, hook.args ?? [], {
+            input: JSON.stringify(hookInput(step, conversation)),
+            encoding: "utf8",
+          });
+          const silent = run.status === 0 && run.stdout === "" && run.stderr === "";
+          if (!silent) line(`FAKE-CLAUDE-NOISY-${id}:${step}:${String(run.status)}`);
+        }
+      }
+      line(`FAKE-CLAUDE-${id}:${step}`);
+    };
+    fire("SessionStart");
+    const input = createInterface({ input: process.stdin });
+    for await (const typed of input) {
+      const step = typed.trim();
+      if (step === "die") process.exit(9);
+      if (step !== "") fire(step);
+    }
+  },
+
   /**
    * Prints every byte it receives, in hexadecimal, as one growing line per
    * read: `RAW-<id>:1b0d:END`. With `--bracketed` it asks for bracketed
