@@ -54,6 +54,8 @@ describe("default key bindings", () => {
     });
     expect(chordOf(bindings, "jumpToSession3")).toEqual({ code: "Digit3", meta: true });
     expect(chordOf(bindings, "toggleSidebar")).toEqual({ code: "KeyB", meta: true });
+    // Cmd+W closes a pane, never the window and its sessions.
+    expect(chordOf(bindings, "closePane")).toEqual({ code: "KeyW", meta: true });
   });
 
   it.each(["windows", "linux"] as const)("use Ctrl+Shift on %s", (platform) => {

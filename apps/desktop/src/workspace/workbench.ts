@@ -34,7 +34,8 @@ export type DialogState =
   | { kind: "none" }
   | { kind: "newSession" }
   | { kind: "confirmClose"; session: SessionId }
-  | { kind: "confirmRestart"; session: SessionId };
+  | { kind: "confirmRestart"; session: SessionId }
+  | { kind: "confirmQuit"; running: number };
 
 export interface UiState {
   dialog: DialogState;
@@ -94,6 +95,10 @@ export class Workbench {
   };
 
   closeDialog = (): void => {
+    // No to quitting: the next close asks again.
+    if (this.ui.dialog.kind === "confirmQuit") {
+      void this.run("cancel-quit", () => this.backend.cancelQuit());
+    }
     this.setUi({ dialog: { kind: "none" } });
     this.focusTerminal();
   };
@@ -439,9 +444,13 @@ export class Workbench {
     );
   };
 
+  /**
+   * Closes a pane; its session keeps running. Nothing happens to the only
+   * pane: Cmd+W, pressed out of habit, must not empty the window.
+   */
   closePane = async (pane?: number): Promise<void> => {
     const workspace = this.current;
-    if (!workspace) return;
+    if (!workspace || workspace.layout.root.type === "pane") return;
     const target = pane ?? workspace.layout.focused;
     await this.run("close-pane", () => this.backend.closePane(target));
   };
@@ -462,6 +471,17 @@ export class Workbench {
 
   resizeSplit = async (split: number, ratio: number): Promise<void> => {
     await this.run("resize-split", () => this.backend.resizeSplit(split, ratio));
+  };
+
+  /** The window is closing, or termx quitting, while sessions run: ask. */
+  requestQuit = (running: number): void => {
+    this.setUi({ dialog: { kind: "confirmQuit", running } });
+  };
+
+  /** The user confirmed quitting. */
+  quit = async (): Promise<void> => {
+    this.setUi({ dialog: { kind: "none" } });
+    await this.run("quit", () => this.backend.quitApp());
   };
 
   /** Reads the Git branches again, for when the window gets the focus back. */

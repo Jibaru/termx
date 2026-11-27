@@ -38,13 +38,18 @@ same folder.
 | Close session (asks if it runs)        | Shift+Cmd+W       | Ctrl+Shift+W       |
 | Split right                            | Cmd+D             | Ctrl+Shift+D       |
 | Split down                             | Shift+Cmd+D       | Ctrl+Shift+E       |
-| Close pane (the session keeps running) | Option+Cmd+W      | Ctrl+Shift+Alt+W   |
+| Close pane (the session keeps running) | Cmd+W             | Ctrl+Shift+Alt+W   |
 | Focus the pane in a direction          | Option+Cmd+arrow  | Ctrl+Shift+arrow   |
 | Next and previous session              | Shift+Cmd+] and [ | Ctrl+Shift+] and [ |
 | Go to session 1 to 9                   | Cmd+1 to 9        | Ctrl+Shift+1 to 9  |
 | Show or hide the sidebar               | Cmd+B             | Ctrl+Shift+B       |
 | Go to the sidebar                      | Cmd+0             | Ctrl+Shift+0       |
 | Rename the session (in the sidebar)    | F2                | F2                 |
+
+On macOS the same actions are in the menu bar. Cmd+W closes the focused
+pane and never the window; with one pane it does nothing. Closing the window
+or quitting while sessions run asks first: they stop, and come back, not
+running, the next time termx starts.
 
 These never take a key a program in the terminal needs: Ctrl and Alt
 shortcuts (Ctrl+C, Ctrl+R, Ctrl+B...), Escape, Shift+Tab and the function

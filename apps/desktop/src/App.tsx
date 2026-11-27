@@ -1,7 +1,11 @@
-import { type CSSProperties, useCallback, useEffect, useMemo, useState } from "react";
+import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Notices, PersistenceBanner, RestoreBanner } from "./components/Banners";
-import { ConfirmCloseDialog, ConfirmRestartDialog } from "./components/ConfirmCloseDialog";
+import {
+  ConfirmCloseDialog,
+  ConfirmQuitDialog,
+  ConfirmRestartDialog,
+} from "./components/ConfirmCloseDialog";
 import { PlusIcon, SidebarIcon } from "./components/icons";
 import { LayoutView } from "./components/LayoutView";
 import { NewSessionDialog } from "./components/NewSessionDialog";
@@ -9,6 +13,7 @@ import { Sidebar } from "./components/Sidebar";
 import { SidebarResizer } from "./components/SidebarResizer";
 import {
   type Binding,
+  COMMAND_LABELS,
   type CommandId,
   resolveBindings,
   shortcutOf,
@@ -178,6 +183,29 @@ function Window() {
 
   useKeybindings(bindings, run, ui.dialog.kind === "none");
 
+  // The menu bar of macOS, and the confirmation before quitting.
+  const latestRun = useRef({ run, enabled: ui.dialog.kind === "none" });
+  useEffect(() => {
+    latestRun.current = { run, enabled: ui.dialog.kind === "none" };
+  });
+  useEffect(() => {
+    const backend = workbench.workspace.backend;
+    const stops = [
+      backend.onMenuCommand((command) => {
+        if (!latestRun.current.enabled || !(command in COMMAND_LABELS)) return;
+        latestRun.current.run(command as CommandId, document.activeElement);
+      }),
+      backend.onQuitRequested(workbench.requestQuit),
+    ];
+    return () => {
+      for (const stop of stops) {
+        stop.then((unlisten) => {
+          unlisten();
+        }, ignoreFailure);
+      }
+    };
+  }, [workbench]);
+
   const shellStyle = {
     "--sidebar-width": `${String(sidebarWidth)}px`,
   } as CSSProperties;
@@ -250,6 +278,12 @@ function Window() {
       {ui.dialog.kind === "newSession" && <NewSessionDialog />}
       {ui.dialog.kind === "confirmClose" && <ConfirmCloseDialog session={ui.dialog.session} />}
       {ui.dialog.kind === "confirmRestart" && <ConfirmRestartDialog session={ui.dialog.session} />}
+      {ui.dialog.kind === "confirmQuit" && <ConfirmQuitDialog running={ui.dialog.running} />}
     </div>
   );
+}
+
+/** Listening to an event failed: it was logged where it failed. */
+function ignoreFailure(): void {
+  // Nothing to undo.
 }

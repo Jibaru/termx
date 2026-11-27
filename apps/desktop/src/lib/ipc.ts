@@ -1,4 +1,5 @@
 import { Channel, invoke, type InvokeArgs } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
@@ -818,6 +819,41 @@ export function focusPane(pane: number): Promise<void> {
  */
 export function showSession(pane: number, session: SessionId | null): Promise<void> {
   return call("layout_show_session", { pane, session });
+}
+
+/**
+ * Quits termx, which ends every session; they come back, dormant, the next
+ * time it starts. The answer to `onQuitRequested`.
+ */
+export function quitApp(): Promise<void> {
+  return call("app_quit");
+}
+
+/** The user said no to quitting: the next close or quit asks again. */
+export function cancelQuit(): Promise<void> {
+  return call("app_quit_cancel");
+}
+
+/**
+ * Calls `handler` with the number of running sessions when the window is
+ * closed, or termx is quit, while sessions run: the user is to confirm it
+ * (`quitApp`) or not (nothing to do). Resolves with how to stop listening.
+ */
+export function onQuitRequested(handler: (running: number) => void): Promise<() => void> {
+  return listen<number>("quit-requested", (event) => {
+    handler(event.payload);
+  });
+}
+
+/**
+ * Calls `handler` with the id of the menu item chosen in the menu bar of
+ * macOS, which is the id of a command of the key bindings. Resolves with
+ * how to stop listening.
+ */
+export function onMenuCommand(handler: (command: string) => void): Promise<() => void> {
+  return listen<string>("menu-command", (event) => {
+    handler(event.payload);
+  });
 }
 
 /**

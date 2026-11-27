@@ -27,6 +27,10 @@ export interface WorkspaceBackend {
   resizeSplit: typeof ipc.resizeSplit;
   focusPane: typeof ipc.focusPane;
   showSession: typeof ipc.showSession;
+  quitApp: typeof ipc.quitApp;
+  cancelQuit: typeof ipc.cancelQuit;
+  onQuitRequested: typeof ipc.onQuitRequested;
+  onMenuCommand: typeof ipc.onMenuCommand;
 }
 
 export const TAURI_WORKSPACE: WorkspaceBackend = {
@@ -47,6 +51,10 @@ export const TAURI_WORKSPACE: WorkspaceBackend = {
   resizeSplit: ipc.resizeSplit,
   focusPane: ipc.focusPane,
   showSession: ipc.showSession,
+  quitApp: ipc.quitApp,
+  cancelQuit: ipc.cancelQuit,
+  onQuitRequested: ipc.onQuitRequested,
+  onMenuCommand: ipc.onMenuCommand,
 };
 
 export type WorkspaceState =

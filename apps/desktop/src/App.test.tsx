@@ -725,6 +725,57 @@ describe("after the page was reloaded", () => {
   });
 });
 
+describe("the menu bar and quitting", () => {
+  it("runs the command of a menu item as its shortcut would", async () => {
+    const view = await renderApp(workspace([running("s-1")]), { platform: "macos" });
+
+    act(() => {
+      view.events.menu?.("splitRight");
+      view.events.menu?.("noSuchCommand");
+    });
+    await flush();
+
+    expect(view.callsOf("splitPane")).toEqual([[1, "row"]]);
+  });
+
+  it("closes a pane with Cmd+W, and never the only one", async () => {
+    const view = await renderApp(workspace([running("s-1")]), { platform: "macos" });
+
+    key(window, { code: "KeyW", key: "w", metaKey: true });
+    await flush();
+    expect(view.callsOf("closePane")).toEqual([]);
+
+    view.push({ layout: twoPanes, sessions: [running("s-2")], sessionOrder: ["s-1", "s-2"] });
+    key(window, { code: "KeyW", key: "w", metaKey: true });
+    await flush();
+    expect(view.callsOf("closePane")).toEqual([[1]]);
+    expect(view.callsOf("closeSession")).toEqual([]);
+  });
+
+  it("asks before quitting while sessions run, and quits on yes", async () => {
+    const view = await renderApp(workspace([running("s-1"), running("s-2")]));
+
+    act(() => {
+      view.events.quit?.(2);
+    });
+    expect(screen.getByTestId("confirm-quit-dialog")).toHaveTextContent(
+      "2 sessions are running. Quitting stops them; they come back, not running",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await flush();
+    expect(view.callsOf("quitApp")).toEqual([]);
+    // The Rust side is told, so that the next close asks again.
+    expect(view.callsOf("cancelQuit")).toEqual([[]]);
+
+    act(() => {
+      view.events.quit?.(2);
+    });
+    fireEvent.click(screen.getByTestId("confirm-quit"));
+    await flush();
+    expect(view.callsOf("quitApp")).toEqual([[]]);
+  });
+});
+
 describe("saving", () => {
   it("warns, for as long as it lasts, that changes are not being saved", async () => {
     const view = await renderApp(workspace([running("s-1")]));

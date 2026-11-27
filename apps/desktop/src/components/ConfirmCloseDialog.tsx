@@ -75,3 +75,37 @@ export function ConfirmRestartDialog({ session: id }: { session: SessionId }) {
     </Modal>
   );
 }
+
+/** Asks before quitting while sessions run. */
+export function ConfirmQuitDialog({ running }: { running: number }) {
+  const workbench = useWorkbench();
+  return (
+    <Modal
+      title="Quit termx?"
+      role="alertdialog"
+      testId="confirm-quit-dialog"
+      onClose={workbench.closeDialog}
+      describedBy="confirm-quit-text"
+    >
+      <p className="modal-text" id="confirm-quit-text">
+        {running === 1 ? "1 session is running" : `${String(running)} sessions are running`}.
+        Quitting stops {running === 1 ? "it" : "them"}; {running === 1 ? "it comes" : "they come"}{" "}
+        back, not running, the next time you open termx, ready to be resumed.
+      </p>
+      <div className="modal-actions">
+        <button type="button" className="button" onClick={workbench.closeDialog}>
+          Cancel
+        </button>
+        <button
+          type="button"
+          className="button button-danger"
+          data-autofocus
+          data-testid="confirm-quit"
+          onClick={() => void workbench.quit()}
+        >
+          Quit
+        </button>
+      </div>
+    </Modal>
+  );
+}

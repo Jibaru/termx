@@ -126,7 +126,8 @@ export function defaultBindings(platform: Platform): Binding[] {
     global("closeSession", chord("KeyW", mac ? { shift: true } : {})),
     global("splitRight", chord("KeyD")),
     global("splitDown", mac ? chord("KeyD", { shift: true }) : chord("KeyE")),
-    global("closePane", chord("KeyW", { alt: true })),
+    // Cmd+W on macOS closes a pane, never the window (see `src-tauri/src/quit.rs`).
+    global("closePane", mac ? { code: "KeyW", meta: true } : chord("KeyW", { alt: true })),
     global("focusPaneLeft", focusChord(mac, "ArrowLeft")),
     global("focusPaneRight", focusChord(mac, "ArrowRight")),
     global("focusPaneUp", focusChord(mac, "ArrowUp")),
