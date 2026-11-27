@@ -9,6 +9,8 @@ interface TerminalViewProps {
   controller: TerminalController;
   /** Where the padding and the background of the pane come from. */
   config?: TerminalConfig;
+  /** Whether the terminal takes the keyboard when it is shown. Yes by default. */
+  autoFocus?: boolean;
 }
 
 /**
@@ -16,13 +18,24 @@ interface TerminalViewProps {
  * controller, which owns the xterm.js instance and its session: switching
  * to another terminal swaps what is in the pane without touching either.
  */
-export function TerminalView({ controller, config = DEFAULT_TERMINAL_CONFIG }: TerminalViewProps) {
+export function TerminalView({
+  controller,
+  config = DEFAULT_TERMINAL_CONFIG,
+  autoFocus = true,
+}: TerminalViewProps) {
   const host = useRef<HTMLDivElement>(null);
+  // Read when the terminal is shown, not a reason to show it again.
+  const focusOnAttach = useRef(autoFocus);
+
+  // Declared first, so it runs before the effect that reads it.
+  useEffect(() => {
+    focusOnAttach.current = autoFocus;
+  });
 
   useEffect(() => {
     const element = host.current;
     if (!element) return;
-    controller.attach(element);
+    controller.attach(element, { focus: focusOnAttach.current });
     return () => {
       controller.detach();
     };
@@ -38,6 +51,7 @@ export function TerminalView({ controller, config = DEFAULT_TERMINAL_CONFIG }: T
     <div
       ref={host}
       className="terminal-host"
+      data-testid="terminal-host"
       style={style}
       // A click on the padding around the terminal still gives it the keys.
       onMouseDown={(event) => {

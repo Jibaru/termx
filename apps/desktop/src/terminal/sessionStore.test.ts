@@ -1,205 +1,86 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
-import type { LaunchMode, NewSession, SessionId, WorkspaceSnapshot } from "../lib/ipc";
-import { deferred } from "../test/terminalHarness";
+import { fakeTerminals } from "../test/fakeWorkspace";
 import { session, singlePane, workspace } from "../test/workspaceFixtures";
-import { SessionStore, sessionToRestore } from "./sessionStore";
-import type { TerminalController } from "./TerminalController";
-
-/**
- * A store whose terminals are stand-ins that only record how they were
- * made and their disposal, on a workspace that holds `restored`.
- */
-function store(restored: WorkspaceSnapshot = workspace()) {
-  const controllers: {
-    sessionId: SessionId;
-    autoStart: LaunchMode | "dormant";
-    dispose: ReturnType<typeof vi.fn>;
-  }[] = [];
-  const created: NewSession[] = [];
-  const closed: SessionId[] = [];
-  const snapshots: (() => Promise<WorkspaceSnapshot>)[] = [];
-  const backend = {
-    getWorkspaceSnapshot: () => (snapshots.shift() ?? (() => Promise.resolve(restored)))(),
-    createSession: (request: NewSession) => {
-      created.push(request);
-      return Promise.resolve(session(`s-new-${String(created.length)}`, { kind: request.kind }));
-    },
-    closeSession: (id: SessionId) => {
-      closed.push(id);
-      return Promise.resolve();
-    },
-  };
-  const sessions = new SessionStore((sessionId, autoStart) => {
-    const controller = { sessionId, autoStart, dispose: vi.fn() };
-    controllers.push(controller);
-    return controller as unknown as TerminalController;
-  }, backend);
-  return { sessions, controllers, created, closed, snapshots };
-}
+import { autoStartFor, sessionToRestore } from "./sessionStore";
 
 describe("SessionStore", () => {
   it("starts empty", () => {
-    const { sessions } = store();
+    const { store } = fakeTerminals();
 
-    expect(sessions.getSnapshot()).toEqual({ keys: [], activeKey: null });
+    expect(store.getSnapshot()).toEqual({ keys: [], activeKey: null });
   });
 
-  it("opens a new shell in an empty workspace, once, however often it is asked", async () => {
-    const { sessions, controllers, created } = store();
+  it("makes the terminal of a session once, the first time it is asked for", () => {
+    const { store, controllers } = fakeTerminals();
+    const shell = session("s-1");
 
-    const first = sessions.ensureOne();
-    const second = sessions.ensureOne();
-    await Promise.all([first, second]);
-    await sessions.ensureOne();
+    const first = store.controllerFor(shell);
+    const again = store.controllerFor(shell);
 
-    // No folder is given: the Rust side starts it in the home directory.
-    expect(created).toEqual([{ kind: "shell" }]);
+    expect(first).toBe(again);
     expect(controllers).toHaveLength(1);
-    expect(controllers[0]).toMatchObject({ sessionId: "s-new-1", autoStart: "fresh" });
-    expect(sessions.getSnapshot()).toEqual({ keys: ["s-new-1"], activeKey: "s-new-1" });
-    expect(sessions.get("s-new-1")).toBe(controllers[0]);
+    expect(store.get("s-1")).toBe(first);
+    expect(store.getSnapshot().keys).toEqual(["s-1"]);
   });
 
-  it("shows the session termx last had on screen, without starting it", async () => {
-    const restored = workspace(
-      [
-        session("s-first", { state: { status: "dormant" } }),
-        session("s-shown", { state: { status: "dormant" }, cwd: "/work/api" }),
-      ],
-      { layout: singlePane("s-shown") },
-    );
-    const { sessions, controllers, created } = store(restored);
-
-    await sessions.ensureOne();
-
-    expect(created).toEqual([]);
-    expect(controllers).toHaveLength(1);
-    expect(controllers[0]).toMatchObject({ sessionId: "s-shown", autoStart: "dormant" });
-    expect(sessions.getSnapshot().activeKey).toBe("s-shown");
+  it("starts a new session at once and leaves a restored one waiting for the user", () => {
+    expect(autoStartFor(session("s", { state: { status: "starting" } }))).toBe("fresh");
+    expect(autoStartFor(session("s", { state: { status: "dormant" } }))).toBe("dormant");
+    // A session that runs without a terminal here is not restarted behind
+    // the user's back (the page was reloaded).
+    expect(autoStartFor(session("s", { state: { status: "running" } }))).toBe("dormant");
+    expect(
+      autoStartFor(
+        session("s", { state: { status: "exited", code: 0, signal: null, failure: null } }),
+      ),
+    ).toBe("dormant");
   });
 
-  it("tries again after the workspace could not be read", async () => {
-    const { sessions, controllers, snapshots } = store();
-    snapshots.push(() => Promise.reject(new Error("the backend is not ready")));
+  it("resumes a session that is not on screen, at the size of the focused terminal", () => {
+    const { store, of } = fakeTerminals();
+    const shown = session("s-shown", { state: { status: "running" } });
+    store.controllerFor(shown);
+    store.setActive("s-shown");
 
-    await sessions.ensureOne();
-    expect(controllers).toHaveLength(0);
+    store.resume(session("s-hidden", { state: { status: "dormant" } }));
 
-    await sessions.ensureOne();
-    expect(controllers).toHaveLength(1);
+    expect(of("s-hidden")?.startDetached).toHaveBeenCalledExactlyOnceWith("resume");
+    // Resuming again while it starts does nothing.
+    store.resume(session("s-hidden", { state: { status: "dormant" } }));
+    expect(of("s-hidden")?.startDetached).toHaveBeenCalledTimes(1);
   });
 
-  it("does not open a second terminal when one was opened in the meantime", async () => {
-    const { sessions, controllers, created, snapshots } = store();
-    const slow = deferred<WorkspaceSnapshot>();
-    snapshots.push(() => slow.promise);
+  it("lets go of the terminals of sessions that left the workspace", () => {
+    const { store, of } = fakeTerminals();
+    store.controllerFor(session("s-1"));
+    store.controllerFor(session("s-2"));
+    store.setActive("s-2");
 
-    const pending = sessions.ensureOne();
-    sessions.open("s-other");
-    slow.resolve(workspace());
-    await pending;
+    store.retain(new Set(["s-1"]));
 
-    expect(controllers.map((controller) => controller.sessionId)).toEqual(["s-other"]);
-    expect(created).toEqual([]);
+    expect(of("s-2")?.dispose).toHaveBeenCalledTimes(1);
+    expect(of("s-1")?.dispose).not.toHaveBeenCalled();
+    expect(store.getSnapshot()).toEqual({ keys: ["s-1"], activeKey: null });
   });
 
-  it("keeps one terminal per session and shows the one opened last", () => {
-    const { sessions, controllers } = store();
+  it("names the session of the focused pane as the active one, for the end-to-end hook", () => {
+    const { store } = fakeTerminals();
+    store.controllerFor(session("s-1"));
 
-    const first = sessions.open("s-a");
-    const second = sessions.open("s-b", "resume");
+    store.setActive("s-1");
 
-    expect([first, second]).toEqual(["s-a", "s-b"]);
-    expect(sessions.getSnapshot()).toEqual({ keys: ["s-a", "s-b"], activeKey: "s-b" });
-    expect(sessions.get("s-a")).toBe(controllers[0]);
-    expect(sessions.get("s-b")).toBe(controllers[1]);
-    expect(controllers[1]?.autoStart).toBe("resume");
-
-    sessions.activate("s-a");
-    expect(sessions.getSnapshot().activeKey).toBe("s-a");
-    sessions.activate("unknown");
-    expect(sessions.getSnapshot().activeKey).toBe("s-a");
-
-    // Opening a session that has a terminal only shows it.
-    expect(sessions.open("s-b")).toBe("s-b");
-    expect(controllers).toHaveLength(2);
-    expect(sessions.getSnapshot()).toEqual({ keys: ["s-a", "s-b"], activeKey: "s-b" });
-  });
-
-  it("notifies its subscribers with a new snapshot for every change", () => {
-    const { sessions } = store();
-    const listener = vi.fn();
-    const before = sessions.getSnapshot();
-    const unsubscribe = sessions.subscribe(listener);
-
-    const key = sessions.open("s-a");
-    expect(listener).toHaveBeenCalledTimes(1);
-    expect(sessions.getSnapshot()).not.toBe(before);
-
-    // Nothing changed: no notification, and the same snapshot.
-    const unchanged = sessions.getSnapshot();
-    sessions.activate(key);
-    expect(listener).toHaveBeenCalledTimes(1);
-    expect(sessions.getSnapshot()).toBe(unchanged);
-
-    unsubscribe();
-    sessions.open("s-b");
-    expect(listener).toHaveBeenCalledTimes(1);
-  });
-
-  it("closes the session of a closed terminal and shows a neighbour", () => {
-    const { sessions, controllers, closed } = store();
-    const first = sessions.open("s-a");
-    const second = sessions.open("s-b");
-    const third = sessions.open("s-c");
-
-    sessions.close(third);
-    expect(controllers[2]?.dispose).toHaveBeenCalledTimes(1);
-    expect(closed).toEqual(["s-c"]);
-    expect(sessions.getSnapshot()).toEqual({ keys: [first, second], activeKey: second });
-
-    // Closing a terminal that is not on screen changes nothing on screen.
-    sessions.close(first);
-    expect(sessions.getSnapshot()).toEqual({ keys: [second], activeKey: second });
-    expect(sessions.get(first)).toBeUndefined();
-
-    sessions.close(second);
-    sessions.close(second);
-    expect(sessions.getSnapshot()).toEqual({ keys: [], activeKey: null });
-    expect(controllers[1]?.dispose).toHaveBeenCalledTimes(1);
-    expect(closed).toEqual(["s-c", "s-a", "s-b"]);
+    expect(store.getSnapshot().activeKey).toBe("s-1");
   });
 });
 
 describe("sessionToRestore", () => {
-  it("prefers the session of the focused pane", () => {
-    const sessions = [session("s-a"), session("s-b"), session("s-c")];
-    const layout = {
-      root: {
-        type: "split" as const,
-        id: 3,
-        direction: "row" as const,
-        ratio: 0.5,
-        first: { type: "pane" as const, id: 1, session: "s-b" },
-        second: { type: "pane" as const, id: 2, session: "s-c" },
-      },
-      focused: 2,
-      nextId: 4,
-    };
-
-    expect(sessionToRestore(workspace(sessions, { layout }))?.id).toBe("s-c");
-    expect(sessionToRestore(workspace(sessions, { layout: { ...layout, focused: 1 } }))?.id).toBe(
-      "s-b",
+  it("is the session of the focused pane, else the first one", () => {
+    const sessions = [session("s-first"), session("s-shown")];
+    expect(sessionToRestore(workspace(sessions, { layout: singlePane("s-shown") }))?.id).toBe(
+      "s-shown",
     );
-  });
-
-  it("falls back to the first session, and to nothing in an empty workspace", () => {
-    const sessions = [session("s-a"), session("s-b")];
-
-    // The focused pane is empty, or shows a session that is gone.
-    expect(sessionToRestore(workspace(sessions, { layout: singlePane(null) }))?.id).toBe("s-a");
-    expect(sessionToRestore(workspace(sessions, { layout: singlePane("s-gone") }))?.id).toBe("s-a");
-    expect(sessionToRestore(workspace())).toBeUndefined();
+    expect(sessionToRestore(workspace(sessions, { layout: singlePane(null) }))?.id).toBe("s-first");
+    expect(sessionToRestore(workspace([]))).toBeUndefined();
   });
 });
