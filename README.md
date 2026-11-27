@@ -56,6 +56,14 @@ shortcuts (Ctrl+C, Ctrl+R, Ctrl+B...), Escape, Shift+Tab and the function
 keys all reach the terminal. That is why Windows and Linux use Ctrl+Shift,
 and why F2 renames only while the sidebar has the keyboard.
 
+## Claude Code
+
+Each row of a Claude Code session can show what Claude is doing: working,
+waiting for your permission or your answer, or done. termx learns it from
+a Claude Code plugin of its own, installed only if you agree; see
+[Claude Code in termx](docs/claude-code.md) for exactly what that changes
+and what the plugin sends.
+
 ## Using the terminal
 
 | Action                         | macOS       | Windows and Linux            |
@@ -84,8 +92,6 @@ fixed for now).
 
 ## Planned features
 
-- At-a-glance status of each Claude Code session (working, waiting, done)
-- A companion Claude Code plugin that reports session state to termx
 - Configurable shell, fonts, colours and key bindings
 - Installers for Windows, Linux and macOS
 
@@ -99,7 +105,9 @@ termx is a [Tauri 2](https://v2.tauri.app) application.
 | `apps/desktop/src-tauri` | Tauri shell that exposes the core to the webview.              |
 | `apps/desktop/src`       | Frontend, written in React and TypeScript and built with Vite. |
 | `e2e`                    | End-to-end tests, which drive the real application.            |
-| `plugin`                 | Placeholder for the future Claude Code plugin.                 |
+| `plugin`                 | The Claude Code plugin termx installs, as a template.          |
+| `crates/termx-protocol`  | The wire protocol of the local socket of termx.                |
+| `crates/termx-cli`       | `termx-cli`, the hook sender the plugin runs.                  |
 
 ## Prerequisites
 
