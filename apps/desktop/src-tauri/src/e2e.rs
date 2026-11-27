@@ -2,8 +2,9 @@
 //! which drives the real application: real webview, real xterm.js, real PTY.
 //!
 //! This module only exists with the `e2e` cargo feature, and that feature
-//! cannot be compiled without debug assertions (see `lib.rs`), so nothing
-//! here can be part of a release. It adds three things, and changes neither
+//! only compiles in a build with debug assertions, outside the `release`
+//! profile, that sets `TERMX_ALLOW_E2E=1` (see `lib.rs` and `build.rs`), so
+//! nothing here can be part of a release. It adds three things, and changes neither
 //! the capabilities nor the content security policy of the application:
 //!
 //! - **A marker for the frontend** (`window.__TERMX_E2E__ = true`), set

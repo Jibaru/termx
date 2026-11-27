@@ -17,8 +17,9 @@ name = "termx_desktop_lib"
 
 [features]
 # Test-only automation for the end-to-end suite in `e2e/`: see `src/e2e.rs`.
-# Never part of a release: enabling it in a build without debug assertions is
-# a compile error.
+# Never part of a release: enabling it in a build without debug assertions,
+# with a profile that inherits from `release` or without TERMX_ALLOW_E2E=1
+# (set by `pnpm e2e:build`) is a compile error. See `build.rs`.
 e2e = ["dep:tauri-plugin-wdio-webdriver"]
 
 [build-dependencies]
