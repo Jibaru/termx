@@ -48,7 +48,9 @@ for such values.
 ## What happens when termx starts again
 
 Programs are not kept running while termx is closed. Each session comes back
-_dormant_: it is listed, in its pane, and nothing runs until it is resumed.
+_dormant_: it is listed, in its pane, and nothing runs until you start it
+(press Enter in its pane). termx never starts a restored session on its own,
+so a background command or Claude Code does not run again behind your back.
 
 | Kind               | Resuming it                                                                                                                                                       |
 | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -58,7 +60,30 @@ _dormant_: it is listed, in its pane, and nothing runs until it is resumed.
 
 Claude Code and background commands are started by your shell, the same way
 it starts for a terminal, so they find what your shell profile puts on
-`PATH`.
+`PATH`. If the profile keeps the command from running, for instance a
+`.zshrc` that starts another shell with `exec`, the session says so instead
+of leaving you at a bare prompt. With a shell termx does not know (tcsh,
+nushell and others), they are started by `/bin/sh` with the `PATH` of your
+shell, so `claude` must be a program on `PATH` rather than an alias.
+
+Closing a session, or quitting termx, ends everything the session started,
+including programs that ignore the hang-up signal and programs started in
+the background. A program that detaches on purpose, as a daemon does, is
+left alone.
+
+## When it is saved
+
+What you do on purpose is saved at once: creating, closing, renaming or
+reordering a session or a project, and changing the layout. What changes
+often (titles set by programs, activity, Git branches, the window, a
+divider being dragged, the focus) is saved after a second without changes,
+and at most five seconds after the first one. Everything is saved when
+termx quits. So if termx crashes, at most the last few seconds of such
+changes are lost.
+
+If saving fails, for example because the disk is full, termx keeps trying
+every few seconds and tells the interface, which warns you that your changes
+are not being saved. Saving resumes on its own once it works again.
 
 ## Two termx running at once
 
