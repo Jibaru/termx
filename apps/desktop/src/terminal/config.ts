@@ -1,3 +1,5 @@
+import { DEFAULT_PALETTE } from "../theme/palette";
+
 /**
  * The look and the behaviour of the terminal view, in one place.
  *
@@ -102,28 +104,33 @@ export interface TerminalConfig {
  * look the same as what programs get when they ask for those indices, and
  * each of them except black keeps a contrast of at least 4.5:1 against the
  * background: blue is colour 31 and bright blue 39, green is 76, red is 196.
+ *
+ * Where the terminal and the window use the same colour, it comes from the
+ * palette of the window (`theme/palette.ts`): the background, the text, the
+ * blues, the green and the bright red. They are the same colours as
+ * before, now shared.
  */
 export const DEFAULT_TERMINAL_THEME: TerminalTheme = {
-  background: "#0a0a0a",
-  foreground: "#f5f5f5",
-  cursor: "#f5f5f5",
-  cursorAccent: "#0a0a0a",
-  selectionBackground: "#005f87",
+  background: DEFAULT_PALETTE.bg,
+  foreground: DEFAULT_PALETTE.text,
+  cursor: DEFAULT_PALETTE.text,
+  cursorAccent: DEFAULT_PALETTE.bg,
+  selectionBackground: DEFAULT_PALETTE.accentStrong,
   selectionInactiveBackground: "#3a3a3a",
   // Lighter than the background, so that "black" text stays visible.
   black: "#262626",
   red: "#ff0000",
-  green: "#5fd700",
+  green: DEFAULT_PALETTE.success,
   yellow: "#d7af00",
-  blue: "#0087af",
+  blue: DEFAULT_PALETTE.info,
   magenta: "#af5fd7",
   cyan: "#00afaf",
   white: "#d0d0d0",
   brightBlack: "#808080",
-  brightRed: "#ff5f5f",
+  brightRed: DEFAULT_PALETTE.danger,
   brightGreen: "#87ff5f",
   brightYellow: "#ffd75f",
-  brightBlue: "#00afff",
+  brightBlue: DEFAULT_PALETTE.accent,
   brightMagenta: "#d787ff",
   brightCyan: "#5fd7d7",
   brightWhite: "#ffffff",

@@ -1,5 +1,7 @@
 :root {
-  /* Dark, neutral, high-contrast palette. Surfaces are always opaque. */
+  /* The palette of termx: generated from src/theme/palette.ts, which says
+     what each colour is for and checks its contrast (palette.test.ts).
+     Surfaces are always opaque. */
   --color-bg: #0a0a0a;
   --color-surface: #111111;
   --color-surface-raised: #1a1a1a;
@@ -7,24 +9,28 @@
   --color-selected: #16273d;
   --color-border: #2a2a2a;
   --color-border-strong: #404040;
-  /* Marks that carry meaning (a session on screen): 3:1 or more against the
-     surfaces they sit on, as WCAG asks of graphics. */
-  --color-indicator: #6e6e6e;
+  --color-indicator: #737373;
   --color-text: #f5f5f5;
   --color-text-muted: #a3a3a3;
-  --color-danger: #ff8a80;
-
-  /* A few saturated accents. Each keeps 4.5:1 or more against the surfaces
-     when used for text, and is only one of several cues (a word, a shape). */
-  --color-accent: #3b9cff;
-  --color-accent-strong: #1f6fd1;
-  --color-ok: #4ade80;
-  --color-warn: #fbbf24;
-  --color-error: #ff6b6b;
-  --color-error-strong: #d92d2d;
-  --color-attention-bg: #d92d2d;
-  --color-attention-text: #ffffff;
-  --color-focus: #3b9cff;
+  --color-accent: #00afff;
+  --color-accent-strong: #005f87;
+  --color-info: #0087af;
+  --color-success: #5fd700;
+  --color-danger: #ff5f5f;
+  --color-danger-strong: #d70000;
+  --color-warning: #ffaf00;
+  --color-attention: #ff5fff;
+  --color-attention-text: #0a0a0a;
+  --color-muted: #8a8a8a;
+  --color-kind-claude: #ffaf5f;
+  --color-kind-shell: #b2b2b2;
+  --color-kind-background: #af87ff;
+  --color-info-bg: #10213a;
+  --color-warning-bg: #3a2a00;
+  --color-warning-text: #ffe2a0;
+  --color-danger-bg: #4a0f0f;
+  --color-danger-text: #ffd2d2;
+  --color-focus: var(--color-accent);
 
   --font-ui: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
   --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
@@ -261,7 +267,7 @@ body {
 
 /* An agent that cannot go on without the user: loud on purpose. */
 .session-row[data-attention] {
-  border-left-color: var(--color-attention-bg);
+  border-left-color: var(--color-attention);
 }
 
 .row-line {
@@ -301,11 +307,15 @@ body {
 }
 
 .kind-claude {
-  color: #ff9e64;
+  color: var(--color-kind-claude);
+}
+
+.kind-shell {
+  color: var(--color-kind-shell);
 }
 
 .kind-background {
-  color: var(--color-accent);
+  color: var(--color-kind-background);
 }
 
 .row-meta {
@@ -356,11 +366,11 @@ body {
 }
 
 .row-status[data-tone="error"] {
-  color: var(--color-error);
+  color: var(--color-danger);
 }
 
 .row-status[data-tone="warn"] {
-  color: var(--color-warn);
+  color: var(--color-warning);
 }
 
 .status-dot {
@@ -371,8 +381,8 @@ body {
 }
 
 .row-status[data-tone="ok"] .status-dot {
-  border-color: var(--color-ok);
-  background-color: var(--color-ok);
+  border-color: var(--color-success);
+  background-color: var(--color-success);
 }
 
 .row-status[data-tone="busy"] .status-dot {
@@ -381,13 +391,13 @@ body {
 }
 
 .row-status[data-tone="warn"] .status-dot {
-  border-color: var(--color-warn);
-  background-color: var(--color-warn);
+  border-color: var(--color-warning);
+  background-color: var(--color-warning);
 }
 
 .row-status[data-tone="error"] .status-dot {
-  border-color: var(--color-error);
-  background-color: var(--color-error);
+  border-color: var(--color-danger);
+  background-color: var(--color-danger);
 }
 
 .row-time {
@@ -448,13 +458,13 @@ body {
 }
 
 .agent-slot[data-tone="ok"] {
-  border-color: #1f7a3d;
-  color: var(--color-ok);
+  border-color: var(--color-success);
+  color: var(--color-success);
 }
 
 .agent-slot[data-tone="attention"] {
-  border-color: var(--color-attention-bg);
-  background-color: var(--color-attention-bg);
+  border-color: var(--color-attention);
+  background-color: var(--color-attention);
   color: var(--color-attention-text);
 }
 
@@ -495,12 +505,12 @@ body {
 }
 
 .menu-item[data-danger] {
-  color: var(--color-error);
+  color: var(--color-danger);
 }
 
 .menu-item[data-danger]:hover,
 .menu-item[data-danger]:focus-visible {
-  background-color: var(--color-error-strong);
+  background-color: var(--color-danger-strong);
   color: #ffffff;
 }
 
@@ -662,7 +672,7 @@ body {
 
 .folder-option[aria-selected="true"] .folder-path,
 .folder-option[aria-selected="true"] .folder-forget {
-  color: #e6efff;
+  color: var(--color-text);
 }
 
 .background-fields {
@@ -692,7 +702,7 @@ body {
 
 .form-error {
   margin: 0;
-  color: var(--color-error);
+  color: var(--color-danger);
 }
 
 /* --- The main area ------------------------------------------------------ */
@@ -715,7 +725,7 @@ body {
 
 .layout-error {
   margin: 24px;
-  color: var(--color-error);
+  color: var(--color-danger);
 }
 
 .banner {
@@ -730,17 +740,17 @@ body {
 }
 
 .banner[data-tone="info"] {
-  background-color: #10213a;
+  background-color: var(--color-info-bg);
 }
 
 .banner[data-tone="warn"] {
-  background-color: #3a2a00;
-  color: #ffe2a0;
+  background-color: var(--color-warning-bg);
+  color: var(--color-warning-text);
 }
 
 .banner[data-tone="error"] {
-  background-color: #4a0f0f;
-  color: #ffd2d2;
+  background-color: var(--color-danger-bg);
+  color: var(--color-danger-text);
 }
 
 .banner-text {
@@ -767,7 +777,7 @@ body {
   align-items: flex-start;
   gap: 8px;
   padding: 8px 8px 8px 12px;
-  border: 1px solid var(--color-error-strong);
+  border: 1px solid var(--color-danger-strong);
   border-left-width: 4px;
   border-radius: 6px;
   background-color: var(--color-surface-raised);
@@ -902,12 +912,12 @@ body {
 }
 
 .pane-notice[data-tone="error"] {
-  border-color: var(--color-error-strong);
+  border-color: var(--color-danger-strong);
 }
 
 .pane-notice[data-tone="warn"] {
-  border-color: var(--color-warn);
-  color: var(--color-warn);
+  border-color: var(--color-warning);
+  color: var(--color-warning);
 }
 
 .pane-notice-hint {
@@ -1155,12 +1165,11 @@ body {
 .button-primary:hover:not(:disabled),
 .button-primary:focus-visible {
   border-color: var(--color-accent);
-  background-color: #2a7fe6;
 }
 
 .button-danger {
-  border-color: var(--color-error-strong);
-  background-color: var(--color-error-strong);
+  border-color: var(--color-danger-strong);
+  background-color: var(--color-danger-strong);
   color: #ffffff;
 }
 
