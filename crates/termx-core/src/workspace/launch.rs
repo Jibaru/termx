@@ -155,9 +155,11 @@ pub fn marker(token: &LaunchToken, marker: LaunchMarker) -> String {
 ///
 /// Output is passed through unchanged otherwise. A chunk that ends with
 /// the beginning of a marker keeps that beginning until the next chunk
-/// tells whether it is one, or until [`finish`](Self::finish). Once the
-/// script has said it runs the command, nothing more is looked for and
-/// nothing is held back.
+/// tells whether it is one, for at most [`MARKER_HOLD_MAX`] (a prompt that
+/// ends with an escape character must not wait for the next output), or
+/// until [`finish`](Self::finish). A script prints a marker in one write,
+/// so it arrives whole well within that time. Once the script has said it
+/// runs the command, nothing more is looked for and nothing is held back.
 #[derive(Debug)]
 pub struct MarkerFilter {
     /// The sequences looked for, with what each one means. Both endings of
@@ -165,8 +167,14 @@ pub struct MarkerFilter {
     /// may use when it passes the sequence on.
     patterns: Vec<(Vec<u8>, LaunchMarker)>,
     held: Vec<u8>,
+    /// Since when `held` is held.
+    held_since: Option<std::time::Instant>,
     done: bool,
 }
+
+/// Longest time [`MarkerFilter`] keeps back the beginning of what may be a
+/// marker.
+pub const MARKER_HOLD_MAX: Duration = Duration::from_millis(5);
 
 impl MarkerFilter {
     /// A filter for the markers carrying `token`.
@@ -183,6 +191,7 @@ impl MarkerFilter {
         Self {
             patterns,
             held: Vec::new(),
+            held_since: None,
             done: false,
         }
     }
@@ -193,6 +202,7 @@ impl MarkerFilter {
             return (bytes, Vec::new());
         }
         let mut input = std::mem::take(&mut self.held);
+        let held_since = self.held_since.take();
         input.extend_from_slice(&bytes);
         let mut output = Vec::with_capacity(input.len());
         let mut found = Vec::new();
@@ -223,8 +233,10 @@ impl MarkerFilter {
                 .iter()
                 .any(|(pattern, _)| rest.len() < pattern.len() && pattern.starts_with(rest))
             {
-                // The rest of the chunk may be the start of a marker.
+                // The rest of the chunk may be the start of a marker. It
+                // started being held when the first of it was.
                 self.held = rest.to_vec();
+                self.held_since = Some(held_since.unwrap_or_else(std::time::Instant::now));
                 break;
             } else {
                 output.push(0x1b);
@@ -234,9 +246,19 @@ impl MarkerFilter {
         (output, found)
     }
 
-    /// The output ended: returns what was held back.
+    /// The output ended, or [`release_at`](Self::release_at) has come:
+    /// returns what was held back.
     pub fn finish(&mut self) -> Vec<u8> {
+        self.held_since = None;
         std::mem::take(&mut self.held)
+    }
+
+    /// When what is held back must be let out as it is: [`MARKER_HOLD_MAX`]
+    /// after it started being held. `None` while nothing is.
+    #[must_use]
+    pub fn release_at(&self) -> Option<std::time::Instant> {
+        self.held_since
+            .and_then(|since| since.checked_add(MARKER_HOLD_MAX))
     }
 }
 
@@ -1150,6 +1172,27 @@ mod tests {
             assert_eq!([a, b].concat(), b"\x1b[1mboldafter", "cut at {cut}");
             assert_eq!([found_a, found_b].concat(), [LaunchMarker::ClaudeMissing]);
         }
+    }
+
+    #[test]
+    fn what_may_start_a_marker_is_held_back_only_briefly() {
+        let token = LaunchToken::generate();
+        let mut filter = MarkerFilter::new(&token);
+        assert_eq!(filter.release_at(), None);
+
+        let before = std::time::Instant::now();
+        let (out, _) = filter.filter(b"Password: \x1b".to_vec());
+        assert_eq!(out, b"Password: ");
+        let release = filter.release_at().expect("the escape is held");
+        assert!(release >= before + MARKER_HOLD_MAX);
+        assert!(release <= std::time::Instant::now() + MARKER_HOLD_MAX);
+
+        // More of a prefix keeps the time it started being held.
+        let (out, _) = filter.filter(b"]7703".to_vec());
+        assert!(out.is_empty());
+        assert_eq!(filter.release_at(), Some(release));
+        assert_eq!(filter.finish(), b"\x1b]7703");
+        assert_eq!(filter.release_at(), None);
     }
 
     #[test]

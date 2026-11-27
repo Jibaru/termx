@@ -385,6 +385,10 @@ impl crate::session::OutputFilter for LaunchWatch {
     fn finish(&mut self) -> Vec<u8> {
         self.filter.finish()
     }
+
+    fn release_at(&self) -> Option<Instant> {
+        self.filter.release_at()
+    }
 }
 
 struct State {
