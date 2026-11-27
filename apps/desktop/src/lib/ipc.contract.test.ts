@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import contract from "./ipc.contract.json";
 import {
+  AGENT_STATUSES,
+  type AgentState,
+  type AgentStatus,
   applyWorkspaceDelta,
   COMMAND_ERROR_KINDS,
   type CommandError,
@@ -67,7 +70,7 @@ const SESSION_KEYS = {
   terminalId: true,
   createdAt: true,
   lastActivityAt: true,
-  waitingSince: true,
+  agent: true,
   claudeSessionId: true,
   warning: true,
 } satisfies Record<keyof Session, true>;
@@ -150,6 +153,11 @@ const EXIT_KEYS = {
   failure: true,
 } satisfies Record<keyof SessionExit, true>;
 
+const AGENT_KEYS = {
+  status: true,
+  waitingSince: true,
+} satisfies Record<keyof AgentState, true>;
+
 const COMMAND_ERROR_KEYS = {
   command: true,
   kind: true,
@@ -181,7 +189,8 @@ export const EXHAUSTIVE: [
   Exhaustive<PaneEdge, typeof EDGES>,
   Exhaustive<PersistenceMode["mode"], typeof PERSISTENCE_MODES>,
   Exhaustive<CommandErrorKind, typeof COMMAND_ERROR_KINDS>,
-] = [true, true, true, true, true, true, true, true, true, true];
+  Exhaustive<AgentStatus, typeof AGENT_STATUSES>,
+] = [true, true, true, true, true, true, true, true, true, true, true];
 
 type Json = Record<string, unknown>;
 
@@ -208,6 +217,10 @@ function expectSession(value: unknown): void {
   }
   expect(SESSION_KINDS).toContain(session.kind);
   if (session.warning !== null) expectFailure(session.warning);
+  if (session.agent !== null) {
+    expectKeys(session.agent, AGENT_KEYS);
+    expect(AGENT_STATUSES).toContain((session.agent as Json).status);
+  }
 }
 
 function expectFailure(value: unknown): void {
@@ -254,6 +267,8 @@ describe("the contract with the Rust side", () => {
     expect(snapshot.sessions.some((session) => session.git !== null)).toBe(true);
     expect(snapshot.sessions.some((session) => session.warning === null)).toBe(true);
     expect(snapshot.sessions.some((session) => session.warning !== null)).toBe(true);
+    expect(snapshot.sessions.some((session) => session.agent === null)).toBe(true);
+    expect(snapshot.sessions.some((session) => session.agent !== null)).toBe(true);
   });
 
   it("has deltas with the fields of WorkspaceDelta, set or null", () => {
@@ -299,6 +314,7 @@ describe("the contract with the Rust side", () => {
       direction: DIRECTIONS,
       placement: PLACEMENTS,
       edge: EDGES,
+      agentStatus: AGENT_STATUSES,
     });
     expect(contract.persistence.map((persistence) => persistence.mode)).toEqual(PERSISTENCE_MODES);
     expect(contract.persistence.map(keysOf)).toEqual([

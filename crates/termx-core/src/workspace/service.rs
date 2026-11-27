@@ -901,7 +901,7 @@ impl Workspace {
                     terminal_id: None,
                     created_at: stored.created_at,
                     last_activity_at: stored.last_activity_at,
-                    waiting_since: None,
+                    agent: None,
                     warning: None,
                     claude_session_id: stored
                         .claude_session_id
@@ -1115,7 +1115,7 @@ impl Workspace {
             terminal_id: None,
             created_at: now,
             last_activity_at: now,
-            waiting_since: None,
+            agent: None,
             warning: None,
             claude_session_id: None,
         };

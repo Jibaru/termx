@@ -149,7 +149,7 @@ fn a_new_session_is_starting_shown_and_remembered_as_recent() {
     assert_eq!(session.terminal_id, None);
     assert!(session.created_at >= before);
     assert_eq!(session.last_activity_at, session.created_at);
-    assert_eq!(session.waiting_since, None);
+    assert_eq!(session.agent, None);
     assert_eq!(session.claude_session_id, None);
 
     let snapshot = workspace.snapshot();

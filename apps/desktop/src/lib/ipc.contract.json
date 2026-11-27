@@ -104,6 +104,10 @@
       "sessionOrder": ["s-claude", "s-shell"],
       "sessions": [
         {
+          "agent": {
+            "status": "waiting",
+            "waitingSince": 1795716005000
+          },
           "autoTitle": "Fix the login",
           "claudeSessionId": "0b9d6f7e-3c1a-4f3e-9a55-2f6f1f0f8a10",
           "command": null,
@@ -130,7 +134,6 @@
           },
           "terminalId": 7,
           "title": "Login work",
-          "waitingSince": null,
           "warning": null
         }
       ]
@@ -147,6 +150,7 @@
     }
   ],
   "enums": {
+    "agentStatus": ["working", "waiting", "idle"],
     "direction": ["row", "column"],
     "edge": ["left", "right", "top", "bottom", "center"],
     "launchMode": ["fresh", "resume"],
@@ -291,6 +295,10 @@
     "revision": 42,
     "sessions": [
       {
+        "agent": {
+          "status": "waiting",
+          "waitingSince": 1795716005000
+        },
         "autoTitle": "Fix the login",
         "claudeSessionId": "0b9d6f7e-3c1a-4f3e-9a55-2f6f1f0f8a10",
         "command": null,
@@ -317,10 +325,10 @@
         },
         "terminalId": 7,
         "title": "Login work",
-        "waitingSince": null,
         "warning": null
       },
       {
+        "agent": null,
         "autoTitle": null,
         "claudeSessionId": null,
         "command": null,
@@ -343,10 +351,10 @@
         },
         "terminalId": null,
         "title": "Shell",
-        "waitingSince": null,
         "warning": null
       },
       {
+        "agent": null,
         "autoTitle": null,
         "claudeSessionId": null,
         "command": "ngrok http 3000",
@@ -373,13 +381,13 @@
         },
         "terminalId": null,
         "title": "ngrok http 3000",
-        "waitingSince": null,
         "warning": {
           "kind": "launchUnconfirmed",
           "message": "Your shell profile did not run the command: a file your shell reads when it starts (such as ~/.zshrc or ~/.bashrc) may start another shell, stop with an error or wait for an answer."
         }
       },
       {
+        "agent": null,
         "autoTitle": null,
         "claudeSessionId": null,
         "command": null,
@@ -408,10 +416,10 @@
         },
         "terminalId": null,
         "title": "Claude Code",
-        "waitingSince": null,
         "warning": null
       },
       {
+        "agent": null,
         "autoTitle": null,
         "claudeSessionId": null,
         "command": null,
@@ -437,7 +445,6 @@
         },
         "terminalId": null,
         "title": "Shell",
-        "waitingSince": null,
         "warning": null
       }
     ]
