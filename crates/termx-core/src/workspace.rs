@@ -65,7 +65,12 @@
 //! # Keeping the branch current
 //!
 //! Git metadata is read directly ([`project`]), so reading it again is
-//! cheap. The workspace does that on its own thread, never on a caller's:
+//! cheap. The workspace does that on threads of its own, never on a
+//! caller's, and never on the thread that saves: a folder on a drive that
+//! does not answer delays its own project, nothing else. A caller that
+//! needs the project of a new folder waits for it for at most
+//! [`GIT_DETECT_BUDGET`]; past that, the folder is shown as its own project
+//! until the detection ends. The project is read again:
 //!
 //! - for the sessions that printed something, at most once per
 //!   [`ACTIVITY_COALESCE`]: a branch changes because something ran, and
@@ -98,8 +103,9 @@ pub use model::{
 pub use notify::{ChangeSet, Subscription};
 pub use project::{GitInfo, Project, ProjectKind};
 pub use service::{
-    ACTIVITY_COALESCE, ActivityHandle, Delta, GIT_POLL_INTERVAL, Launch, NewSession, SAVE_DEBOUNCE,
-    SAVE_MAX_WAIT, Snapshot, Workspace, WorkspaceConfig, WorkspaceError, parse_reported_cwd,
+    ACTIVITY_COALESCE, ActivityHandle, Delta, GIT_DETECT_BUDGET, GIT_POLL_INTERVAL, Launch,
+    NewSession, SAVE_DEBOUNCE, SAVE_MAX_WAIT, SHUTDOWN_WAIT, Snapshot, Workspace, WorkspaceConfig,
+    WorkspaceError, parse_reported_cwd,
 };
 pub use store::{PersistenceMode, WindowGeometry};
 
