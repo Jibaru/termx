@@ -715,3 +715,58 @@ fn shutting_down_ends_everything_the_sessions_started() {
         }
     });
 }
+
+/// Writes an executable shell script at `path`.
+#[cfg(unix)]
+fn write_script(path: &Path, text: &str) {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::write(path, text).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_shell_termx_does_not_know_lends_its_path_to_sh() {
+    guarded(|| {
+        let setup = Setup::new();
+        setup.install_stand_in();
+        // A shell of another syntax: it only puts the stand-in on its own
+        // `PATH`, and understands `-c`.
+        let elsewhere = setup.dir.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::rename(
+            setup.bin().join(Setup::STAND_IN),
+            elsewhere.join(Setup::STAND_IN),
+        )
+        .unwrap();
+        let shell = setup.dir.path().join("termx-test-unknown-shell");
+        write_script(
+            &shell,
+            &format!(
+                "#!/bin/sh\necho 'welcome to an odd shell'\nPATH=\"{}:$PATH\"; export PATH\nexec /bin/sh \"$@\"\n",
+                elsewhere.display()
+            ),
+        );
+        let workspace = workspace_for(Shell::new(&shell), Setup::STAND_IN);
+
+        let (output, exit, session) = run_session(&workspace, &setup, SessionKind::Claude, None);
+
+        assert!(output.contains("stand-in-ran:"), "printed {output:?}");
+        assert_eq!(exit.code(), Some(7));
+        assert_eq!(failure_of(&session), None);
+
+        // One that cannot tell: `/bin/sh` reads the login files, which put
+        // `bin` on `PATH` in these tests.
+        setup.install_stand_in();
+        let mute = setup.dir.path().join("termx-test-mute-shell");
+        write_script(&mute, "#!/bin/sh\nexit 1\n");
+        let workspace = workspace_for(Shell::new(&mute), Setup::STAND_IN);
+
+        let (output, exit, session) = run_session(&workspace, &setup, SessionKind::Claude, None);
+
+        assert!(output.contains("stand-in-ran:"), "printed {output:?}");
+        assert_eq!(exit.code(), Some(7));
+        assert_eq!(failure_of(&session), None);
+    });
+}

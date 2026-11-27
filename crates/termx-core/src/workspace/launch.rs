@@ -16,7 +16,8 @@
 //! | ------------------------------ | ------------------------------------------- |
 //! | sh, bash, zsh, dash, ksh, fish | `<shell> -l -i -c <script>`                 |
 //! | PowerShell (Windows default)   | `<shell> -NoLogo -EncodedCommand <script>`  |
-//! | any other                      | `<shell> -c <script>`                       |
+//! | any other, on Unix             | `/bin/sh -c <script>`, `PATH` of the shell  |
+//! | any other, on Windows          | not supported: a typed failure              |
 //!
 //! `-l` makes the shell read its login files and `-i` its interactive ones,
 //! which is where a `PATH` is set up, and where aliases and functions are
@@ -27,6 +28,16 @@
 //!
 //! A [`SessionKind::Shell`] session is the login shell itself, with no
 //! script.
+//!
+//! A shell termx does not know (tcsh, nushell, xonsh, elvish...) has its
+//! own syntax, so the scripts are not written for it. On Unix they run in
+//! `/bin/sh` instead, with the `PATH` the user's shell has: it is asked
+//! once (`<shell> -c 'printenv PATH'`, within [`PATH_CAPTURE_TIMEOUT`]) and
+//! remembered for the life of the application. When that fails, `/bin/sh`
+//! reads the login files of the system and of the user (`-l`). Aliases and
+//! functions of the user's shell are not available that way: `claude` has
+//! to be a program on `PATH`. On Windows such a shell is refused with a
+//! [`LaunchFailure::SpawnFailed`] that says so.
 //!
 //! # Knowing that the command ran
 //!
@@ -59,6 +70,7 @@
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -67,6 +79,14 @@ use crate::pty::{PtyCommand, default_shell};
 
 /// The program a [`SessionKind::Claude`] session runs.
 pub const CLAUDE_PROGRAM: &str = "claude";
+
+/// Longest wait for a shell termx does not know to tell its `PATH`. See
+/// the [module documentation](self).
+pub const PATH_CAPTURE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The shell that runs the scripts on behalf of one termx does not know.
+#[cfg(unix)]
+const FALLBACK_SHELL: &str = "/bin/sh";
 
 /// The exit code of the launch script when the shell cannot find `claude`:
 /// that of a command that was not found. It is the marker, not this code,
@@ -382,17 +402,51 @@ impl Shell {
         self.family
     }
 
+    /// The family the scripts are written for: that of the shell, except
+    /// for one termx does not know, whose scripts `/bin/sh` runs.
+    fn script_family(&self) -> ShellFamily {
+        match self.family {
+            ShellFamily::Other if cfg!(unix) => ShellFamily::Posix,
+            family => family,
+        }
+    }
+
     /// The command that makes this shell run `script` with the user's
     /// environment. See the [module documentation](self).
-    fn run(&self, script: &str) -> PtyCommand {
+    ///
+    /// # Errors
+    ///
+    /// [`LaunchFailure::SpawnFailed`] for a shell termx does not know, on
+    /// Windows.
+    fn run(&self, script: &str) -> Result<PtyCommand, LaunchFailure> {
         let command = PtyCommand::new(&self.program);
-        match self.family {
+        Ok(match self.family {
             ShellFamily::Posix | ShellFamily::Fish => command.args(["-l", "-i", "-c", script]),
             ShellFamily::PowerShell => {
                 command.args(["-NoLogo", "-EncodedCommand", &encode_powershell(script)])
             }
-            ShellFamily::Other => command.args(["-c", script]),
-        }
+            #[cfg(unix)]
+            ShellFamily::Other => match path_of(&self.program) {
+                Some(path) => PtyCommand::new(FALLBACK_SHELL)
+                    .args(["-c", script])
+                    .env("PATH", path),
+                None => PtyCommand::new(FALLBACK_SHELL).args(["-l", "-c", script]),
+            },
+            #[cfg(windows)]
+            ShellFamily::Other => {
+                let name = self
+                    .program
+                    .file_name()
+                    .unwrap_or(self.program.as_os_str())
+                    .to_string_lossy();
+                return Err(LaunchFailure::SpawnFailed {
+                    message: format!(
+                        "termx cannot run commands through {name}: it only knows \
+                         PowerShell on Windows."
+                    ),
+                });
+            }
+        })
     }
 }
 
@@ -492,7 +546,7 @@ impl Launcher {
         }
         let command = match request.kind {
             SessionKind::Shell => PtyCommand::login_shell(&self.shell.program),
-            SessionKind::Claude => self.shell.run(&self.claude_script(request)),
+            SessionKind::Claude => self.shell.run(&self.claude_script(request))?,
             SessionKind::Background => {
                 let line = request.command.map(str::trim).unwrap_or_default();
                 if line.is_empty() {
@@ -500,7 +554,8 @@ impl Launcher {
                         message: "This background session has no command to run.".to_owned(),
                     });
                 }
-                self.shell.run(&self.background_script(line, request.token))
+                self.shell
+                    .run(&self.background_script(line, request.token))?
             }
         };
         Ok(command.cwd(request.cwd))
@@ -538,7 +593,7 @@ impl Launcher {
         let say = |kind| self.print_marker(request.token, kind);
         let exec = say(LaunchMarker::Exec);
         let missing = say(LaunchMarker::ClaudeMissing);
-        match self.shell.family {
+        match self.shell.script_family() {
             // A program on PATH replaces the shell (`exec`), so that no
             // extra process stays around. An alias or a function can only
             // be run by the shell itself.
@@ -573,7 +628,7 @@ impl Launcher {
         // The token is hexadecimal and the word a constant: nothing in it
         // needs quoting.
         let (token, word) = (token.as_str(), kind.word());
-        match self.shell.family {
+        match self.shell.script_family() {
             ShellFamily::Posix | ShellFamily::Other => {
                 format!("printf '\\033]7703;termx;{token};{word}\\007'; ")
             }
@@ -594,13 +649,73 @@ impl Launcher {
         } else {
             format!("{exec}\n")
         };
-        match self.shell.family {
+        match self.shell.script_family() {
             // PowerShell does not end with the exit code of the last
             // program on its own.
             ShellFamily::PowerShell => format!("{exec}{line}\nexit $LASTEXITCODE"),
             _ => format!("{exec}{line}"),
         }
     }
+}
+
+/// The `PATH` of `shell`, a shell termx does not know, as it reports it to
+/// `printenv` when it runs a command. Asked once per shell and remembered;
+/// `None` when the shell does not answer within [`PATH_CAPTURE_TIMEOUT`] or
+/// answers something that is not a `PATH`. Never logged.
+#[cfg(unix)]
+fn path_of(shell: &Path) -> Option<std::ffi::OsString> {
+    use std::collections::HashMap;
+    use std::os::unix::ffi::OsStringExt;
+    use std::process::{Command, Stdio};
+    use std::sync::Mutex;
+
+    static KNOWN: Mutex<Option<HashMap<PathBuf, Option<std::ffi::OsString>>>> = Mutex::new(None);
+    if let Some(known) = crate::pty::lock(&KNOWN)
+        .as_ref()
+        .and_then(|known| known.get(shell))
+    {
+        return known.clone();
+    }
+
+    let asked = (|| {
+        let mut child = Command::new(shell)
+            .args(["-c", "printenv PATH"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()?;
+        let deadline = std::time::Instant::now() + PATH_CAPTURE_TIMEOUT;
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                _ => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+            }
+        }
+        let mut output = Vec::new();
+        std::io::Read::read_to_end(&mut child.stdout.take()?, &mut output).ok()?;
+        // What the shell's start-up files print comes first: the `PATH` is
+        // the last line.
+        let line = output
+            .split(|&b| b == b'\n')
+            .rev()
+            .find(|line| !line.is_empty())?
+            .to_vec();
+        let valid = line.first() == Some(&b'/') && !line.contains(&0) && !line.contains(&b'\r');
+        valid.then(|| std::ffi::OsString::from_vec(line))
+    })();
+
+    crate::pty::lock(&KNOWN)
+        .get_or_insert_with(HashMap::new)
+        .insert(shell.to_owned(), asked.clone());
+    asked
 }
 
 /// Encodes a script for the `-EncodedCommand` option of PowerShell: its
@@ -763,13 +878,24 @@ mod tests {
         );
         assert!(fish.contains("exit 127; end"), "{fish}");
 
-        let other = launcher("/bin/tcsh").command(&claude).unwrap();
-        assert_eq!(
-            other,
-            PtyCommand::new("/bin/tcsh")
-                .args(["-c", "claude"])
-                .cwd(dir.path())
-        );
+        // A shell that is not there cannot tell its `PATH`: `/bin/sh` reads
+        // the login files instead.
+        let other = launcher("/nonexistent/tcsh").command(&claude);
+        if cfg!(unix) {
+            let script = "case \"$(command -v claude 2>/dev/null)\" in \
+                          /*) exec claude ;; '') exit 127 ;; *) claude ;; esac";
+            assert_eq!(
+                other.unwrap(),
+                PtyCommand::new("/bin/sh")
+                    .args(["-l", "-c", script])
+                    .cwd(dir.path())
+            );
+        } else {
+            assert!(
+                matches!(other, Err(LaunchFailure::SpawnFailed { .. })),
+                "{other:?}"
+            );
+        }
 
         let powershell = launcher("pwsh").command(&claude).unwrap();
         let script = "if (-not (Get-Command claude -ErrorAction SilentlyContinue)) { exit 127 }\n\
