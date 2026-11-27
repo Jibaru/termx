@@ -536,31 +536,40 @@ fn the_claude_code_integration_is_previewed_installed_and_removed() {
     let home = tempfile::tempdir().unwrap();
     let app = Harness::new(home.path());
 
-    let status = app.ok("claude_integration_status", json!({}));
+    let status = app.ok("get_claude_integration", json!({}));
     assert_eq!(status["plugin"], "notInstalled");
     assert_eq!(status["consent"], "unasked");
     assert!(status["claudeInstalled"].is_boolean());
 
-    let preview = app.ok("claude_integration_preview", json!({}));
+    let preview = app.ok("preview_claude_integration", json!({}));
     let changes = preview["changes"].as_array().unwrap();
     assert!(!changes.is_empty());
+    // No settings yet in this home: the note says the file is created.
+    assert!(
+        preview["note"]
+            .as_str()
+            .unwrap()
+            .contains("creates settings.json")
+    );
     assert!(
         changes
             .iter()
             .all(|change| change["path"].as_str().unwrap().starts_with('~'))
     );
 
-    app.ok(
-        "claude_integration_set_consent",
-        json!({ "consent": "declined" }),
-    );
+    app.ok("set_claude_consent", json!({ "consent": "declined" }));
     assert_eq!(
-        app.ok("claude_integration_status", json!({}))["consent"],
+        app.ok("get_claude_integration", json!({}))["consent"],
         "declined"
     );
 
-    app.ok("claude_integration_install", json!({}));
-    let status = app.ok("claude_integration_status", json!({}));
+    let (sender, changes) = std::sync::mpsc::channel();
+    tauri::Listener::listen_any(&app.webview, crate::claude::CHANGED_EVENT, move |event| {
+        let _ = sender.send(event.payload().to_owned());
+    });
+    app.ok("install_claude_integration", json!({}));
+    changes.recv_timeout(TIMEOUT).unwrap();
+    let status = app.ok("get_claude_integration", json!({}));
     assert_eq!(status["plugin"], "installed");
     assert_eq!(status["consent"], "accepted");
     assert!(status["version"].is_string());
@@ -571,8 +580,8 @@ fn the_claude_code_integration_is_previewed_installed_and_removed() {
             .exists()
     );
 
-    app.ok("claude_integration_uninstall", json!({}));
-    let status = app.ok("claude_integration_status", json!({}));
+    app.ok("uninstall_claude_integration", json!({}));
+    let status = app.ok("get_claude_integration", json!({}));
     assert_eq!(status["plugin"], "notInstalled");
     assert_eq!(status["consent"], "declined");
 
@@ -583,15 +592,12 @@ fn the_claude_code_integration_is_previewed_installed_and_removed() {
     )
     .unwrap();
     let refused = app
-        .invoke("claude_integration_install", json!({}))
+        .invoke("install_claude_integration", json!({}))
         .unwrap_err();
     assert_eq!(refused["kind"], "invalidSettings");
     assert!(
-        app.invoke(
-            "claude_integration_set_consent",
-            json!({ "consent": "maybe" })
-        )
-        .is_err()
+        app.invoke("set_claude_consent", json!({ "consent": "maybe" }))
+            .is_err()
     );
 }
 

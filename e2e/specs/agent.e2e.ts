@@ -64,12 +64,12 @@ describe("the agent state of a session", () => {
   let hooksJson = "";
 
   it("installs the plugin with the hook sender of termx", async () => {
-    const before = (await invoke("claude_integration_status")) as { plugin: string };
+    const before = (await invoke("get_claude_integration")) as { plugin: string };
     expect(before.plugin).toBe("notInstalled");
 
-    await invoke("claude_integration_install");
+    await invoke("install_claude_integration");
 
-    const after = (await invoke("claude_integration_status")) as { plugin: string };
+    const after = (await invoke("get_claude_integration")) as { plugin: string };
     expect(after.plugin).toBe("installed");
     // In the state directory of the run (TERMX_STATE_DIR).
     hooksJson = join(

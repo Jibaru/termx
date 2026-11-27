@@ -920,8 +920,13 @@ export interface ClaudeChange {
 }
 
 /** What installing would change. Empty when nothing would. */
-export interface ClaudePreview {
+export interface ClaudeIntegrationPreview {
   changes: ClaudeChange[];
+  /**
+   * One sentence on what installing does to the Claude Code configuration
+   * already there, to show as it is. Absent when nothing would change.
+   */
+  note?: string;
 }
 
 /** The payload of the `notification-clicked` event. */
@@ -931,30 +936,30 @@ export interface NotificationClicked {
 
 /** Whether Claude Code and the plugin are installed, and what the user answered. */
 export function getClaudeIntegration(): Promise<ClaudeIntegration> {
-  return call("claude_integration_status");
+  return call("get_claude_integration");
 }
 
 /**
  * What installing the plugin would change. Rejects with `invalidSettings`,
  * `settingsConflict` or `senderMissing` when it cannot be installed.
  */
-export function previewClaudeIntegration(): Promise<ClaudePreview> {
-  return call("claude_integration_preview");
+export function previewClaudeIntegration(): Promise<ClaudeIntegrationPreview> {
+  return call("preview_claude_integration");
 }
 
 /** Installs the plugin (or brings it up to date) and records the consent. */
 export function installClaudeIntegration(): Promise<void> {
-  return call("claude_integration_install");
+  return call("install_claude_integration");
 }
 
 /** Removes the plugin and records that the user declined it. */
 export function uninstallClaudeIntegration(): Promise<void> {
-  return call("claude_integration_uninstall");
+  return call("uninstall_claude_integration");
 }
 
 /** Records what the user answered. Installs nothing. */
 export function setClaudeConsent(consent: "accepted" | "declined"): Promise<void> {
-  return call("claude_integration_set_consent", { consent });
+  return call("set_claude_consent", { consent });
 }
 
 /**
@@ -979,14 +984,26 @@ export function setAttentionBadge(count: number): Promise<boolean> {
 }
 
 /**
+ * Calls `handler` whenever the plugin is installed, upgraded or removed,
+ * the answer of the user changes, or a check finds that something else
+ * changed them (the settings edited by hand): read it again with
+ * `getClaudeIntegration`. Resolves with how to stop listening.
+ */
+export function onClaudeIntegrationChanged(handler: () => void): Promise<() => void> {
+  return listen("claude-integration-changed", () => {
+    handler();
+  });
+}
+
+/**
  * Calls `handler` when a notification from `notify` is clicked. Resolves
  * with how to stop listening.
  */
 export function onNotificationClicked(
-  handler: (clicked: NotificationClicked) => void,
+  handler: (sessionId: SessionId) => void,
 ): Promise<() => void> {
   return listen<NotificationClicked>("notification-clicked", (event) => {
-    handler(event.payload);
+    handler(event.payload.sessionId);
   });
 }
 

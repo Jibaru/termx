@@ -151,6 +151,7 @@ fn installing_twice_changes_nothing_more() {
     assert_eq!(setup.settings_text(), first);
     assert_eq!(fs::read(setup.backup()).unwrap(), backup);
     assert!(setup.integration.preview().unwrap().is_empty());
+    assert_eq!(setup.integration.note().unwrap(), None);
 }
 
 #[test]
@@ -345,6 +346,12 @@ fn the_preview_says_exactly_what_will_change_with_home_as_a_tilde() {
     assert!(text.contains("termx@termx"));
     assert!(text.contains("PreToolUse"));
     assert!(!text.contains(&*setup.home.to_string_lossy()), "{text}");
+    assert_eq!(
+        setup.integration.note().unwrap().as_deref(),
+        Some(
+            "Your existing settings and hooks are kept as they are: termx adds two entries (the \"termx\" marketplace and \"termx@termx\" in enabledPlugins) to settings.json, after copying the file to settings.json.termx-backup."
+        )
+    );
     // Previewing changes nothing.
     assert_eq!(setup.settings_text(), MASCOT_SETTINGS);
     assert!(!setup.plugin_dir().exists());

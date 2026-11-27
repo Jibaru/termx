@@ -326,6 +326,47 @@ impl Integration {
         Ok(changes)
     }
 
+    /// One sentence on what [`install`](Self::install) does to the Claude
+    /// Code configuration already there, for the user, matching what it
+    /// writes. `None` when it would change nothing.
+    ///
+    /// # Errors
+    ///
+    /// Those of [`preview`](Self::preview).
+    pub fn note(&self) -> Result<Option<String>, IntegrationError> {
+        let document = self.read_settings()?;
+        let (marketplace, enabled) = self.check_settings(document.as_ref())?;
+        let binary = self.sender_binary()?;
+        let missing = usize::from(!matches!(marketplace, Present::Ours)) + usize::from(!enabled);
+        let entries = match (matches!(marketplace, Present::Ours), enabled) {
+            (false, false) => {
+                "two entries (the \"termx\" marketplace and \"termx@termx\" in enabledPlugins)"
+            }
+            (false, true) => "one entry (the \"termx\" marketplace in extraKnownMarketplaces)",
+            _ => "one entry (\"termx@termx\" in enabledPlugins)",
+        };
+        let note = if missing == 0 {
+            if self.plugin_files_current(&binary) {
+                return Ok(None);
+            }
+            "Your Claude Code settings already enable the plugin and are not changed; termx only rewrites its own plugin folder.".to_owned()
+        } else if document.is_none() {
+            format!(
+                "You have no Claude Code settings yet: termx creates settings.json with only {entries}."
+            )
+        } else {
+            let backup = if self.backup_path().exists() {
+                ""
+            } else {
+                ", after copying the file to settings.json.termx-backup"
+            };
+            format!(
+                "Your existing settings and hooks are kept as they are: termx adds {entries} to settings.json{backup}."
+            )
+        };
+        Ok(Some(note))
+    }
+
     /// Installs the plugin, or brings it up to date. Doing it again changes
     /// nothing.
     ///

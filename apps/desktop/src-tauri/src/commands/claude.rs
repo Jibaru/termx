@@ -1,6 +1,7 @@
 //! Commands about the Claude Code integration: the plugin that reports
 //! what each Claude Code session does, the consent of the user to install
-//! it, and the notifications and badge that call the user back.
+//! it (with the event `claude-integration-changed` when any of that
+//! changes), and the notifications and badge that call the user back.
 //!
 //! See [`termx_core::claude`] for what installing changes, and
 //! [`crate::notify`] for notifications.
@@ -33,6 +34,10 @@ pub struct ClaudePreview {
     /// One entry per change, the paths with the home directory as `~`.
     /// Empty when the plugin is installed as this termx would install it.
     pub changes: Vec<Change>,
+    /// One sentence on what installing does to the configuration already
+    /// there, shown as it is. Absent when nothing would change.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// What the user answered.
@@ -49,8 +54,11 @@ pub enum ConsentAnswer {
 /// user answered. Reads a few files: run off the main thread.
 #[tauri::command(async)]
 #[must_use]
-pub fn claude_integration_status(state: State<'_, ClaudeState>) -> IntegrationStatus {
-    state.integration().status()
+pub fn get_claude_integration<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, ClaudeState>,
+) -> IntegrationStatus {
+    state.check(&app)
 }
 
 /// What installing would change.
@@ -61,10 +69,11 @@ pub fn claude_integration_status(state: State<'_, ClaudeState>) -> IntegrationSt
 /// `settingsConflict` when they declare another marketplace named termx,
 /// `senderMissing` in a build without the hook sender.
 #[tauri::command(async)]
-pub fn claude_integration_preview(state: State<'_, ClaudeState>) -> CommandResult<ClaudePreview> {
-    logged("claude_integration_preview", || {
+pub fn preview_claude_integration(state: State<'_, ClaudeState>) -> CommandResult<ClaudePreview> {
+    logged("preview_claude_integration", || {
         Ok::<_, IntegrationError>(ClaudePreview {
             changes: state.integration().preview()?,
+            note: state.integration().note()?,
         })
     })
 }
@@ -74,13 +83,19 @@ pub fn claude_integration_preview(state: State<'_, ClaudeState>) -> CommandResul
 ///
 /// # Errors
 ///
-/// Those of [`claude_integration_preview`]; nothing is changed then.
+/// Those of [`preview_claude_integration`]; nothing is changed then.
 #[tauri::command(async)]
-pub fn claude_integration_install(state: State<'_, ClaudeState>) -> CommandResult<()> {
-    logged("claude_integration_install", || {
+pub fn install_claude_integration<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, ClaudeState>,
+) -> CommandResult<()> {
+    let result = logged("install_claude_integration", || {
         state.integration().install()?;
         state.integration().set_consent(Consent::Accepted)
-    })
+    });
+    // Also after a failure: half of it may have been done.
+    state.check(&app);
+    result
 }
 
 /// Removes the plugin. Records that the user does not want it any more,
@@ -90,11 +105,16 @@ pub fn claude_integration_install(state: State<'_, ClaudeState>) -> CommandResul
 ///
 /// `invalidSettings` when the settings of Claude Code are not valid JSON.
 #[tauri::command(async)]
-pub fn claude_integration_uninstall(state: State<'_, ClaudeState>) -> CommandResult<()> {
-    logged("claude_integration_uninstall", || {
+pub fn uninstall_claude_integration<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, ClaudeState>,
+) -> CommandResult<()> {
+    let result = logged("uninstall_claude_integration", || {
         state.integration().uninstall()?;
         state.integration().set_consent(Consent::Declined)
-    })
+    });
+    state.check(&app);
+    result
 }
 
 /// Remembers what the user answered when asked. Installs nothing.
@@ -103,16 +123,19 @@ pub fn claude_integration_uninstall(state: State<'_, ClaudeState>) -> CommandRes
 ///
 /// When the answer cannot be written.
 #[tauri::command(async)]
-pub fn claude_integration_set_consent(
+pub fn set_claude_consent<R: Runtime>(
+    app: AppHandle<R>,
     state: State<'_, ClaudeState>,
     consent: ConsentAnswer,
 ) -> CommandResult<()> {
-    logged("claude_integration_set_consent", || {
+    let result = logged("set_claude_consent", || {
         state.integration().set_consent(match consent {
             ConsentAnswer::Accepted => Consent::Accepted,
             ConsentAnswer::Declined => Consent::Declined,
         })
-    })
+    });
+    state.check(&app);
+    result
 }
 
 /// Shows a notification of the system about the session `session_id`.
