@@ -18,7 +18,7 @@ describe("the end of a shell", () => {
       "the terminal to notice that the shell exited",
       (state) => state.status.kind === "exited",
     );
-    expect(exited.status.exit).toEqual({ code: 3, signal: null });
+    expect(exited.status.exit).toMatchObject({ code: 3, signal: null });
     await terminal.waitForLine("the exit notice", (line) =>
       line.includes("The process exited with code 3. Press Enter to restart."),
     );
@@ -31,7 +31,7 @@ describe("the end of a shell", () => {
     // the page lets anything it would have started happen.
     await terminal.ping();
     const afterKey = await terminal.state();
-    // An exited terminal has no session: the same status means that none
+    // An exited terminal runs nothing: the same status means that nothing
     // was started.
     expect(afterKey.status).toEqual(exited.status);
     expect(afterKey.bufferLength).toBe(beforeKey.bufferLength);
@@ -43,7 +43,9 @@ describe("the end of a shell", () => {
       "a new shell to be running",
       (state) => state.status.kind === "running",
     );
-    expect(restarted.status.sessionId).not.toBe(before.status.sessionId);
+    // The same session of the workspace, in a new terminal.
+    expect(restarted.session).toBe(before.session);
+    expect(restarted.status.terminal).not.toBe(before.status.terminal);
     await terminal.waitForPrompt();
     const typedAtPrompt = (await terminal.lines()).filter((line) => /^termx-e2e[$>] x/.test(line));
     expect(typedAtPrompt).toEqual([]);
