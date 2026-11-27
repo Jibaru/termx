@@ -45,6 +45,13 @@ tauri-plugin-opener = "2.7.3"
 # Only compiled with the `e2e` feature.
 tauri-plugin-wdio-webdriver = { version = "=1.5.1", optional = true }
 termx-core = { workspace = true }
+# The requests of the hooks of Claude Code, handed from the socket of
+# termx-core to the workspace.
+termx-protocol = { workspace = true }
+# Notifications of the system that report which ones are clicked, on the
+# three platforms (tauri-plugin-notification, built on it, does not on the
+# desktop). D-Bus through zbus, in Rust, on Linux.
+notify-rust = { version = "4.19.0", default-features = false, features = ["z"] }
 
 # Quitting without asking when the Mac logs out, restarts or shuts down
 # (`quit::watch_power_off`). Already part of the dependency tree, through

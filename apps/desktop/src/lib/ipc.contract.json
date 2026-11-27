@@ -1,4 +1,44 @@
 {
+  "claudeIntegration": [
+    {
+      "claudeInstalled": true,
+      "consent": "unasked",
+      "plugin": "notInstalled"
+    },
+    {
+      "claudeInstalled": true,
+      "consent": "accepted",
+      "plugin": "installed",
+      "version": "0.1.0+plugin.1"
+    },
+    {
+      "claudeInstalled": true,
+      "consent": "accepted",
+      "plugin": "outdated",
+      "version": "0.0.9+plugin.1"
+    },
+    {
+      "claudeInstalled": false,
+      "consent": "declined",
+      "error": {
+        "kind": "invalidSettings",
+        "message": "~/.claude/settings.json cannot be changed safely"
+      },
+      "plugin": "error"
+    }
+  ],
+  "claudePreview": {
+    "changes": [
+      {
+        "description": "Write the termx plugin for Claude Code.",
+        "path": "~/Library/Application Support/termx/claude-plugin"
+      },
+      {
+        "description": "Set \"termx@termx\" to true in \"enabledPlugins\".",
+        "path": "~/.claude/settings.json"
+      }
+    ]
+  },
   "commandErrors": [
     {
       "command": "session_start",
@@ -43,6 +83,21 @@
     {
       "command": "session_start",
       "kind": "sessionRunning",
+      "message": "what happened, for the user"
+    },
+    {
+      "command": "session_start",
+      "kind": "invalidSettings",
+      "message": "what happened, for the user"
+    },
+    {
+      "command": "session_start",
+      "kind": "settingsConflict",
+      "message": "what happened, for the user"
+    },
+    {
+      "command": "session_start",
+      "kind": "senderMissing",
       "message": "what happened, for the user"
     },
     {
@@ -166,6 +221,11 @@
       "done",
       "unknown"
     ],
+    "consent": [
+      "unasked",
+      "accepted",
+      "declined"
+    ],
     "direction": [
       "row",
       "column"
@@ -184,6 +244,12 @@
     "placement": [
       "before",
       "after"
+    ],
+    "pluginStatus": [
+      "notInstalled",
+      "installed",
+      "outdated",
+      "error"
     ],
     "projectKind": [
       "git",
@@ -239,6 +305,9 @@
       "message": "Your shell profile did not run the command: a file your shell reads when it starts (such as ~/.zshrc or ~/.bashrc) may start another shell, stop with an error or wait for an answer."
     }
   ],
+  "notificationClicked": {
+    "sessionId": "s-claude"
+  },
   "persistence": [
     {
       "mode": "primary"

@@ -10,6 +10,7 @@
 //! every failure is logged exactly once and a panic becomes an error.
 
 pub mod app;
+pub mod claude;
 pub mod diagnostics;
 pub mod error;
 pub mod layout;

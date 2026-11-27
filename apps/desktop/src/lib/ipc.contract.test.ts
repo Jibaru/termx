@@ -4,6 +4,14 @@ import contract from "./ipc.contract.json";
 import {
   AGENT_STATUSES,
   type AgentState,
+  CLAUDE_CONSENTS,
+  CLAUDE_PLUGIN_STATUSES,
+  type ClaudeChange,
+  type ClaudeConsent,
+  type ClaudeIntegration,
+  type ClaudeIntegrationError,
+  type ClaudePluginStatus,
+  type NotificationClicked,
   type AgentStatus,
   applyWorkspaceDelta,
   COMMAND_ERROR_KINDS,
@@ -166,6 +174,28 @@ const COMMAND_ERROR_KEYS = {
   message: true,
 } satisfies Record<keyof CommandError, true>;
 
+const CLAUDE_INTEGRATION_KEYS = {
+  claudeInstalled: true,
+  plugin: true,
+  version: true,
+  consent: true,
+  error: true,
+} satisfies Record<keyof ClaudeIntegration, true>;
+
+const CLAUDE_ERROR_KEYS = {
+  kind: true,
+  message: true,
+} satisfies Record<keyof ClaudeIntegrationError, true>;
+
+const CLAUDE_CHANGE_KEYS = {
+  path: true,
+  description: true,
+} satisfies Record<keyof ClaudeChange, true>;
+
+const NOTIFICATION_CLICKED_KEYS = {
+  sessionId: true,
+} satisfies Record<keyof NotificationClicked, true>;
+
 const PROJECT_KINDS = ["git", "folder"] as const satisfies readonly Project["kind"][];
 const LAUNCH_MODES = ["fresh", "resume"] as const satisfies readonly LaunchMode[];
 const DIRECTIONS = ["row", "column"] as const satisfies readonly SplitDirection[];
@@ -192,7 +222,9 @@ export const EXHAUSTIVE: [
   Exhaustive<PersistenceMode["mode"], typeof PERSISTENCE_MODES>,
   Exhaustive<CommandErrorKind, typeof COMMAND_ERROR_KINDS>,
   Exhaustive<AgentStatus, typeof AGENT_STATUSES>,
-] = [true, true, true, true, true, true, true, true, true, true, true];
+  Exhaustive<ClaudePluginStatus, typeof CLAUDE_PLUGIN_STATUSES>,
+  Exhaustive<ClaudeConsent, typeof CLAUDE_CONSENTS>,
+] = [true, true, true, true, true, true, true, true, true, true, true, true, true];
 
 type Json = Record<string, unknown>;
 
@@ -317,6 +349,8 @@ describe("the contract with the Rust side", () => {
       placement: PLACEMENTS,
       edge: EDGES,
       agentStatus: AGENT_STATUSES,
+      pluginStatus: CLAUDE_PLUGIN_STATUSES,
+      consent: CLAUDE_CONSENTS,
     });
     expect(contract.persistence.map((persistence) => persistence.mode)).toEqual(PERSISTENCE_MODES);
     expect(contract.persistence.map(keysOf)).toEqual([
@@ -337,6 +371,27 @@ describe("the contract with the Rust side", () => {
     expect(contract.commandErrors.map((error) => error.kind)).toEqual(COMMAND_ERROR_KINDS);
     // Every kind of launch failure is also a kind of command error.
     for (const kind of LAUNCH_FAILURE_KINDS) expect(COMMAND_ERROR_KINDS).toContain(kind);
+  });
+
+  it("describes the Claude Code integration in each of its states", () => {
+    const statuses = contract.claudeIntegration as Json[];
+    expect(statuses.map((status) => status.plugin)).toEqual(CLAUDE_PLUGIN_STATUSES);
+    for (const status of statuses) {
+      // `version` and `error` are left out when there is none.
+      const optional = new Set(["version", "error"]);
+      for (const key of keysOf(status)) expect(Object.keys(CLAUDE_INTEGRATION_KEYS)).toContain(key);
+      for (const key of Object.keys(CLAUDE_INTEGRATION_KEYS)) {
+        if (!optional.has(key)) expect(keysOf(status)).toContain(key);
+      }
+      expect(CLAUDE_CONSENTS).toContain(status.consent);
+      if (status.error !== undefined) expectKeys(status.error, CLAUDE_ERROR_KEYS);
+    }
+    expect(statuses.some((status) => status.version !== undefined)).toBe(true);
+    expect(statuses.some((status) => status.error !== undefined)).toBe(true);
+    const preview = contract.claudePreview as { changes: unknown[] };
+    expect(keysOf(preview)).toEqual(["changes"]);
+    for (const change of preview.changes) expectKeys(change, CLAUDE_CHANGE_KEYS);
+    expectKeys(contract.notificationClicked, NOTIFICATION_CLICKED_KEYS);
   });
 
   it("describes a started session and the exit of one", () => {

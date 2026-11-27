@@ -163,11 +163,13 @@ Run the app in development mode, with hot reload for the frontend:
 pnpm dev
 ```
 
-Build the frontend, then the desktop binary:
+Build the frontend, then the desktop binary and the hook sender of its
+Claude Code plugin (`termx-cli`, which termx looks for next to itself;
+`pnpm dev` builds it too):
 
 ```sh
 pnpm build
-cargo build -p termx-desktop
+cargo build -p termx-desktop -p termx-cli
 ```
 
 The Tauri crate embeds the frontend, so `apps/desktop/dist` must exist before

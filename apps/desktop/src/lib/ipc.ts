@@ -58,6 +58,9 @@ export type CommandErrorKind =
   | "notFound"
   | "invalidArgument"
   | "sessionRunning"
+  | "invalidSettings"
+  | "settingsConflict"
+  | "senderMissing"
   | "internal";
 
 export const COMMAND_ERROR_KINDS = [
@@ -70,6 +73,9 @@ export const COMMAND_ERROR_KINDS = [
   "notFound",
   "invalidArgument",
   "sessionRunning",
+  "invalidSettings",
+  "settingsConflict",
+  "senderMissing",
   "internal",
 ] as const satisfies readonly CommandErrorKind[];
 
@@ -854,6 +860,134 @@ export function quitApp(): Promise<void> {
  */
 export function quitShown(): Promise<void> {
   return call("app_quit_shown");
+}
+
+// --- Claude Code integration ----------------------------------------------
+//
+// The termx plugin of Claude Code reports what each session does
+// (`Session.agent`). termx installs it only once the user said yes; see
+// `termx_core::claude` for exactly what it changes.
+
+/** Whether the plugin is installed. */
+export type ClaudePluginStatus = "notInstalled" | "installed" | "outdated" | "error";
+
+export const CLAUDE_PLUGIN_STATUSES = [
+  "notInstalled",
+  "installed",
+  "outdated",
+  "error",
+] as const satisfies readonly ClaudePluginStatus[];
+
+/** What the user answered when asked whether to install the plugin. */
+export type ClaudeConsent = "unasked" | "accepted" | "declined";
+
+export const CLAUDE_CONSENTS = [
+  "unasked",
+  "accepted",
+  "declined",
+] as const satisfies readonly ClaudeConsent[];
+
+/** Why the integration failed, with a message for the user. */
+export interface ClaudeIntegrationError {
+  /**
+   * `invalidSettings`: the settings of Claude Code are not valid JSON;
+   * `conflict`: they declare another marketplace named termx;
+   * `senderMissing`: a build of termx without its hook sender;
+   * `io`: a file could not be read or written.
+   */
+  kind: "invalidSettings" | "conflict" | "senderMissing" | "io";
+  message: string;
+}
+
+/** Everything the window shows about the integration. */
+export interface ClaudeIntegration {
+  /** Whether Claude Code seems to be installed on this machine. */
+  claudeInstalled: boolean;
+  plugin: ClaudePluginStatus;
+  /** The version of the plugin installed, when one is. */
+  version?: string;
+  consent: ClaudeConsent;
+  /** Set when `plugin` is `error`. */
+  error?: ClaudeIntegrationError;
+}
+
+/** One change installing makes, for the consent dialog. */
+export interface ClaudeChange {
+  /** The file or directory, with the home directory as `~`. */
+  path: string;
+  /** What changes in it. */
+  description: string;
+}
+
+/** What installing would change. Empty when nothing would. */
+export interface ClaudePreview {
+  changes: ClaudeChange[];
+}
+
+/** The payload of the `notification-clicked` event. */
+export interface NotificationClicked {
+  sessionId: SessionId;
+}
+
+/** Whether Claude Code and the plugin are installed, and what the user answered. */
+export function getClaudeIntegration(): Promise<ClaudeIntegration> {
+  return call("claude_integration_status");
+}
+
+/**
+ * What installing the plugin would change. Rejects with `invalidSettings`,
+ * `settingsConflict` or `senderMissing` when it cannot be installed.
+ */
+export function previewClaudeIntegration(): Promise<ClaudePreview> {
+  return call("claude_integration_preview");
+}
+
+/** Installs the plugin (or brings it up to date) and records the consent. */
+export function installClaudeIntegration(): Promise<void> {
+  return call("claude_integration_install");
+}
+
+/** Removes the plugin and records that the user declined it. */
+export function uninstallClaudeIntegration(): Promise<void> {
+  return call("claude_integration_uninstall");
+}
+
+/** Records what the user answered. Installs nothing. */
+export function setClaudeConsent(consent: "accepted" | "declined"): Promise<void> {
+  return call("claude_integration_set_consent", { consent });
+}
+
+/**
+ * Shows a notification of the system about a session. Clicking it brings
+ * the window to the front and fires `notification-clicked`.
+ */
+export function notify(notification: {
+  title: string;
+  body: string;
+  sessionId: SessionId;
+}): Promise<void> {
+  return call("notify", notification);
+}
+
+/**
+ * Shows the number of sessions waiting on the icon of the application (the
+ * Dock on macOS, some launchers on Linux), or nothing for 0. Resolves with
+ * whether the platform shows such a badge; never on Windows.
+ */
+export function setAttentionBadge(count: number): Promise<boolean> {
+  return call("set_attention_badge", { count });
+}
+
+/**
+ * Calls `handler` when a notification from `notify` is clicked. Resolves
+ * with how to stop listening.
+ */
+export function onNotificationClicked(
+  handler: (clicked: NotificationClicked) => void,
+): Promise<() => void> {
+  return listen<NotificationClicked>("notification-clicked", (event) => {
+    handler(event.payload);
+  });
 }
 
 /**

@@ -26,8 +26,14 @@ use termx_core::workspace::{
     SessionState, Snapshot,
 };
 
+use termx_core::claude::{
+    Change, Consent, IntegrationError, IntegrationErrorKind, IntegrationStatus, PluginStatus,
+};
+
+use crate::commands::claude::ClaudePreview;
 use crate::commands::error::{CommandError, ErrorKind};
 use crate::commands::session::{CreateSessionRequest, StartSessionRequest, StartedSession};
+use crate::notify::NotificationClicked;
 use crate::terminal::SessionEvent;
 
 /// Where the contract is kept, next to the types it guards.
@@ -53,6 +59,43 @@ fn folder_project() -> Project {
         root: PathBuf::from("/work/notes"),
         kind: ProjectKind::Folder,
     }
+}
+
+/// The integration in each state the frontend shows.
+fn claude_integration() -> Vec<IntegrationStatus> {
+    vec![
+        IntegrationStatus {
+            claude_installed: true,
+            plugin: PluginStatus::NotInstalled,
+            version: None,
+            consent: Consent::Unasked,
+            error: None,
+        },
+        IntegrationStatus {
+            claude_installed: true,
+            plugin: PluginStatus::Installed,
+            version: Some("0.1.0+plugin.1".to_owned()),
+            consent: Consent::Accepted,
+            error: None,
+        },
+        IntegrationStatus {
+            claude_installed: true,
+            plugin: PluginStatus::Outdated,
+            version: Some("0.0.9+plugin.1".to_owned()),
+            consent: Consent::Accepted,
+            error: None,
+        },
+        IntegrationStatus {
+            claude_installed: false,
+            plugin: PluginStatus::Error,
+            version: None,
+            consent: Consent::Declined,
+            error: Some(IntegrationError {
+                kind: IntegrationErrorKind::InvalidSettings,
+                message: "~/.claude/settings.json cannot be changed safely".to_owned(),
+            }),
+        },
+    ]
 }
 
 /// A Claude Code session that runs in a linked worktree.
@@ -236,6 +279,9 @@ fn contract() -> Value {
         ErrorKind::NotFound,
         ErrorKind::InvalidArgument,
         ErrorKind::SessionRunning,
+        ErrorKind::InvalidSettings,
+        ErrorKind::SettingsConflict,
+        ErrorKind::SenderMissing,
         ErrorKind::Internal,
     ]
     .into_iter()
@@ -272,6 +318,22 @@ fn contract() -> Value {
             LaunchFailure::launch_unconfirmed(),
         ],
         "commandErrors": command_errors,
+        "claudeIntegration": claude_integration(),
+        "claudePreview": ClaudePreview {
+            changes: vec![
+                Change {
+                    path: "~/Library/Application Support/termx/claude-plugin".to_owned(),
+                    description: "Write the termx plugin for Claude Code.".to_owned(),
+                },
+                Change {
+                    path: "~/.claude/settings.json".to_owned(),
+                    description: "Set \"termx@termx\" to true in \"enabledPlugins\".".to_owned(),
+                },
+            ],
+        },
+        "notificationClicked": NotificationClicked {
+            session_id: "s-claude".to_owned(),
+        },
         "startedSession": StartedSession {
             terminal: 7,
             ack_batch_bytes: 8192,
@@ -289,6 +351,13 @@ fn contract() -> Value {
             "direction": [Direction::Row, Direction::Column],
             "placement": [Placement::Before, Placement::After],
             "edge": [Edge::Left, Edge::Right, Edge::Top, Edge::Bottom, Edge::Center],
+            "pluginStatus": [
+                PluginStatus::NotInstalled,
+                PluginStatus::Installed,
+                PluginStatus::Outdated,
+                PluginStatus::Error,
+            ],
+            "consent": [Consent::Unasked, Consent::Accepted, Consent::Declined],
             "agentStatus": [
                 AgentStatus::Working,
                 AgentStatus::WaitingForPermission,
