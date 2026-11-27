@@ -153,6 +153,12 @@ export interface TerminalControllerOptions {
   config?: TerminalConfig;
   platform?: Platform;
   backend?: TerminalBackend;
+  /**
+   * The size of the terminal until it is first fitted to a pane: what a
+   * session started before it is shown (`startDetached`) is told. 80 by 24
+   * when omitted.
+   */
+  size?: { cols: number; rows: number };
 }
 
 interface PendingInput {
@@ -225,6 +231,8 @@ export class TerminalController {
 
   private readonly fitAddon = new FitAddon();
   private webglAddon: WebglAddon | null = null;
+  /** WebGL could not be used, or is not to be used again after a loss. */
+  private webglGivenUp = false;
   /** How often WebGL was started again after losing its context. */
   private webglRestarts = 0;
   private readonly optionKeys = new OptionKeys();
@@ -268,6 +276,7 @@ export class TerminalController {
 
     this.terminal = new Terminal({
       ...xtermOptions(this.config),
+      ...(options.size ? { cols: options.size.cols, rows: options.size.rows } : {}),
       // OSC 8 hyperlinks. The default handler asks for confirmation in a
       // dialog and opens a browser window, neither of which exists here.
       linkHandler: {
@@ -334,8 +343,11 @@ export class TerminalController {
    * none yet. The session is started here rather than earlier so that it is
    * created at the size of the pane: a shell started at 80 columns and
    * resized at once would draw its first prompt twice.
+   *
+   * The terminal takes the keyboard unless `focus` is `false`: of several
+   * panes shown at once, only the focused one should.
    */
-  attach(container: HTMLElement): void {
+  attach(container: HTMLElement, { focus = true }: { focus?: boolean } = {}): void {
     if (this.disposed) return;
     this.detach();
     this.container = container;
@@ -343,6 +355,8 @@ export class TerminalController {
     if (this.opened) {
       // xterm.js can only be opened once; afterwards its element is moved.
       if (this.terminal.element) container.appendChild(this.terminal.element);
+      // WebGL is let go of while the terminal is off the screen.
+      if (!this.webglAddon) this.enableWebgl();
     } else {
       this.terminal.open(container);
       this.opened = true;
@@ -357,7 +371,7 @@ export class TerminalController {
     // In the capture phase, before xterm.js sees the event: see `handlePaste`.
     container.addEventListener("paste", this.handlePaste, true);
     window.addEventListener("blur", this.handleWindowBlur);
-    this.terminal.focus();
+    if (focus) this.terminal.focus();
 
     if (this.status.kind !== "idle") return;
     if (this.autoStart === "dormant") {
@@ -370,8 +384,18 @@ export class TerminalController {
     }
   }
 
-  /** Takes the terminal off the screen. Its session keeps running. */
+  /**
+   * Takes the terminal off the screen. Its session keeps running, and its
+   * output keeps being parsed and acknowledged, so that its scrollback is
+   * complete when it is shown again and its program is never held back.
+   *
+   * Its WebGL context is released: a window can only hold a few of them,
+   * and one per hidden session would soon cost the visible ones theirs. It
+   * is made again when the terminal is shown; in between, xterm.js keeps
+   * the buffer and draws nothing.
+   */
   detach(): void {
+    this.releaseWebgl();
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
     if (this.resizeTimer !== null) {
@@ -419,6 +443,20 @@ export class TerminalController {
    */
   start(mode: LaunchMode = "fresh"): void {
     if (this.disposed || !this.opened) return;
+    this.launch(mode);
+  }
+
+  /**
+   * Starts the session before its terminal is shown, at the size the
+   * terminal has (see `TerminalControllerOptions.size`); it is fitted to its
+   * pane once it is shown. Used to resume sessions that are not on screen.
+   */
+  startDetached(mode: LaunchMode = "fresh"): void {
+    if (this.disposed) return;
+    this.launch(mode);
+  }
+
+  private launch(mode: LaunchMode): void {
     const generation = ++this.generation;
     this.lastMode = mode;
     this.terminalId = null;
@@ -751,7 +789,7 @@ export class TerminalController {
    * loop.
    */
   private enableWebgl(): void {
-    if (this.config.renderer === "dom") return;
+    if (this.config.renderer === "dom" || this.webglGivenUp || this.disposed) return;
     try {
       const addon = new WebglAddon();
       addon.onContextLoss(() => {
@@ -771,12 +809,15 @@ export class TerminalController {
         if (restart) {
           this.webglRestarts += 1;
           this.enableWebgl();
+        } else {
+          this.webglGivenUp = true;
         }
       });
       this.terminal.loadAddon(addon);
       this.webglAddon = addon;
     } catch (error) {
       this.webglAddon = null;
+      this.webglGivenUp = true;
       void logFrontendEvent({
         level: "warn",
         source: "terminal-renderer",
@@ -785,6 +826,13 @@ export class TerminalController {
         })`,
       });
     }
+  }
+
+  private releaseWebgl(): void {
+    const addon = this.webglAddon;
+    if (!addon) return;
+    this.webglAddon = null;
+    addon.dispose();
   }
 
   /** Which renderer draws the terminal. */

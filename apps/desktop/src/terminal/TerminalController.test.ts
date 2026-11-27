@@ -1088,6 +1088,81 @@ describe("moving between panes", () => {
   });
 });
 
+describe("off the screen", () => {
+  it("keeps parsing and acknowledging the output of a hidden terminal", async () => {
+    const { controller, terminal, create, acks } = await attached();
+
+    controller.detach();
+    create.handlers.onOutput(new Uint8Array(ACK_BATCH));
+    create.handlers.onOutput(new Uint8Array(ACK_BATCH));
+    terminal.parseWrites();
+
+    // The program is never held back because its terminal is not shown.
+    expect(acks).toEqual([
+      { id: 1, bytes: ACK_BATCH },
+      { id: 1, bytes: ACK_BATCH },
+    ]);
+  });
+
+  it("lets go of its WebGL context while hidden and makes one when shown again", async () => {
+    const { controller } = await attached();
+    const first = FakeWebglAddon.instances[0];
+
+    controller.detach();
+    expect(first?.disposed).toBe(true);
+    expect(controller.renderer).toBe("dom");
+
+    controller.attach(pane());
+    expect(FakeWebglAddon.instances).toHaveLength(2);
+    expect(controller.renderer).toBe("webgl");
+  });
+
+  it("does not try WebGL again when it was not available", async () => {
+    FakeWebglAddon.unavailable = true;
+    const { controller } = await attached();
+
+    controller.detach();
+    controller.attach(pane());
+
+    expect(FakeWebglAddon.instances).toHaveLength(1);
+    expect(controller.renderer).toBe("dom");
+  });
+
+  it("starts a session before it is shown, at the size it was given", async () => {
+    const fake = fakeBackend();
+    const controller = new TerminalController({
+      sessionId: "s-hidden",
+      autoStart: "dormant",
+      backend: fake.backend,
+      platform: "linux",
+      size: { cols: 120, rows: 40 },
+    });
+
+    controller.startDetached("resume");
+    expect(fake.creates[0]?.options).toEqual({ mode: "resume", cols: 120, rows: 40 });
+    await fake.creates[0]?.started();
+    expect(controller.getStatus()).toEqual({ kind: "running", terminal: 1 });
+
+    // Shown later, it says nothing about being restored and starts nothing.
+    controller.attach(pane());
+    expect(fake.creates).toHaveLength(1);
+    expect(FakeTerminal.last.text).not.toContain("restored");
+  });
+
+  it("takes the keyboard when shown only if asked to", () => {
+    const fake = fakeBackend();
+    const controller = new TerminalController({
+      sessionId: SESSION,
+      backend: fake.backend,
+      platform: "linux",
+    });
+
+    controller.attach(pane(), { focus: false });
+
+    expect(FakeTerminal.last.focusCount).toBe(0);
+  });
+});
+
 describe("reporting to the workspace", () => {
   it("reports the latest title of the terminal, now and then", async () => {
     vi.useFakeTimers();
