@@ -1,0 +1,13 @@
+{
+  "name": "termx",
+  "version": "@VERSION@",
+  "description": "Tells termx what each Claude Code session it hosts is doing: working, waiting for permission or for you, done. Does nothing outside termx.",
+  "author": {
+    "name": "termx"
+  },
+  "homepage": "https://github.com/Jibaru/termx",
+  "repository": "https://github.com/Jibaru/termx",
+  "license": "MIT",
+  "defaultEnabled": false,
+  "keywords": ["termx", "terminal", "status"]
+}

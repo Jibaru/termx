@@ -118,6 +118,7 @@ pub mod store;
 
 pub use launch::{LaunchFailure, LaunchMarker, LaunchMode, LaunchToken, Launcher, MarkerFilter};
 pub use layout::{Direction, Edge, Layout, LayoutError, Node, PaneId, Placement, SplitId};
+pub(crate) use model::random_hex;
 pub use model::{
     AgentState, AgentStatus, InvalidSessionKey, MAX_CLAUDE_SESSION_ID_BYTES, MAX_COMMAND_BYTES,
     MAX_TITLE_CHARS, Session, SessionKey, SessionKind, SessionState, clean_title, default_title,

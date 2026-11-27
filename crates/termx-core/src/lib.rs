@@ -11,12 +11,14 @@
 //! - [`session`]: running terminal sessions and the path of their output.
 //! - [`workspace`]: the sessions as the user sees them, their projects,
 //!   their layout and what is remembered of them between two runs.
+//! - [`claude`]: the termx plugin of Claude Code: installing and removing it.
 //! - [`socket`]: the local socket that the hooks of Claude Code talk to.
 //! - [`config`]: user configuration.
 //! - [`diagnostics`]: persistent logging and the diagnostics bundle.
 
 #![warn(missing_docs)]
 
+pub mod claude;
 pub mod config;
 pub mod diagnostics;
 pub mod pty;
