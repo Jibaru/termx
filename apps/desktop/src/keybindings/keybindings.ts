@@ -1,4 +1,5 @@
 import type { Platform } from "../lib/platform";
+import MENU from "./menu.json";
 
 /**
  * The keyboard shortcuts of the window, in one place.
@@ -299,3 +300,44 @@ export const PTY_RESERVED: readonly KeyChord[] = (() => {
   }
   return keys;
 })();
+
+/**
+ * A chord as an accelerator of the menu bar (Tauri's format, with the
+ * physical key): `Shift+Cmd+KeyT`.
+ */
+export function chordToAccelerator(chord: KeyChord): string {
+  const parts: string[] = [];
+  if (chord.ctrl) parts.push("Ctrl");
+  if (chord.alt) parts.push("Alt");
+  if (chord.shift) parts.push("Shift");
+  if (chord.meta) parts.push("Cmd");
+  parts.push(chord.code);
+  return parts.join("+");
+}
+
+/** An item of the menu bar of macOS (`menu.json`, read by the Rust side too). */
+export interface MenuEntry {
+  command: CommandId;
+  label: string;
+  menu: "File" | "View";
+  section: number;
+}
+
+export const MENU_ENTRIES = MENU as MenuEntry[];
+
+/**
+ * The shortcut of each item of the menu bar, from the bindings: the menu
+ * shows, and binds, the keys the window uses. A command bound only
+ * outside the terminal (F2) gets none: the menu would take the key from
+ * the program in the terminal.
+ */
+export function menuShortcuts(
+  bindings: readonly Binding[],
+): { command: CommandId; accelerator: string | null }[] {
+  return MENU_ENTRIES.map(({ command }) => {
+    const binding = bindings.find(
+      (candidate) => candidate.command === command && candidate.scope === "global",
+    );
+    return { command, accelerator: binding ? chordToAccelerator(binding.chord) : null };
+  });
+}

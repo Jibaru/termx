@@ -837,6 +837,16 @@ export function quitShown(): Promise<void> {
   return call("app_quit_shown");
 }
 
+/**
+ * Gives the items of the menu bar (macOS) their shortcuts, from the key
+ * bindings of the window. Does nothing without a menu bar.
+ */
+export function setMenuShortcuts(
+  shortcuts: { command: string; accelerator: string | null }[],
+): Promise<void> {
+  return call("menu_set_shortcuts", { shortcuts });
+}
+
 /** The user said no to quitting: the next close or quit asks again. */
 export function cancelQuit(): Promise<void> {
   return call("app_quit_cancel");

@@ -30,6 +30,17 @@ pub fn app_quit_shown(state: tauri::State<'_, crate::quit::QuitState>) {
     state.shown();
 }
 
+/// Gives the items of the menu bar the shortcuts the window uses, from its
+/// key bindings: the menu never shows, or binds, another key than the
+/// window. Does nothing without a menu bar (not macOS).
+#[tauri::command]
+pub fn menu_set_shortcuts<R: Runtime>(
+    app: AppHandle<R>,
+    shortcuts: Vec<crate::quit::MenuShortcut>,
+) {
+    crate::quit::set_shortcuts(&app, &shortcuts);
+}
+
 #[cfg(test)]
 mod tests {
     use super::core_version;

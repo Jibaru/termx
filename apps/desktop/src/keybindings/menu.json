@@ -1,0 +1,68 @@
+[
+  {
+    "command": "newSession",
+    "label": "New Session…",
+    "menu": "File",
+    "section": 1
+  },
+  {
+    "command": "newSiblingSession",
+    "label": "New Claude Session in This Project",
+    "menu": "File",
+    "section": 1
+  },
+  {
+    "command": "splitRight",
+    "label": "Split Right",
+    "menu": "File",
+    "section": 2
+  },
+  {
+    "command": "splitDown",
+    "label": "Split Down",
+    "menu": "File",
+    "section": 2
+  },
+  {
+    "command": "renameSession",
+    "label": "Rename Session",
+    "menu": "File",
+    "section": 3
+  },
+  {
+    "command": "closePane",
+    "label": "Close Pane",
+    "menu": "File",
+    "section": 3
+  },
+  {
+    "command": "closeSession",
+    "label": "Close Session…",
+    "menu": "File",
+    "section": 3
+  },
+  {
+    "command": "toggleSidebar",
+    "label": "Show or Hide the Sidebar",
+    "menu": "View",
+    "section": 1
+  },
+  {
+    "command": "focusSidebar",
+    "label": "Go to the Sidebar",
+    "menu": "View",
+    "section": 1
+  },
+  {
+    "command": "nextSession",
+    "label": "Next Session",
+    "menu": "View",
+    "section": 2
+  },
+  {
+    "command": "previousSession",
+    "label": "Previous Session",
+    "menu": "View",
+    "section": 2
+  }
+]

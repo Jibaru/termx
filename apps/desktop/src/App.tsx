@@ -14,11 +14,13 @@ import { SidebarResizer } from "./components/SidebarResizer";
 import {
   type Binding,
   COMMAND_LABELS,
+  menuShortcuts,
   type CommandId,
   resolveBindings,
   shortcutOf,
 } from "./keybindings/keybindings";
-import { useKeybindings } from "./keybindings/useKeybindings";
+import { isInTerminal, isInTextField, useKeybindings } from "./keybindings/useKeybindings";
+import { reportError } from "./lib/errorReporting";
 import { detectPlatform, type Platform } from "./lib/platform";
 import { isBoolean, isNumber, readPref, writePref } from "./lib/prefs";
 import { clampSidebarWidth, SIDEBAR_DEFAULT_WIDTH } from "./lib/sidebarWidth";
@@ -43,6 +45,8 @@ interface AppProps {
 }
 
 const WIDTH_PREF = "sidebarWidth";
+/** How long after a key a menu command for the same command is its echo. */
+const MENU_ECHO_MS = 400;
 const VISIBLE_PREF = "sidebarVisible";
 
 /**
@@ -181,7 +185,27 @@ function Window() {
     [workbench, showSidebar, sidebarVisible, focusSidebar],
   );
 
-  useKeybindings(bindings, run, ui.dialog.kind === "none");
+  // A menu command that repeats a key just handled is the same press seen
+  // twice (the menu bar and the page both saw it): it runs once.
+  const lastKey = useRef<{ command: CommandId; at: number } | null>(null);
+  const runFromKey = useCallback(
+    (command: CommandId, target: EventTarget | null) => {
+      lastKey.current = { command, at: Date.now() };
+      run(command, target);
+    },
+    [run],
+  );
+  useKeybindings(bindings, runFromKey, ui.dialog.kind === "none");
+
+  // The menu bar of macOS shows, and binds, the keys of these bindings.
+  useEffect(() => {
+    if (platform !== "macos") return;
+    workbench.workspace.backend
+      .setMenuShortcuts(menuShortcuts(bindings))
+      .catch((error: unknown) => {
+        reportError("menu-shortcuts", error);
+      });
+  }, [bindings, platform, workbench]);
 
   // The menu bar of macOS, and the confirmation before quitting.
   const latestRun = useRef({ run, enabled: ui.dialog.kind === "none" });
@@ -193,7 +217,12 @@ function Window() {
     const stops = [
       backend.onMenuCommand((command) => {
         if (!latestRun.current.enabled || !(command in COMMAND_LABELS)) return;
-        latestRun.current.run(command as CommandId, document.activeElement);
+        const focus = document.activeElement;
+        // Typing in a field keeps every key, the menu's included.
+        if (!isInTerminal(focus) && isInTextField(focus)) return;
+        const key = lastKey.current;
+        if (key?.command === command && Date.now() - key.at < MENU_ECHO_MS) return;
+        latestRun.current.run(command as CommandId, focus);
       }),
       backend.onQuitRequested(workbench.requestQuit),
     ];

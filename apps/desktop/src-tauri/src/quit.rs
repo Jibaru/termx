@@ -41,7 +41,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
+use tauri::menu::{IsMenuItem, Menu, MenuItem, MenuItemKind, PredefinedMenuItem, Submenu};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use termx_core::diagnostics::tracing::{info, warn};
 
@@ -232,36 +232,71 @@ pub fn quit<R: Runtime>(app: &AppHandle<R>) {
     app.exit(0);
 }
 
-/// The items of the menu that run a command of the window: id, label and
-/// accelerator. The ids are those of the key bindings of the frontend
-/// (`keybindings.ts`), whose shortcuts on macOS these are.
-pub const MENU_COMMANDS: &[(&str, &str, &str)] = &[
-    ("newSession", "New Session…", "Shift+Cmd+T"),
-    (
-        "newSiblingSession",
-        "New Claude Session in This Project",
-        "Shift+Cmd+N",
-    ),
-    ("splitRight", "Split Right", "Cmd+D"),
-    ("splitDown", "Split Down", "Shift+Cmd+D"),
-    ("closePane", "Close Pane", "Cmd+W"),
-    ("closeSession", "Close Session…", "Shift+Cmd+W"),
-    ("renameSession", "Rename Session", "F2"),
-    ("toggleSidebar", "Show or Hide the Sidebar", "Cmd+B"),
-    ("focusSidebar", "Go to the Sidebar", "Cmd+0"),
-    ("nextSession", "Next Session", "Shift+Cmd+]"),
-    ("previousSession", "Previous Session", "Shift+Cmd+["),
-];
+/// An item of the menu that runs a command of the window. The list is
+/// `src/keybindings/menu.json`, shared with the frontend; its accelerators
+/// are not here: the frontend sends them from its key bindings at start
+/// (`menu_set_shortcuts`), so that the menu shows, and binds, exactly the
+/// shortcuts the window uses, overrides included.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct MenuEntry {
+    /// The id of a command of the key bindings (`keybindings.ts`).
+    pub command: String,
+    pub label: String,
+    /// The menu it is in: `File` or `View`.
+    pub menu: String,
+    /// Items of different sections of a menu are separated by a line.
+    pub section: u8,
+}
 
-fn command_item<R: Runtime>(app: &AppHandle<R>, id: &str) -> tauri::Result<MenuItem<R>> {
-    let (_, label, accelerator) = MENU_COMMANDS
+/// The items of `src/keybindings/menu.json`.
+///
+/// # Panics
+///
+/// If the file is not valid, which a test rules out.
+#[must_use]
+pub fn menu_entries() -> Vec<MenuEntry> {
+    serde_json::from_str(include_str!("../../src/keybindings/menu.json"))
+        .expect("menu.json is checked by a test")
+}
+
+/// The items of the menu that run commands, by command, to give them their
+/// shortcuts (`set_shortcuts`).
+pub struct MenuItems<R: Runtime>(Mutex<Vec<(String, MenuItem<R>)>>);
+
+/// A shortcut for an item of the menu, in the format of Tauri's
+/// accelerators (`Shift+Cmd+KeyT`), or `None` for none.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct MenuShortcut {
+    pub command: String,
+    pub accelerator: Option<String>,
+}
+
+/// Gives the items of the menu the shortcuts the window uses.
+pub fn set_shortcuts<R: Runtime>(app: &AppHandle<R>, shortcuts: &[MenuShortcut]) {
+    let Some(items) = app.try_state::<MenuItems<R>>() else {
+        // No menu bar: not macOS.
+        return;
+    };
+    let items = items.0.lock().unwrap_or_else(PoisonError::into_inner);
+    for shortcut in shortcuts {
+        let Some((_, item)) = items
+            .iter()
+            .find(|(command, _)| *command == shortcut.command)
+        else {
+            continue;
+        };
+        if let Err(error) = item.set_accelerator(shortcut.accelerator.as_deref()) {
+            warn!(error = %error, "could not give an item of the menu its shortcut");
+        }
+    }
+}
+
+/// The items, as the builders of submenus take them.
+fn refs<R: Runtime>(items: &[MenuItemKind<R>]) -> Vec<&dyn IsMenuItem<R>> {
+    items
         .iter()
-        .find(|(candidate, _, _)| *candidate == id)
-        .copied()
-        .unwrap_or((id, id, ""));
-    // F2 is shown, not bound: in a terminal it belongs to the program.
-    let accelerator = (accelerator != "F2").then_some(accelerator);
-    MenuItem::with_id(app, id, label, true, accelerator)
+        .map(|item| item as &dyn IsMenuItem<R>)
+        .collect()
 }
 
 /// The menu bar of the application on macOS.
@@ -270,8 +305,26 @@ fn command_item<R: Runtime>(app: &AppHandle<R>, id: &str) -> tauri::Result<MenuI
 ///
 /// Fails when the system refuses to make a menu.
 pub fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
-    let item = |id| command_item(app, id);
     let separator = || PredefinedMenuItem::separator(app);
+    let entries = menu_entries();
+    let mut commands: Vec<(String, MenuItem<R>)> = Vec::new();
+    // The items of `menu`, with a line between two sections.
+    let mut items_of = |menu: &str| -> tauri::Result<Vec<MenuItemKind<R>>> {
+        let mut items = Vec::new();
+        let mut section = None;
+        for entry in entries.iter().filter(|entry| entry.menu == menu) {
+            if section.is_some_and(|previous| previous != entry.section) {
+                items.push(MenuItemKind::Predefined(separator()?));
+            }
+            section = Some(entry.section);
+            let item = MenuItem::with_id(app, &entry.command, &entry.label, true, None::<&str>)?;
+            commands.push((entry.command.clone(), item.clone()));
+            items.push(MenuItemKind::MenuItem(item));
+        }
+        Ok(items)
+    };
+    let file_items = items_of("File")?;
+    let view_items = items_of("View")?;
     let application = Submenu::with_items(
         app,
         "termx",
@@ -288,22 +341,7 @@ pub fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
             &MenuItem::with_id(app, QUIT_ITEM, "Quit termx", true, Some("Cmd+Q"))?,
         ],
     )?;
-    let file = Submenu::with_items(
-        app,
-        "File",
-        true,
-        &[
-            &item("newSession")?,
-            &item("newSiblingSession")?,
-            &separator()?,
-            &item("splitRight")?,
-            &item("splitDown")?,
-            &separator()?,
-            &item("renameSession")?,
-            &item("closePane")?,
-            &item("closeSession")?,
-        ],
-    )?;
+    let file = Submenu::with_items(app, "File", true, &refs(&file_items))?;
     let edit = Submenu::with_items(
         app,
         "Edit",
@@ -318,20 +356,12 @@ pub fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
             &PredefinedMenuItem::select_all(app, None)?,
         ],
     )?;
-    let view = Submenu::with_items(
-        app,
-        "View",
-        true,
-        &[
-            &item("toggleSidebar")?,
-            &item("focusSidebar")?,
-            &separator()?,
-            &item("nextSession")?,
-            &item("previousSession")?,
-            &separator()?,
-            &PredefinedMenuItem::fullscreen(app, None)?,
-        ],
-    )?;
+    let mut view_all = view_items;
+    view_all.push(MenuItemKind::Predefined(separator()?));
+    view_all.push(MenuItemKind::Predefined(PredefinedMenuItem::fullscreen(
+        app, None,
+    )?));
+    let view = Submenu::with_items(app, "View", true, &refs(&view_all))?;
     let window = Submenu::with_items(
         app,
         "Window",
@@ -341,6 +371,7 @@ pub fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
             &PredefinedMenuItem::maximize(app, None)?,
         ],
     )?;
+    app.manage(MenuItems(Mutex::new(commands)));
     Menu::with_items(app, &[&application, &file, &edit, &view, &window])
 }
 
@@ -352,7 +383,7 @@ pub fn on_menu_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
         }
         return;
     }
-    if MENU_COMMANDS.iter().any(|(command, _, _)| *command == id)
+    if menu_entries().iter().any(|entry| entry.command == id)
         && let Err(error) = app.emit(MENU_COMMAND_EVENT, id)
     {
         warn!(error = %error, "could not send a menu command to the window");
@@ -432,22 +463,21 @@ mod tests {
     }
 
     #[test]
-    fn cmd_w_closes_a_pane_and_never_a_window() {
-        let close_pane = MENU_COMMANDS
-            .iter()
-            .find(|(id, _, _)| *id == "closePane")
-            .unwrap();
-        assert_eq!(close_pane.2, "Cmd+W");
-        let accelerators: Vec<&str> = MENU_COMMANDS.iter().map(|(_, _, keys)| *keys).collect();
-        let mut unique = accelerators.clone();
-        unique.sort_unstable();
-        unique.dedup();
-        assert_eq!(
-            unique.len(),
-            accelerators.len(),
-            "an accelerator is used twice"
+    fn the_menu_lists_known_commands_once() {
+        let entries = menu_entries();
+        let mut commands: Vec<&str> = entries.iter().map(|entry| entry.command.as_str()).collect();
+        assert!(commands.contains(&"closePane"));
+        commands.sort_unstable();
+        let count = commands.len();
+        commands.dedup();
+        assert_eq!(commands.len(), count, "a command is listed twice");
+        assert!(
+            entries
+                .iter()
+                .all(|entry| ["File", "View"].contains(&entry.menu.as_str()))
         );
     }
+
     // Building the menu itself is not tested: the system only makes menus
     // on the main thread, which a test does not run on.
 }

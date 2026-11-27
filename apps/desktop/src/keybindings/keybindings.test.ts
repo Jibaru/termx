@@ -4,10 +4,13 @@ import type { Platform } from "../lib/platform";
 import {
   type Binding,
   chordMatches,
+  COMMAND_LABELS,
   defaultBindings,
   formatChord,
   type KeyChord,
   matchBinding,
+  MENU_ENTRIES,
+  menuShortcuts,
   PTY_RESERVED,
   resolveBindings,
   shortcutOf,
@@ -150,6 +153,31 @@ describe("matching", () => {
         false,
       ),
     ).toBeNull();
+  });
+});
+
+describe("the menu bar of macOS", () => {
+  it("lists commands that exist, once", () => {
+    const commands = MENU_ENTRIES.map((entry) => entry.command);
+    expect(new Set(commands).size).toBe(commands.length);
+    for (const command of commands) expect(Object.keys(COMMAND_LABELS)).toContain(command);
+  });
+
+  it("takes its shortcuts from the bindings, overrides included", () => {
+    const shortcuts = new Map(
+      menuShortcuts(defaultBindings("macos")).map((each) => [each.command, each.accelerator]),
+    );
+    expect(shortcuts.get("closePane")).toBe("Cmd+KeyW");
+    expect(shortcuts.get("newSession")).toBe("Shift+Cmd+KeyT");
+    expect(shortcuts.get("nextSession")).toBe("Shift+Cmd+BracketRight");
+    // F2 belongs to the program in a terminal: the menu does not take it.
+    expect(shortcuts.get("renameSession")).toBeNull();
+
+    const overridden = menuShortcuts(
+      resolveBindings("macos", { splitRight: { code: "KeyR", meta: true }, toggleSidebar: null }),
+    );
+    expect(overridden.find((each) => each.command === "splitRight")?.accelerator).toBe("Cmd+KeyR");
+    expect(overridden.find((each) => each.command === "toggleSidebar")?.accelerator).toBeNull();
   });
 });
 
