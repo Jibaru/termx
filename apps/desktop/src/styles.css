@@ -141,6 +141,110 @@ body {
   flex: none;
 }
 
+/* --- Icons (src/icons) --------------------------------------------------
+   The shape says what an icon means; its tone, from the palette, says it
+   again. Motion is slow, and stops for people who ask for less of it. */
+
+.icon[data-tone="info"] {
+  color: var(--color-info);
+}
+
+.icon[data-tone="success"] {
+  color: var(--color-success);
+}
+
+.icon[data-tone="muted"] {
+  color: var(--color-muted);
+}
+
+.icon[data-tone="danger"] {
+  color: var(--color-danger);
+}
+
+.icon[data-tone="warning"] {
+  color: var(--color-warning);
+}
+
+.icon[data-tone="attention"] {
+  color: var(--color-attention);
+}
+
+.icon[data-tone="kind-claude"] {
+  color: var(--color-kind-claude);
+}
+
+.icon[data-tone="kind-shell"] {
+  color: var(--color-kind-shell);
+}
+
+.icon[data-tone="kind-background"] {
+  color: var(--color-kind-background);
+}
+
+.icon-spin,
+.icon-pulse > circle,
+.icon-breathe {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.icon-spin {
+  animation: icon-spin 1.6s linear infinite;
+}
+
+.icon-pulse > circle {
+  animation: icon-pulse 1.5s ease-in-out infinite;
+}
+
+.icon-pulse > circle:nth-child(2) {
+  animation-delay: 0.25s;
+}
+
+.icon-pulse > circle:nth-child(3) {
+  animation-delay: 0.5s;
+}
+
+/* Loud by colour and shape already: a slow swell, never a blink. */
+.icon-breathe {
+  animation: icon-breathe 2.4s ease-in-out infinite;
+}
+
+@keyframes icon-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes icon-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+
+  50% {
+    transform: scale(0.55);
+  }
+}
+
+@keyframes icon-breathe {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+
+  50% {
+    transform: scale(1.1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .icon-spin,
+  .icon-pulse > circle,
+  .icon-breathe {
+    animation: none;
+  }
+}
+
 .icon-button {
   display: inline-flex;
   align-items: center;
