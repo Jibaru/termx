@@ -144,6 +144,18 @@ pub trait OutputFilter: Send + 'static {
     fn finish(&mut self) -> Vec<u8> {
         Vec::new()
     }
+
+    /// When what is kept back must be let out, even if no more output
+    /// comes to decide on it. `None` while nothing is kept back.
+    fn release_at(&self) -> Option<std::time::Instant> {
+        None
+    }
+
+    /// The time of [`release_at`](Self::release_at) has come: returns what
+    /// was kept back.
+    fn release(&mut self) -> Vec<u8> {
+        self.finish()
+    }
 }
 
 /// Receives what a session produces: its output and, at the end, how its

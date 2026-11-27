@@ -211,6 +211,15 @@ impl Pump {
     }
 
     fn pump(&mut self, now: Instant) -> PumpState {
+        // What a filter kept back for too long goes out as it is.
+        if let Some(filter) = &mut self.filter
+            && filter.release_at().is_some_and(|at| at <= now)
+        {
+            let held = filter.release();
+            if !held.is_empty() {
+                self.batcher.push(now, held);
+            }
+        }
         loop {
             let mut progressed = false;
 
@@ -296,7 +305,11 @@ impl Pump {
                 .filter(|_| self.can_resume_by_itself())
                 .map(|since| since + STALL_TIMEOUT);
         }
-        self.batcher.deadline()
+        let release = self.filter.as_ref().and_then(|filter| filter.release_at());
+        match (self.batcher.deadline(), release) {
+            (Some(batch), Some(release)) => Some(batch.min(release)),
+            (batch, release) => batch.or(release),
+        }
     }
 }
 
@@ -567,6 +580,54 @@ mod tests {
         assert_eq!(f.poll(), PumpState::Finished);
         assert_eq!(f.sink.output(), b"ab!");
         assert_eq!(f.sink.exit(), Some(exit_code(0)));
+    }
+
+    /// Holds a trailing ESC back until `at`.
+    struct HoldsEscape {
+        held: Vec<u8>,
+        at: Instant,
+        holding: bool,
+    }
+
+    impl OutputFilter for HoldsEscape {
+        fn filter(&mut self, mut bytes: Vec<u8>) -> Vec<u8> {
+            if bytes.last() == Some(&0x1b) {
+                self.held = bytes.split_off(bytes.len() - 1);
+                self.holding = true;
+            }
+            bytes
+        }
+
+        fn release_at(&self) -> Option<Instant> {
+            self.holding.then_some(self.at)
+        }
+
+        fn release(&mut self) -> Vec<u8> {
+            self.holding = false;
+            std::mem::take(&mut self.held)
+        }
+    }
+
+    #[test]
+    fn what_a_filter_holds_back_goes_out_when_its_time_comes() {
+        let mut f = fixture();
+        let at = f.now + 3 * MS;
+        f.pump = Pump::new(ID, Box::new(f.source.clone()), Box::new(f.sink.clone())).with_filter(
+            Some(Box::new(HoldsEscape {
+                held: Vec::new(),
+                at,
+                holding: false,
+            })),
+        );
+        f.source.push("Password: \x1b");
+        f.poll();
+        // The pump wakes up for the held byte even if nothing else comes.
+        assert!(f.pump.deadline().is_some_and(|deadline| deadline <= at));
+        while f.pump.deadline().is_some() {
+            f.poll_at_deadline();
+        }
+        assert_eq!(f.sink.output(), b"Password: \x1b");
+        assert_eq!(f.pump.deadline(), None);
     }
 
     #[test]
