@@ -73,6 +73,7 @@ export function fakeWorkspace(initial: WorkspaceSnapshot, responders: Responders
     showSession: record("showSession"),
     quitApp: record("quitApp"),
     cancelQuit: record("cancelQuit"),
+    quitShown: record("quitShown"),
     onQuitRequested: (handler) => {
       events.quit = handler;
       return Promise.resolve(() => undefined);

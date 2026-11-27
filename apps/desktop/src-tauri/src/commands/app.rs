@@ -20,7 +20,14 @@ pub fn app_quit<R: Runtime>(app: AppHandle<R>) {
 /// The user said no to quitting: the next close or quit asks again.
 #[tauri::command]
 pub fn app_quit_cancel(state: tauri::State<'_, crate::quit::QuitState>) {
-    state.cancel();
+    state.forget();
+}
+
+/// The window shows the question about quitting: a repeated close or quit
+/// shows it again instead of going through.
+#[tauri::command]
+pub fn app_quit_shown(state: tauri::State<'_, crate::quit::QuitState>) {
+    state.shown();
 }
 
 #[cfg(test)]

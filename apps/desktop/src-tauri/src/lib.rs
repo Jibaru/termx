@@ -32,6 +32,7 @@ macro_rules! command_handlers {
             crate::commands::app::core_version,
             crate::commands::app::app_quit,
             crate::commands::app::app_quit_cancel,
+            crate::commands::app::app_quit_shown,
             crate::commands::diagnostics::log_frontend_event,
             crate::commands::diagnostics::open_log_folder,
             crate::commands::diagnostics::export_diagnostics,
@@ -114,7 +115,10 @@ pub fn run() {
             // The menu bar of a Mac application, without the Close Window
             // item that would bind Cmd+W to ending every session.
             #[cfg(target_os = "macos")]
-            app.set_menu(quit::build_menu(app.handle())?)?;
+            {
+                app.set_menu(quit::build_menu(app.handle())?)?;
+                quit::watch_power_off(app.handle());
+            }
             Ok(())
         })
         .on_menu_event(|app, event| quit::on_menu_event(app, event.id().as_ref()))
@@ -210,6 +214,10 @@ fn release_page(app: &tauri::AppHandle, label: &str) {
     }
     if let Some(terminal) = app.try_state::<terminal::TerminalState>() {
         terminal.release_page(label);
+    }
+    // A question about quitting died with the page: the next close asks.
+    if let Some(quit) = app.try_state::<quit::QuitState>() {
+        quit.forget();
     }
 }
 

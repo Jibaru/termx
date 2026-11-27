@@ -35,7 +35,12 @@ export type DialogState =
   | { kind: "newSession" }
   | { kind: "confirmClose"; session: SessionId }
   | { kind: "confirmRestart"; session: SessionId }
-  | { kind: "confirmQuit"; running: number };
+  | {
+      kind: "confirmQuit";
+      running: number;
+      /** Counts the requests, so that a repeat shows the question afresh. */
+      asked: number;
+    };
 
 export interface UiState {
   dialog: DialogState;
@@ -475,7 +480,10 @@ export class Workbench {
 
   /** The window is closing, or termx quitting, while sessions run: ask. */
   requestQuit = (running: number): void => {
-    this.setUi({ dialog: { kind: "confirmQuit", running } });
+    const asked = this.ui.dialog.kind === "confirmQuit" ? this.ui.dialog.asked + 1 : 1;
+    this.setUi({ dialog: { kind: "confirmQuit", running, asked } });
+    // From now on a repeat shows the question again instead of quitting.
+    void this.run("quit-shown", () => this.backend.quitShown());
   };
 
   /** The user confirmed quitting. */
