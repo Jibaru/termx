@@ -30,6 +30,7 @@ import {
   TerminalController,
   TITLE_REPORT_INTERVAL_MS,
 } from "./TerminalController";
+import { WebglBudget, webglBudget } from "./webglBudget";
 
 vi.mock("@xterm/xterm", async () => {
   const mocks = await import("../test/xtermMock");
@@ -79,6 +80,7 @@ async function attached({ platform = "macos", config, leaveStarting = false }: S
 
 beforeEach(() => {
   resetXtermMocks();
+  webglBudget.clear();
   vi.stubGlobal("ResizeObserver", FakeResizeObserver);
 });
 
@@ -1194,17 +1196,77 @@ describe("off the screen", () => {
     ]);
   });
 
-  it("lets go of its WebGL context while hidden and makes one when shown again", async () => {
+  it("keeps its WebGL context while hidden, so that showing it again makes none", async () => {
     const { controller } = await attached();
     const first = FakeWebglAddon.instances[0];
 
     controller.detach();
-    expect(first?.disposed).toBe(true);
-    expect(controller.renderer).toBe("dom");
-
     controller.attach(pane());
-    expect(FakeWebglAddon.instances).toHaveLength(2);
+
+    expect(first?.disposed).toBe(false);
+    expect(FakeWebglAddon.instances).toHaveLength(1);
     expect(controller.renderer).toBe("webgl");
+  });
+
+  it("gives its context back explicitly when a terminal on screen needs it", () => {
+    const budget = new WebglBudget(2);
+    const fake = fakeBackend();
+    const make = (sessionId: string) =>
+      new TerminalController({
+        sessionId,
+        backend: fake.backend,
+        platform: "linux",
+        webglBudget: budget,
+      });
+    const [a, b, c] = [make("s-a"), make("s-b"), make("s-c")];
+
+    a.attach(pane());
+    b.attach(pane());
+    a.detach();
+    c.attach(pane());
+
+    // The terminal off the screen shown least recently gave its context up.
+    expect(a.renderer).toBe("dom");
+    expect(FakeWebglAddon.instances[0]?.disposed).toBe(true);
+    expect(FakeWebglAddon.lostContexts).toBe(1);
+    expect([b.renderer, c.renderer]).toEqual(["webgl", "webgl"]);
+    expect(budget.size).toBe(2);
+
+    // Shown again while both contexts are on screen, it draws without one,
+    // and gets one back once there is room.
+    a.attach(pane());
+    expect(a.renderer).toBe("dom");
+    b.detach();
+    a.detach();
+    a.attach(pane());
+    expect(a.renderer).toBe("webgl");
+    expect(b.renderer).toBe("dom");
+  });
+
+  it("gives its context back when it is disposed of", async () => {
+    const { controller } = await attached();
+
+    controller.dispose();
+
+    expect(FakeWebglAddon.lostContexts).toBe(1);
+    expect(webglBudget.size).toBe(0);
+  });
+
+  it("starts WebGL again the next time it is shown after a lost context, with `auto`", async () => {
+    const { controller } = await attached();
+
+    for (let loss = 1; loss <= MAX_WEBGL_RESTARTS; loss += 1) {
+      FakeWebglAddon.instances.at(-1)?.loseContext();
+      expect(controller.renderer).toBe("dom");
+      controller.detach();
+      controller.attach(pane());
+      expect(controller.renderer).toBe("webgl");
+    }
+    // A machine that keeps losing it stays on the DOM renderer.
+    FakeWebglAddon.instances.at(-1)?.loseContext();
+    controller.detach();
+    controller.attach(pane());
+    expect(controller.renderer).toBe("dom");
   });
 
   it("does not try WebGL again when it was not available", async () => {
