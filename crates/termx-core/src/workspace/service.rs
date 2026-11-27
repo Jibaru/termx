@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::thread::{self, JoinHandle, Thread};
 use std::time::{Duration, Instant};
 
@@ -42,6 +42,15 @@ pub const SAVE_MAX_WAIT: Duration = Duration::from_secs(5);
 /// changed outside termx. See the [module documentation](super).
 pub const GIT_POLL_INTERVAL: Duration = Duration::from_secs(10);
 
+/// How long a caller waits for the project of a folder before it goes on
+/// with the folder as its own project. The detection carries on in the
+/// background, and the sessions of the folder are updated when it ends.
+pub const GIT_DETECT_BUDGET: Duration = Duration::from_secs(2);
+
+/// How long [`Workspace::shutdown`] waits for the thread of the workspace
+/// to stop, and then for the last save, before it gives up on each.
+pub const SHUTDOWN_WAIT: Duration = Duration::from_secs(5);
+
 /// How many project keys are remembered for their order.
 const MAX_PROJECT_ORDER: usize = 200;
 
@@ -68,6 +77,13 @@ pub struct WorkspaceConfig {
     pub save_max_wait: Duration,
     /// See [`GIT_POLL_INTERVAL`].
     pub git_poll_interval: Duration,
+    /// See [`GIT_DETECT_BUDGET`].
+    pub git_detect_budget: Duration,
+    /// See [`SHUTDOWN_WAIT`].
+    pub shutdown_wait: Duration,
+    /// Finds the project of a folder: [`project::detect`], replaced by
+    /// tests that need a detection that hangs.
+    pub(crate) detector: fn(&Path) -> Detected,
 }
 
 impl WorkspaceConfig {
@@ -90,6 +106,9 @@ impl WorkspaceConfig {
             save_debounce: SAVE_DEBOUNCE,
             save_max_wait: SAVE_MAX_WAIT,
             git_poll_interval: GIT_POLL_INTERVAL,
+            git_detect_budget: GIT_DETECT_BUDGET,
+            shutdown_wait: SHUTDOWN_WAIT,
+            detector: project::detect,
         }
     }
 }
@@ -393,6 +412,10 @@ struct Shared {
     store: Store,
     config: WorkspaceConfig,
     signals: Arc<Signals>,
+    /// The folders whose project is being detected, so that a folder on a
+    /// drive that does not answer costs one waiting thread, not one more
+    /// every time it is looked at.
+    detecting: Mutex<HashSet<PathBuf>>,
 }
 
 impl Shared {
@@ -443,8 +466,10 @@ impl Shared {
     }
 
     /// Reads the Git state of the sessions again: of those in `folders`,
-    /// or of all of them. The disk is read without holding the lock.
-    fn refresh_git(&self, folders: Option<&[PathBuf]>) {
+    /// or of all of them. Returns at once: the disk is read on threads of
+    /// their own, which update the sessions when they are done (see
+    /// [`start_detection`](Self::start_detection)).
+    fn refresh_git(self: &Arc<Self>, folders: Option<&[PathBuf]>) {
         let mut targets: Vec<PathBuf> = lock(&self.state)
             .entries
             .iter()
@@ -453,35 +478,75 @@ impl Shared {
             .collect();
         targets.sort();
         targets.dedup();
-        if targets.is_empty() {
-            return;
+        for folder in targets {
+            let _ = self.start_detection(folder);
         }
-        let detected: Vec<(PathBuf, Detected)> = targets
-            .into_iter()
-            .map(|folder| {
-                let detected = project::detect(&folder);
-                (folder, detected)
-            })
-            .collect();
+    }
 
+    /// Starts finding the project of `folder` on a thread of its own. When
+    /// it is found, the sessions shown in that folder are updated, however
+    /// long it took. Returns where the result arrives, or `None` when that
+    /// folder is being detected already or no thread could be started.
+    fn start_detection(self: &Arc<Self>, folder: PathBuf) -> Option<mpsc::Receiver<Detected>> {
+        if !lock(&self.detecting).insert(folder.clone()) {
+            return None;
+        }
+        let (sender, receiver) = mpsc::channel();
+        let shared = Arc::downgrade(self);
+        let detector = self.config.detector;
+        let spawned = thread::Builder::new().name("termx-git".to_owned()).spawn({
+            let folder = folder.clone();
+            move || {
+                let detected = detector(&folder);
+                if let Some(shared) = shared.upgrade() {
+                    lock(&shared.detecting).remove(&folder);
+                    shared.apply_detected(&folder, &detected);
+                }
+                let _ = sender.send(detected);
+            }
+        });
+        if let Err(error) = spawned {
+            lock(&self.detecting).remove(&folder);
+            debug!(error = %error, "the project of a folder could not be detected");
+            return None;
+        }
+        Some(receiver)
+    }
+
+    /// The project of `folder`, if it is found within
+    /// [`WorkspaceConfig::git_detect_budget`]. When it is not, the
+    /// detection goes on in the background (see
+    /// [`start_detection`](Self::start_detection)).
+    fn detect_within(self: &Arc<Self>, folder: &Path) -> Option<Detected> {
+        let receiver = self.start_detection(folder.to_owned())?;
+        receiver.recv_timeout(self.config.git_detect_budget).ok()
+    }
+
+    /// Shows `detected` for the sessions shown in `folder`.
+    fn apply_detected(&self, folder: &Path, detected: &Detected) {
         self.mutate(|state, mutation| {
             for entry in &mut state.entries {
                 let session = &mut entry.session;
                 // The folder may have changed while the disk was read.
-                let Some((_, found)) = detected
-                    .iter()
-                    .find(|(folder, _)| folder == session.effective_cwd())
-                else {
+                if session.effective_cwd() != folder {
                     continue;
-                };
-                if session.project != found.project || session.git != found.git {
-                    session.project = found.project.clone();
-                    session.git.clone_from(&found.git);
+                }
+                if session.project != detected.project || session.git != detected.git {
+                    session.project = detected.project.clone();
+                    session.git.clone_from(&detected.git);
                     mutation.changes.session(&session.id);
                     mutation.persist = true;
                 }
             }
         });
+    }
+
+    /// Passes the activity on and writes the state file now.
+    fn flush(&self) -> io::Result<bool> {
+        *lock(&self.signals.save) = None;
+        self.signals.activity.store(false, Ordering::Release);
+        self.flush_activity();
+        self.save()
     }
 
     /// Writes the state file now.
@@ -510,7 +575,7 @@ fn after(instant: Instant, duration: Duration) -> Instant {
 
 /// The thread that passes activity on, keeps the Git state current and
 /// saves, each no more often than configured.
-fn run_ticker(shared: &Shared) {
+fn run_ticker(shared: &Arc<Shared>) {
     let signals = &shared.signals;
     let config = &shared.config;
     let mut last_activity: Option<Instant> = None;
@@ -667,6 +732,7 @@ impl Workspace {
             store,
             config,
             signals,
+            detecting: Mutex::default(),
         });
 
         let ticker = thread::Builder::new()
@@ -813,7 +879,13 @@ impl Workspace {
             }
             SessionKind::Claude | SessionKind::Shell => None,
         };
-        let detected = project::detect(&new.cwd);
+        let detected = self
+            .shared
+            .detect_within(&new.cwd)
+            .unwrap_or_else(|| Detected {
+                project: Project::folder(&new.cwd),
+                git: None,
+            });
         let now = now_ms();
         let mut session = Session {
             id: SessionKey::generate(),
@@ -945,7 +1017,9 @@ impl Workspace {
         if current.live_cwd.as_ref() == Some(&folder) {
             return Ok(true);
         }
-        let detected = project::detect(&folder);
+        // When the folder takes too long to read, its project is shown
+        // once the detection ends.
+        let detected = self.shared.detect_within(&folder);
         self.shared.mutate(|state, mutation| {
             let session = &mut state.entry(key)?.session;
             // Only a running program has a folder to report.
@@ -954,7 +1028,9 @@ impl Workspace {
             }
             session.live_cwd = Some(folder);
             mutation.changes.session(key);
-            if session.project != detected.project || session.git != detected.git {
+            if let Some(detected) = detected
+                && (session.project != detected.project || session.git != detected.git)
+            {
                 session.project = detected.project;
                 session.git = detected.git;
                 mutation.persist = true;
@@ -1423,31 +1499,73 @@ impl Workspace {
     ///
     /// The error of the file system. The state file is then unchanged.
     pub fn flush(&self) -> io::Result<bool> {
-        *lock(&self.shared.signals.save) = None;
-        self.shared.signals.activity.store(false, Ordering::Release);
-        self.shared.flush_activity();
-        self.shared.save()
+        self.shared.flush()
     }
 
     /// Stops the thread of the workspace, saves, and ends every
     /// subscription. Call it before the application exits. The workspace
     /// can still be read afterwards, but changes are no longer saved on
     /// their own. Called automatically when the workspace is dropped.
+    ///
+    /// This never waits longer than [`WorkspaceConfig::shutdown_wait`] for
+    /// the thread to stop, nor as long again for the last save: a disk that
+    /// does not answer must not keep the application from quitting. A save
+    /// cut short leaves the previous state file, never a damaged one.
     pub fn shutdown(&self) {
         self.shared.signals.stop.store(true, Ordering::Release);
         self.shared.signals.wake();
         let ticker = lock(&self.ticker).take();
         if let Some(ticker) = ticker {
-            // The thread panics only if a bug makes it; saving below does
-            // not depend on it.
-            let _ = ticker.join();
-            if let Err(error) = self.flush() {
-                warn!(error = %error, "the workspace could not be saved on exit");
+            let wait = self.shared.config.shutdown_wait;
+            if join_within(ticker, wait) {
+                let shared = Arc::clone(&self.shared);
+                match run_within(wait, move || shared.flush()) {
+                    Some(Ok(_)) => {}
+                    Some(Err(error)) => {
+                        warn!(error = %error, "the workspace could not be saved on exit");
+                    }
+                    None => warn!("the workspace was not saved on exit: the disk did not answer"),
+                }
+            } else {
+                warn!(
+                    "the workspace thread did not stop in time; the last changes may not be saved"
+                );
             }
             info!("workspace shut down");
         }
         self.shared.hub.close();
     }
+}
+
+/// Joins `thread` if it ends within `wait`. Returns whether it did; a
+/// thread that does not is left to end on its own.
+fn join_within(thread: JoinHandle<()>, wait: Duration) -> bool {
+    let deadline = after(Instant::now(), wait);
+    while !thread.is_finished() {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    // The thread panics only if a bug makes it; nothing depends on it.
+    let _ = thread.join();
+    true
+}
+
+/// Runs `work` on a thread of its own and returns its result if it comes
+/// within `wait`.
+fn run_within<T: Send + 'static>(
+    wait: Duration,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    let (sender, receiver) = mpsc::channel();
+    thread::Builder::new()
+        .name("termx-workspace-exit".to_owned())
+        .spawn(move || {
+            let _ = sender.send(work());
+        })
+        .ok()?;
+    receiver.recv_timeout(wait).ok()
 }
 
 impl Drop for Workspace {
@@ -1562,6 +1680,66 @@ mod tests {
             );
         }
         assert_eq!(parse_reported_cwd(&"/x".repeat(5000)), None);
+    }
+
+    /// Finds the project of a folder, except that it never answers for a
+    /// folder named `hangs`: a network drive that does not respond.
+    fn hanging_detector(folder: &Path) -> Detected {
+        if folder.file_name().is_some_and(|name| name == "hangs") {
+            thread::sleep(Duration::from_secs(3600));
+        }
+        project::detect(folder)
+    }
+
+    #[test]
+    fn a_folder_that_does_not_answer_stalls_neither_saving_nor_quitting() {
+        let dir = tempfile::tempdir().unwrap();
+        let hangs = dir.path().join("hangs");
+        std::fs::create_dir(&hangs).unwrap();
+        let mut config = WorkspaceConfig::new(dir.path().join("state"));
+        config.detector = hanging_detector;
+        config.git_detect_budget = Duration::from_millis(100);
+        config.git_poll_interval = Duration::from_millis(10);
+        config.save_debounce = Duration::from_millis(10);
+        config.shutdown_wait = Duration::from_secs(1);
+        let workspace = Workspace::open(config);
+
+        // Creating the session waits a little, then goes on with the folder
+        // as its own project.
+        let started = Instant::now();
+        let session = workspace
+            .create_session(NewSession::new(SessionKind::Shell, &hangs))
+            .unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(session.project, Project::folder(&hangs));
+
+        // The thread of the workspace keeps polling Git, and saving.
+        workspace
+            .rename_session(&session.id, Some("renamed"))
+            .unwrap();
+        let state = dir
+            .path()
+            .join("state")
+            .join(super::super::store::STATE_FILE);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !std::fs::read_to_string(&state).is_ok_and(|text| text.contains("renamed")) {
+            assert!(Instant::now() < deadline, "the workspace was never saved");
+            thread::sleep(Duration::from_millis(10));
+        }
+        // One thread waits on the folder, however often it is looked at.
+        assert_eq!(lock(&workspace.shared.detecting).len(), 1);
+
+        let started = Instant::now();
+        workspace.shutdown();
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     #[test]
