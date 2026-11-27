@@ -108,12 +108,16 @@
 
 mod command;
 mod error;
+#[cfg(windows)]
+mod job;
 mod limits;
 mod manager;
 mod output;
 mod process;
 mod reader;
 mod shell;
+#[cfg(unix)]
+mod tree;
 mod types;
 
 pub use command::{
