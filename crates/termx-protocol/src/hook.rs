@@ -31,6 +31,11 @@ use crate::{
 /// a termx that is stuck can cost a hook.
 pub const HOOK_TIMEOUT: Duration = Duration::from_millis(300);
 
+/// The longest wait for the input of the hook to be read. Claude Code
+/// writes it at once; an input that does not end (a pipe left open) costs
+/// this, and the event is dropped.
+pub const INPUT_TIMEOUT: Duration = Duration::from_millis(250);
+
 /// The most of the standard input that is read. What Claude Code sends
 /// after a tool ran includes the output of the tool, which can be large;
 /// the fields that matter come first or last, and a payload larger than
@@ -87,13 +92,13 @@ impl Target {
 /// Claude Code (see [`crate::parent`]); both are parameters for the tests.
 pub fn run(
     variable: impl Fn(&str) -> Option<String>,
-    input: impl Read,
+    input: impl Read + Send + 'static,
     pid: impl FnOnce() -> Option<u32>,
 ) -> Outcome {
     let Some(target) = Target::from_env(variable) else {
         return Outcome::OutsideTermx;
     };
-    let Some(mut event) = extract(input, now_us()) else {
+    let Some(mut event) = extract_within(input, now_us(), INPUT_TIMEOUT) else {
         return Outcome::Unreadable;
     };
     event.pid = pid();
@@ -195,6 +200,22 @@ impl<'de> Deserialize<'de> for Text {
 
         deserializer.deserialize_any(Visitor)
     }
+}
+
+/// [`extract`], on a thread of its own, given up after `timeout`.
+fn extract_within(
+    input: impl Read + Send + 'static,
+    at: u64,
+    timeout: Duration,
+) -> Option<HookEvent> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("termx-hook-input".to_owned())
+        .spawn(move || {
+            let _ = sender.send(extract(input, at));
+        })
+        .ok()?;
+    receiver.recv_timeout(timeout).ok().flatten()
 }
 
 /// Reads the JSON Claude Code gives a hook on its standard input and keeps
@@ -443,6 +464,34 @@ mod tests {
 
         assert_eq!(event.name, "PostToolUse");
         assert_eq!(event.claude_session_id.as_deref(), Some("abc"));
+    }
+
+    /// An input that never ends.
+    struct Endless;
+
+    impl Read for Endless {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            std::thread::sleep(Duration::from_secs(3600));
+            Ok(0)
+        }
+    }
+
+    #[test]
+    fn an_input_that_never_ends_is_given_up_on() {
+        let started = std::time::Instant::now();
+
+        let outcome = run(
+            env(&[
+                (ENV_SESSION_ID, "s-1"),
+                (ENV_SOCKET, "/nowhere"),
+                (ENV_TICKET, TICKET),
+            ]),
+            std::io::Read::chain(&br#"{"hook_event_name":"Stop""#[..], Endless),
+            || None,
+        );
+
+        assert!(matches!(outcome, Outcome::Unreadable), "{outcome:?}");
+        assert!(started.elapsed() < INPUT_TIMEOUT + Duration::from_secs(1));
     }
 
     #[test]
