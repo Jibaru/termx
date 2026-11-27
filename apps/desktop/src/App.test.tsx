@@ -793,6 +793,27 @@ describe("the menu bar and quitting", () => {
     await flush();
     expect(view.callsOf("quitApp")).toEqual([[]]);
   });
+
+  it("shows the question again on a repeated quit, and never quits on it", async () => {
+    const view = await renderApp(workspace([running("s-1")]));
+
+    act(() => {
+      view.events.quit?.(1);
+    });
+    await flush();
+    // The Rust side is told it is on screen: a repeat now comes back here.
+    expect(view.callsOf("quitShown")).toEqual([[]]);
+    screen.getByRole("button", { name: "Cancel" }).focus();
+
+    act(() => {
+      view.events.quit?.(1);
+    });
+    await flush();
+
+    expect(screen.getAllByTestId("confirm-quit-dialog")).toHaveLength(1);
+    expect(document.activeElement).toBe(screen.getByTestId("confirm-quit"));
+    expect(view.callsOf("quitApp")).toEqual([]);
+  });
 });
 
 describe("saving", () => {

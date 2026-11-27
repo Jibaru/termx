@@ -324,6 +324,7 @@ fn saying_no_to_quitting_is_heard() {
     let app = Harness::new(home.path());
 
     // `app_quit` itself is not called: it would end the test.
+    assert_eq!(app.ok("app_quit_shown", json!({})), Value::Null);
     assert_eq!(app.ok("app_quit_cancel", json!({})), Value::Null);
 }
 

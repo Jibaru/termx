@@ -829,6 +829,14 @@ export function quitApp(): Promise<void> {
   return call("app_quit");
 }
 
+/**
+ * The window shows the question about quitting: a repeated close or quit
+ * shows it again instead of going through.
+ */
+export function quitShown(): Promise<void> {
+  return call("app_quit_shown");
+}
+
 /** The user said no to quitting: the next close or quit asks again. */
 export function cancelQuit(): Promise<void> {
   return call("app_quit_cancel");

@@ -278,7 +278,10 @@ function Window() {
       {ui.dialog.kind === "newSession" && <NewSessionDialog />}
       {ui.dialog.kind === "confirmClose" && <ConfirmCloseDialog session={ui.dialog.session} />}
       {ui.dialog.kind === "confirmRestart" && <ConfirmRestartDialog session={ui.dialog.session} />}
-      {ui.dialog.kind === "confirmQuit" && <ConfirmQuitDialog running={ui.dialog.running} />}
+      {ui.dialog.kind === "confirmQuit" && (
+        // A repeated close or quit shows it afresh, with the focus on Quit.
+        <ConfirmQuitDialog key={ui.dialog.asked} running={ui.dialog.running} />
+      )}
     </div>
   );
 }

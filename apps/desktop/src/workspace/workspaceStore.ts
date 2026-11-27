@@ -29,6 +29,7 @@ export interface WorkspaceBackend {
   showSession: typeof ipc.showSession;
   quitApp: typeof ipc.quitApp;
   cancelQuit: typeof ipc.cancelQuit;
+  quitShown: typeof ipc.quitShown;
   onQuitRequested: typeof ipc.onQuitRequested;
   onMenuCommand: typeof ipc.onMenuCommand;
 }
@@ -53,6 +54,7 @@ export const TAURI_WORKSPACE: WorkspaceBackend = {
   showSession: ipc.showSession,
   quitApp: ipc.quitApp,
   cancelQuit: ipc.cancelQuit,
+  quitShown: ipc.quitShown,
   onQuitRequested: ipc.onQuitRequested,
   onMenuCommand: ipc.onMenuCommand,
 };

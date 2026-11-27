@@ -6,9 +6,23 @@
 //! asks first: the window is told (`quit-requested`, with how many run) and
 //! shows a confirmation, whose answer is the `app_quit` command. Sessions
 //! come back, not running, the next time termx starts. Without a running
-//! session nothing is asked. If the window does not answer (its page is
-//! broken), closing it a second time goes through: termx can always be
-//! quit. Cancelling (`app_quit_cancel`) makes the next close ask again.
+//! session nothing is asked.
+//!
+//! - **A repeat while the question is shown** (a second Cmd+Q, out of the
+//!   habit of double-pressing it, or a second click on the close button)
+//!   shows the question again, focused, and never quits: those keys are
+//!   pressed by reflex, and would end every session.
+//! - **A page that never shows the question** (it is broken: it did not
+//!   say `app_quit_shown` within [`UNANSWERED_GRACE`]) lets a repeat
+//!   through, so that termx can always be quit.
+//! - **No, Escape, a reload** of the page (`app_quit_cancel`,
+//!   [`QuitState::forget`]) make the next close ask again.
+//! - **Logging out, restarting or shutting down** the Mac posts
+//!   `NSWorkspaceWillPowerOffNotification` before asking applications to
+//!   quit: termx then quits without asking, as if the user had said yes,
+//!   so that it never holds up or cancels the logout. The sessions end and
+//!   come back, dormant, at the next launch. On Windows and Linux the end
+//!   of a user session closes termx without going through the question.
 //!
 //! # The menu
 //!
@@ -25,6 +39,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
@@ -42,27 +57,84 @@ pub const MENU_COMMAND_EVENT: &str = "menu-command";
 /// The id of the Quit item, handled here rather than by the window.
 const QUIT_ITEM: &str = "quit";
 
-/// Remembers that the user confirmed quitting, so that the window closing
-/// and the application exiting are not asked about again.
+/// How long the page has to show the question before a repeated close or
+/// quit is let through (see the module documentation).
+pub const UNANSWERED_GRACE: Duration = Duration::from_secs(3);
+
+/// What to do with a request to close the window or quit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuitDecision {
+    /// Close, or quit, now.
+    Quit,
+    /// Ask the window to confirm.
+    Ask,
+    /// The question is out already: show it again, and do nothing else.
+    Remind,
+}
+
+/// Where the question stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum Question {
+    #[default]
+    None,
+    /// Sent to the window, which did not say it showed it yet.
+    Sent(Instant),
+    /// On screen.
+    Shown,
+}
+
+/// Remembers the question about quitting and its answer.
 #[derive(Debug, Default)]
 pub struct QuitState {
     confirmed: AtomicBool,
-    /// A question was sent to the window and not answered yet.
-    asked: Mutex<bool>,
+    /// The Mac is logging out, restarting or shutting down.
+    powering_off: AtomicBool,
+    question: Mutex<Question>,
 }
 
 impl QuitState {
-    /// Whether to ask the window now: `false` when a question is still
-    /// unanswered, which lets a second close or quit through.
-    #[must_use]
-    pub fn ask(&self) -> bool {
-        let mut asked = self.asked.lock().unwrap_or_else(PoisonError::into_inner);
-        !std::mem::replace(&mut *asked, true)
+    fn question(&self) -> std::sync::MutexGuard<'_, Question> {
+        self.question.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// The user said no: the next close or quit asks again.
-    pub fn cancel(&self) {
-        *self.asked.lock().unwrap_or_else(PoisonError::into_inner) = false;
+    /// What to do with a request to close or quit, made at `now` while
+    /// `running` sessions run.
+    pub fn decide(&self, running: usize, now: Instant) -> QuitDecision {
+        if running == 0 || self.is_confirmed() || self.powering_off.load(Ordering::SeqCst) {
+            return QuitDecision::Quit;
+        }
+        let mut question = self.question();
+        match *question {
+            Question::None => {
+                *question = Question::Sent(now);
+                QuitDecision::Ask
+            }
+            // The page never showed it: it cannot, and termx must still quit.
+            Question::Sent(at) if now.saturating_duration_since(at) >= UNANSWERED_GRACE => {
+                QuitDecision::Quit
+            }
+            Question::Sent(_) | Question::Shown => QuitDecision::Remind,
+        }
+    }
+
+    /// The window shows the question.
+    pub fn shown(&self) {
+        let mut question = self.question();
+        if matches!(*question, Question::Sent(_)) {
+            *question = Question::Shown;
+        }
+    }
+
+    /// The question is gone without a yes (no, Escape, a reload of the
+    /// page): the next close or quit asks again.
+    pub fn forget(&self) {
+        *self.question() = Question::None;
+    }
+
+    /// The Mac is logging out, restarting or shutting down: quit without
+    /// asking.
+    pub fn power_off(&self) {
+        self.powering_off.store(true, Ordering::SeqCst);
     }
 
     /// Records that the user chose to quit.
@@ -91,35 +163,65 @@ pub fn running_sessions<R: Runtime>(app: &AppHandle<R>) -> usize {
     })
 }
 
-/// Whether quitting now must be confirmed first: something runs and the
-/// user did not say yes yet.
-#[must_use]
-pub fn needs_confirmation(running: usize, confirmed: bool) -> bool {
-    running > 0 && !confirmed
-}
-
-/// Asks the window to confirm quitting, when sessions run. Returns whether
-/// it did, in which case the caller must not quit (or close) now.
+/// Asks the window to confirm quitting, when sessions run, or shows the
+/// question again. Returns whether it did, in which case the caller must
+/// not quit (or close) now.
 pub fn ask_before_quitting<R: Runtime>(app: &AppHandle<R>) -> bool {
     let Some(state) = app.try_state::<QuitState>() else {
         return false;
     };
     let running = running_sessions(app);
-    if !needs_confirmation(running, state.is_confirmed()) {
-        return false;
+    match state.decide(running, Instant::now()) {
+        QuitDecision::Quit => false,
+        decision => {
+            if let Err(error) = app.emit(QUIT_REQUESTED_EVENT, running) {
+                // Nobody can answer: quitting goes ahead, as it did before.
+                warn!(error = %error, "could not ask the window to confirm quitting");
+                state.forget();
+                return false;
+            }
+            info!(
+                running,
+                again = decision == QuitDecision::Remind,
+                "asked to confirm quitting"
+            );
+            true
+        }
     }
-    if !state.ask() {
-        // Asked already, and closed again before any answer.
-        info!(running, "quitting without an answer to the confirmation");
-        return false;
-    }
-    if let Err(error) = app.emit(QUIT_REQUESTED_EVENT, running) {
-        // Nobody can answer: quitting goes ahead, as it did before.
-        warn!(error = %error, "could not ask the window to confirm quitting");
-        return false;
-    }
-    info!(running, "asked to confirm quitting");
-    true
+}
+
+/// Quits without asking when the Mac logs out, restarts or shuts down,
+/// which it announces before asking applications to quit. Call it once, on
+/// the main thread.
+#[cfg(target_os = "macos")]
+// The one call into AppKit that has no safe binding: see the SAFETY note.
+#[allow(unsafe_code)]
+pub fn watch_power_off<R: Runtime>(app: &AppHandle<R>) {
+    use std::ptr::NonNull;
+
+    use block2::RcBlock;
+    use objc2_app_kit::{NSWorkspace, NSWorkspaceWillPowerOffNotification};
+    use objc2_foundation::NSNotification;
+
+    let app = app.clone();
+    let block = RcBlock::new(move |_: NonNull<NSNotification>| {
+        if let Some(state) = app.try_state::<QuitState>() {
+            info!("the session of the user is ending: quitting without asking");
+            state.power_off();
+        }
+    });
+    let center = NSWorkspace::sharedWorkspace().notificationCenter();
+    // SAFETY: the name is a constant of AppKit, and the block lives as long
+    // as the observer, which lives as long as the application.
+    let observer = unsafe {
+        center.addObserverForName_object_queue_usingBlock(
+            Some(NSWorkspaceWillPowerOffNotification),
+            None,
+            None,
+            &block,
+        )
+    };
+    std::mem::forget(observer);
 }
 
 /// Quits, once the user confirmed it (or nothing runs).
@@ -262,27 +364,71 @@ mod tests {
     use super::*;
 
     #[test]
-    fn quitting_is_confirmed_only_when_something_runs() {
-        assert!(!needs_confirmation(0, false));
-        assert!(needs_confirmation(2, false));
-        assert!(!needs_confirmation(2, true));
+    fn nothing_is_asked_when_nothing_runs() {
+        let state = QuitState::default();
+        assert_eq!(state.decide(0, Instant::now()), QuitDecision::Quit);
     }
 
     #[test]
-    fn a_second_close_without_an_answer_goes_through() {
+    fn a_repeat_while_the_question_is_shown_shows_it_again_and_never_quits() {
         let state = QuitState::default();
-        assert!(state.ask());
-        assert!(!state.ask(), "the question is still open");
-        state.cancel();
-        assert!(state.ask(), "after a no, the next close asks again");
+        let start = Instant::now();
+        assert_eq!(state.decide(2, start), QuitDecision::Ask);
+        state.shown();
+
+        // A double Cmd+Q, even long after.
+        assert_eq!(
+            state.decide(2, start + Duration::from_millis(100)),
+            QuitDecision::Remind
+        );
+        assert_eq!(
+            state.decide(2, start + Duration::from_secs(60)),
+            QuitDecision::Remind
+        );
     }
 
     #[test]
-    fn a_confirmation_is_remembered() {
+    fn a_page_that_never_shows_the_question_cannot_keep_termx_open() {
         let state = QuitState::default();
-        assert!(!state.is_confirmed());
-        state.confirm();
-        assert!(state.is_confirmed());
+        let start = Instant::now();
+        assert_eq!(state.decide(1, start), QuitDecision::Ask);
+
+        assert_eq!(
+            state.decide(1, start + Duration::from_secs(1)),
+            QuitDecision::Remind
+        );
+        assert_eq!(
+            state.decide(1, start + UNANSWERED_GRACE),
+            QuitDecision::Quit
+        );
+    }
+
+    #[test]
+    fn a_no_or_a_reload_makes_the_next_close_ask_again() {
+        let state = QuitState::default();
+        let start = Instant::now();
+        state.decide(1, start);
+        state.shown();
+
+        state.forget();
+
+        assert_eq!(
+            state.decide(1, start + Duration::from_secs(9)),
+            QuitDecision::Ask
+        );
+    }
+
+    #[test]
+    fn a_yes_or_a_logout_quits_without_asking() {
+        let confirmed = QuitState::default();
+        confirmed.confirm();
+        assert_eq!(confirmed.decide(3, Instant::now()), QuitDecision::Quit);
+
+        let logging_out = QuitState::default();
+        logging_out.decide(3, Instant::now());
+        logging_out.shown();
+        logging_out.power_off();
+        assert_eq!(logging_out.decide(3, Instant::now()), QuitDecision::Quit);
     }
 
     #[test]
