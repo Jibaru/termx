@@ -53,7 +53,7 @@ export function PaneView({ pane, sessionId, workspace, focused, alone }: PaneVie
         {session ? (
           <>
             <KindIcon kind={session.kind} />
-            <span className="pane-title" title={session.title}>
+            <span className="pane-title" dir="auto" title={session.title}>
               {session.title}
             </span>
             {session.git?.branch && (

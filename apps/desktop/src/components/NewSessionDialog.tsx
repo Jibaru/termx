@@ -180,12 +180,13 @@ export function NewSessionDialog() {
                   submit();
                 }}
               >
-                <span className="folder-name">
+                <span className="folder-name" dir="auto">
                   {each === null ? "Home folder" : folderName(each)}
                 </span>
                 {each !== null && (
                   <span className="folder-path" title={each}>
-                    {each}
+                    {/* Isolated, so that the path keeps its order in this right-to-left box. */}
+                    <bdi dir="ltr">{each}</bdi>
                   </span>
                 )}
                 {each !== null && (
