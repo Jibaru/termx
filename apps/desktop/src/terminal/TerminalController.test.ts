@@ -201,7 +201,7 @@ describe("starting", () => {
   it("shows why the shell could not be started, and tries again on Enter", async () => {
     const { controller, terminal, create, creates } = await attached({ leaveStarting: true });
 
-    await create.failed({ command: "session_create", message: "no such shell" });
+    await create.failed({ command: "session_create", kind: "internal", message: "no such shell" });
 
     expect(controller.getStatus()).toEqual({ kind: "failed", message: "no such shell" });
     expect(terminal.text).toContain("Could not start the shell: no such shell");
@@ -1132,7 +1132,11 @@ describe("a session that could not do its job", () => {
       platform: "linux",
     });
     controller.attach(pane());
-    await fake.creates[0]?.failed({ command: "session_start", message: "the folder is gone" });
+    await fake.creates[0]?.failed({
+      command: "session_start",
+      kind: "folderMissing",
+      message: "the folder is gone",
+    });
     expect(controller.getStatus()).toEqual({ kind: "failed", message: "the folder is gone" });
 
     FakeTerminal.last.type("\r");

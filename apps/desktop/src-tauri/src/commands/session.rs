@@ -33,7 +33,7 @@ use termx_core::workspace::{
     LaunchMode, NewSession, Session, SessionKey, SessionKind, WorkspaceError,
 };
 
-use super::error::{CommandResult, logged, logged_async};
+use super::error::{CommandResult, ErrorKind, Failure, logged, logged_async};
 use crate::terminal::{TerminalState, session_is_gone, windows_build_number};
 use crate::workspace::WorkspaceState;
 
@@ -104,7 +104,10 @@ pub fn session_create(
             Some(cwd) => cwd,
             None => state
                 .default_folder()
-                .ok_or("the home directory is not known: choose a folder")?
+                .ok_or(Failure::new(
+                    ErrorKind::FolderMissing,
+                    "the home directory is not known: choose a folder",
+                ))?
                 .to_owned(),
         };
         let session = state.workspace().create_session(NewSession {
@@ -113,8 +116,8 @@ pub fn session_create(
             command: request.command,
             name: request.name,
             show: request.show.unwrap_or(true),
-        });
-        session.map_err(|error| error.to_string())
+        })?;
+        Ok::<_, Failure>(session)
     })
 }
 
@@ -214,7 +217,7 @@ pub fn session_start<R: Runtime>(
             PtySize::new(request.cols, request.rows),
             on_event,
         )?;
-        Ok::<_, String>(StartedSession {
+        Ok::<_, Failure>(StartedSession {
             terminal: terminal.as_u64(),
             ack_batch_bytes: ACK_BATCH_BYTES,
             windows_build_number: windows_build_number(),
@@ -244,7 +247,7 @@ pub fn session_close(
                 terminals.close(SessionId::from_raw(terminal));
             }
             Ok(None) | Err(WorkspaceError::UnknownSession(_)) => {}
-            Err(error) => return Err(error.to_string()),
+            Err(error) => return Err(error),
         }
         Ok(())
     })
@@ -324,10 +327,10 @@ pub fn session_report_cwd(
 
 /// Turns the failure of a report about a session that was just closed
 /// into a success. See the module documentation.
-fn ignore_closed_session(result: Result<(), WorkspaceError>) -> Result<(), String> {
+fn ignore_closed_session(result: Result<(), WorkspaceError>) -> Result<(), WorkspaceError> {
     match result {
         Ok(()) | Err(WorkspaceError::UnknownSession(_)) => Ok(()),
-        Err(error) => Err(error.to_string()),
+        Err(error) => Err(error),
     }
 }
 
@@ -359,7 +362,7 @@ pub async fn session_write(
             manager.write(SessionId::from_raw(id), &bytes)
         })
         .await
-        .map_err(|source| format!("the write did not complete: {source}"))?;
+        .map_err(|source| Failure::from(format!("the write did not complete: {source}")))?;
         ignore_ended_session("write", id, written)
     })
     .await
@@ -417,7 +420,7 @@ fn ignore_ended_session(
     operation: &'static str,
     id: u64,
     result: Result<(), PtyError>,
-) -> Result<(), String> {
+) -> Result<(), Failure> {
     match result {
         Err(error) if session_is_gone(&error) => {
             debug!(
@@ -426,7 +429,7 @@ fn ignore_ended_session(
             );
             Ok(())
         }
-        other => other.map_err(|error| error.to_string()),
+        other => other.map_err(Failure::from),
     }
 }
 
@@ -472,7 +475,7 @@ mod tests {
 
         let error = ignore_ended_session("resize", 4, Err(invalid)).unwrap_err();
 
-        assert!(error.contains("invalid terminal size"), "{error}");
+        assert!(error.message.contains("invalid terminal size"), "{error}");
     }
 
     #[test]

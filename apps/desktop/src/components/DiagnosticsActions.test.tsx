@@ -30,7 +30,7 @@ describe("DiagnosticsActions", () => {
   it("shows the reason when an action fails", async () => {
     recordIPC(() => {
       // eslint-disable-next-line @typescript-eslint/only-throw-error -- Tauri rejects with the serialised error.
-      throw { command: "export_diagnostics", message: "logging is not running" };
+      throw { command: "export_diagnostics", kind: "internal", message: "logging is not running" };
     });
     render(<DiagnosticsActions />);
 

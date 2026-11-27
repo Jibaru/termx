@@ -29,15 +29,171 @@ use std::task::Poll;
 
 use serde::Serialize;
 use termx_core::diagnostics::{redact, tracing, with_panic_context};
+use termx_core::pty::PtyError;
+use termx_core::workspace::{LaunchFailure, LayoutError, WorkspaceError};
 
 /// Target of the records written for failed commands.
 pub const COMMAND_TARGET: &str = "termx::command";
+
+/// What kind of failure a command had, for the frontend to act on without
+/// reading the message. Serialized in camelCase. More kinds may be added:
+/// a frontend treats one it does not know as [`Internal`](Self::Internal).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub enum ErrorKind {
+    /// The shell cannot find `claude`.
+    ClaudeNotFound,
+    /// The folder of a session is gone, or the folder given is not one.
+    FolderMissing,
+    /// A background session has no usable command.
+    InvalidCommand,
+    /// The system refused to start the process.
+    SpawnFailed,
+    /// The shell did not get to the command.
+    LaunchUnconfirmed,
+    /// The disk is full.
+    StorageFull,
+    /// The session, project, pane or split does not exist.
+    NotFound,
+    /// An argument is not acceptable: a folder that is not absolute, a
+    /// ratio that is not a number, a layout that cannot take more panes.
+    InvalidArgument,
+    /// The session is running, and the operation needs one that is not.
+    SessionRunning,
+    /// Anything else, including a command that panicked.
+    Internal,
+}
+
+/// A failure of a command: its kind and a message for the user.
+///
+/// Every error type a command meets converts into it, choosing its kind; a
+/// plain message is [`ErrorKind::Internal`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Failure {
+    /// What kind of failure it is.
+    pub kind: ErrorKind,
+    /// What happened, for the user.
+    pub message: String,
+}
+
+impl Failure {
+    /// A failure of `kind` with `message`.
+    pub fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
+}
+
+impl Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl From<String> for Failure {
+    fn from(message: String) -> Self {
+        Self::new(ErrorKind::Internal, message)
+    }
+}
+
+impl From<&str> for Failure {
+    fn from(message: &str) -> Self {
+        Self::new(ErrorKind::Internal, message)
+    }
+}
+
+impl From<LaunchFailure> for Failure {
+    fn from(failure: LaunchFailure) -> Self {
+        let kind = match &failure {
+            LaunchFailure::ClaudeNotFound { .. } => ErrorKind::ClaudeNotFound,
+            LaunchFailure::FolderMissing { .. } => ErrorKind::FolderMissing,
+            LaunchFailure::InvalidCommand { .. } => ErrorKind::InvalidCommand,
+            LaunchFailure::SpawnFailed { .. } => ErrorKind::SpawnFailed,
+            LaunchFailure::LaunchUnconfirmed { .. } => ErrorKind::LaunchUnconfirmed,
+            _ => ErrorKind::Internal,
+        };
+        Self::new(kind, failure.to_string())
+    }
+}
+
+impl From<LayoutError> for Failure {
+    fn from(error: LayoutError) -> Self {
+        let kind = match error {
+            LayoutError::UnknownPane(_) | LayoutError::UnknownSplit(_) => ErrorKind::NotFound,
+            _ => ErrorKind::InvalidArgument,
+        };
+        Self::new(kind, error.to_string())
+    }
+}
+
+impl From<WorkspaceError> for Failure {
+    fn from(error: WorkspaceError) -> Self {
+        let kind = match error {
+            WorkspaceError::Layout(layout) => return layout.into(),
+            WorkspaceError::Launch(failure) => return failure.into(),
+            WorkspaceError::UnknownSession(_) | WorkspaceError::UnknownProject => {
+                ErrorKind::NotFound
+            }
+            WorkspaceError::FolderNotFound(_) => ErrorKind::FolderMissing,
+            WorkspaceError::InvalidCommand => ErrorKind::InvalidCommand,
+            WorkspaceError::SessionRunning(_) => ErrorKind::SessionRunning,
+            WorkspaceError::InvalidFolder | WorkspaceError::InvalidClaudeSessionId => {
+                ErrorKind::InvalidArgument
+            }
+            _ => ErrorKind::Internal,
+        };
+        Self::new(kind, error.to_string())
+    }
+}
+
+impl From<PtyError> for Failure {
+    fn from(error: PtyError) -> Self {
+        let kind = match &error {
+            PtyError::UnknownSession(_) => ErrorKind::NotFound,
+            PtyError::InvalidSize { .. } => ErrorKind::InvalidArgument,
+            PtyError::Spawn { .. } | PtyError::Open(_) => ErrorKind::SpawnFailed,
+            _ => ErrorKind::Internal,
+        };
+        Self::new(kind, error.to_string())
+    }
+}
+
+impl From<std::io::Error> for Failure {
+    fn from(error: std::io::Error) -> Self {
+        let kind = match error.kind() {
+            std::io::ErrorKind::StorageFull | std::io::ErrorKind::QuotaExceeded => {
+                ErrorKind::StorageFull
+            }
+            std::io::ErrorKind::NotFound => ErrorKind::NotFound,
+            _ => ErrorKind::Internal,
+        };
+        Self::new(kind, error.to_string())
+    }
+}
+
+impl From<termx_core::diagnostics::DiagnosticsError> for Failure {
+    fn from(error: termx_core::diagnostics::DiagnosticsError) -> Self {
+        let kind = match &error {
+            termx_core::diagnostics::DiagnosticsError::Io { source, .. } => {
+                Self::from(std::io::Error::from(source.kind())).kind
+            }
+            _ => ErrorKind::Internal,
+        };
+        // The message of the error itself, which redacts its path.
+        Self::new(kind, error.to_string())
+    }
+}
 
 /// What the frontend receives when a command fails.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CommandError {
     /// Name of the command that failed.
     pub command: &'static str,
+    /// What kind of failure it was. See [`ErrorKind`].
+    pub kind: ErrorKind,
     /// Description of the failure, with the home directory replaced by `~`.
     pub message: String,
 }
@@ -49,10 +205,15 @@ impl CommandError {
     /// Logs the failure of `command` and returns the error for the frontend.
     ///
     /// Prefer [`logged`], which calls this for the `Err` case.
-    pub fn log(command: &'static str, error: impl Display) -> Self {
-        let message = redact::text(&error.to_string()).into_owned();
-        tracing::error!(target: COMMAND_TARGET, command, error = %message, "command failed");
-        Self { command, message }
+    pub fn log(command: &'static str, error: impl Into<Failure>) -> Self {
+        let Failure { kind, message } = error.into();
+        let message = redact::text(&message).into_owned();
+        tracing::error!(target: COMMAND_TARGET, command, kind = ?kind, error = %message, "command failed");
+        Self {
+            command,
+            kind,
+            message,
+        }
     }
 
     /// The error for a command that panicked. Nothing is logged here: the
@@ -61,6 +222,7 @@ impl CommandError {
     fn panicked(command: &'static str) -> Self {
         Self {
             command,
+            kind: ErrorKind::Internal,
             message: PANIC_MESSAGE.to_owned(),
         }
     }
@@ -84,7 +246,7 @@ pub const PANIC_MESSAGE: &str = "termx hit an internal error; the details are in
 /// # Errors
 ///
 /// Returns the error of `body`, or an error saying that it panicked.
-pub fn logged<T, E: Display>(
+pub fn logged<T, E: Into<Failure>>(
     command: &'static str,
     body: impl FnOnce() -> Result<T, E>,
 ) -> CommandResult<T> {
@@ -106,7 +268,7 @@ pub fn logged<T, E: Display>(
 /// # Errors
 ///
 /// Returns the error of `body`, or an error saying that it panicked.
-pub async fn logged_async<T, E: Display>(
+pub async fn logged_async<T, E: Into<Failure>>(
     command: &'static str,
     body: impl Future<Output = Result<T, E>>,
 ) -> CommandResult<T> {
@@ -133,7 +295,9 @@ pub async fn logged_async<T, E: Display>(
 mod tests {
     use termx_core::diagnostics::tracing;
 
-    use super::{COMMAND_TARGET, CommandError, PANIC_MESSAGE, logged, logged_async};
+    use super::{
+        COMMAND_TARGET, CommandError, ErrorKind, Failure, PANIC_MESSAGE, logged, logged_async,
+    };
     use crate::test_support::TestLog;
 
     #[test]
@@ -160,6 +324,7 @@ mod tests {
             result,
             Err(CommandError {
                 command: "rename_session",
+                kind: ErrorKind::Internal,
                 message: "no session with id 7".to_owned(),
             })
         );
@@ -170,18 +335,24 @@ mod tests {
         assert_eq!(records[0]["msg"], "command failed");
         assert_eq!(records[0]["fields"]["command"], "rename_session");
         assert_eq!(records[0]["fields"]["error"], "no session with id 7");
+        assert_eq!(records[0]["fields"]["kind"], "Internal");
     }
 
     #[test]
-    fn the_frontend_receives_the_command_and_the_message() {
+    fn the_frontend_receives_the_command_the_kind_and_the_message() {
         let error = CommandError {
             command: "open_log_folder",
+            kind: ErrorKind::StorageFull,
             message: "not available".to_owned(),
         };
 
         assert_eq!(
             serde_json::to_value(&error).unwrap(),
-            serde_json::json!({"command": "open_log_folder", "message": "not available"})
+            serde_json::json!({
+                "command": "open_log_folder",
+                "kind": "storageFull",
+                "message": "not available",
+            })
         );
         assert_eq!(error.to_string(), "open_log_folder: not available");
     }
@@ -202,6 +373,7 @@ mod tests {
             result,
             Err(CommandError {
                 command: "resize",
+                kind: ErrorKind::Internal,
                 message: PANIC_MESSAGE.to_owned(),
             })
         );
@@ -244,6 +416,68 @@ mod tests {
         assert_eq!(value, Ok(42));
         assert_eq!(error.unwrap_err().message, "no answer");
         assert_eq!(log.finish().len(), 1);
+    }
+
+    #[test]
+    fn errors_say_what_kind_of_failure_they_are() {
+        use termx_core::workspace::{
+            LaunchFailure, LayoutError, PaneId, SessionKey, WorkspaceError,
+        };
+
+        let key = SessionKey::from_raw("s-x").unwrap();
+        let kinds: Vec<(Failure, ErrorKind)> = vec![
+            (
+                WorkspaceError::UnknownSession(key.clone()).into(),
+                ErrorKind::NotFound,
+            ),
+            (WorkspaceError::UnknownProject.into(), ErrorKind::NotFound),
+            (
+                WorkspaceError::FolderNotFound("/gone".into()).into(),
+                ErrorKind::FolderMissing,
+            ),
+            (
+                WorkspaceError::InvalidFolder.into(),
+                ErrorKind::InvalidArgument,
+            ),
+            (
+                WorkspaceError::InvalidCommand.into(),
+                ErrorKind::InvalidCommand,
+            ),
+            (
+                WorkspaceError::SessionRunning(key).into(),
+                ErrorKind::SessionRunning,
+            ),
+            (
+                WorkspaceError::Layout(LayoutError::UnknownPane(PaneId::from_raw(9))).into(),
+                ErrorKind::NotFound,
+            ),
+            (LayoutError::TooManyPanes.into(), ErrorKind::InvalidArgument),
+            (
+                WorkspaceError::Launch(LaunchFailure::claude_not_found("claude")).into(),
+                ErrorKind::ClaudeNotFound,
+            ),
+            (
+                LaunchFailure::folder_missing().into(),
+                ErrorKind::FolderMissing,
+            ),
+            (
+                LaunchFailure::spawn_failed("no").into(),
+                ErrorKind::SpawnFailed,
+            ),
+            (
+                LaunchFailure::launch_unconfirmed().into(),
+                ErrorKind::LaunchUnconfirmed,
+            ),
+            (
+                std::io::Error::from(std::io::ErrorKind::StorageFull).into(),
+                ErrorKind::StorageFull,
+            ),
+            ("a message".into(), ErrorKind::Internal),
+        ];
+        for (failure, kind) in kinds {
+            assert_eq!(failure.kind, kind, "{failure}");
+            assert!(!failure.message.is_empty());
+        }
     }
 
     #[test]

@@ -1,4 +1,56 @@
 {
+  "commandErrors": [
+    {
+      "command": "session_start",
+      "kind": "claudeNotFound",
+      "message": "what happened, for the user"
+    },
+    {
+      "command": "session_start",
+      "kind": "folderMissing",
+      "message": "what happened, for the user"
+    },
+    {
+      "command": "session_start",
+      "kind": "invalidCommand",
+      "message": "what happened, for the user"
+    },
+    {
+      "command": "session_start",
+      "kind": "spawnFailed",
+      "message": "what happened, for the user"
+    },
+    {
+      "command": "session_start",
+      "kind": "launchUnconfirmed",
+      "message": "what happened, for the user"
+    },
+    {
+      "command": "session_start",
+      "kind": "storageFull",
+      "message": "what happened, for the user"
+    },
+    {
+      "command": "session_start",
+      "kind": "notFound",
+      "message": "what happened, for the user"
+    },
+    {
+      "command": "session_start",
+      "kind": "invalidArgument",
+      "message": "what happened, for the user"
+    },
+    {
+      "command": "session_start",
+      "kind": "sessionRunning",
+      "message": "what happened, for the user"
+    },
+    {
+      "command": "session_start",
+      "kind": "internal",
+      "message": "what happened, for the user"
+    }
+  ],
   "comment": "Examples of what the frontend and the Rust side exchange. Written by `TERMX_UPDATE_CONTRACT=1 cargo test -p termx-desktop contract`; do not edit by hand. See src-tauri/src/contract.rs.",
   "deltas": [
     {

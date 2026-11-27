@@ -3,6 +3,9 @@ import { describe, expect, it } from "vitest";
 import contract from "./ipc.contract.json";
 import {
   applyWorkspaceDelta,
+  COMMAND_ERROR_KINDS,
+  type CommandError,
+  type CommandErrorKind,
   type GitInfo,
   LAUNCH_FAILURE_KINDS,
   type LaunchFailure,
@@ -147,6 +150,12 @@ const EXIT_KEYS = {
   failure: true,
 } satisfies Record<keyof SessionExit, true>;
 
+const COMMAND_ERROR_KEYS = {
+  command: true,
+  kind: true,
+  message: true,
+} satisfies Record<keyof CommandError, true>;
+
 const PROJECT_KINDS = ["git", "folder"] as const satisfies readonly Project["kind"][];
 const LAUNCH_MODES = ["fresh", "resume"] as const satisfies readonly LaunchMode[];
 const DIRECTIONS = ["row", "column"] as const satisfies readonly SplitDirection[];
@@ -171,7 +180,8 @@ export const EXHAUSTIVE: [
   Exhaustive<SplitPlacement, typeof PLACEMENTS>,
   Exhaustive<PaneEdge, typeof EDGES>,
   Exhaustive<PersistenceMode["mode"], typeof PERSISTENCE_MODES>,
-] = [true, true, true, true, true, true, true, true, true];
+  Exhaustive<CommandErrorKind, typeof COMMAND_ERROR_KINDS>,
+] = [true, true, true, true, true, true, true, true, true, true];
 
 type Json = Record<string, unknown>;
 
@@ -300,6 +310,15 @@ describe("the contract with the Rust side", () => {
     ]);
     contract.launchFailures.forEach(expectFailure);
     expect(contract.launchFailures.map((failure) => failure.kind)).toEqual(LAUNCH_FAILURE_KINDS);
+  });
+
+  it("has an error of every kind", () => {
+    for (const error of contract.commandErrors) {
+      expectKeys(error, COMMAND_ERROR_KEYS);
+    }
+    expect(contract.commandErrors.map((error) => error.kind)).toEqual(COMMAND_ERROR_KINDS);
+    // Every kind of launch failure is also a kind of command error.
+    for (const kind of LAUNCH_FAILURE_KINDS) expect(COMMAND_ERROR_KINDS).toContain(kind);
   });
 
   it("describes a started session and the exit of one", () => {

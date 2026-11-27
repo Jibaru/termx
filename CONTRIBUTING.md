@@ -195,6 +195,14 @@ pub fn rename_session(id: u32, title: String) -> CommandResult<()> {
 }
 ```
 
+The `CommandError` the frontend receives has a `kind` it can act on
+(`notFound`, `folderMissing`, `sessionRunning`, ...; see `ErrorKind` in
+`commands/error.rs`). It comes from the error the body returns: the error
+types of `termx-core` choose theirs, a plain message is `internal`, and a
+body that knows better returns `Failure::new(ErrorKind::..., message)`.
+Add a kind to `ErrorKind`, to `CommandErrorKind` in `lib/ipc.ts` and to the
+contract together.
+
 A panic must never escape a command: in a synchronous command it unwinds into
 the platform's event loop and can abort the application, and in an
 asynchronous one it leaves the promise in the frontend pending forever. Only a

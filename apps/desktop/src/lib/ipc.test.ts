@@ -287,7 +287,11 @@ describe("failed IPC calls", () => {
   });
 
   it("are not logged again when the Rust side already logged a command error", async () => {
-    const failure: CommandError = { command: "open_log_folder", message: "logging is not running" };
+    const failure: CommandError = {
+      command: "open_log_folder",
+      kind: "internal",
+      message: "logging is not running",
+    };
     const ipc = recordIPC((command) => {
       if (command === "open_log_folder") {
         // eslint-disable-next-line @typescript-eslint/only-throw-error -- Tauri rejects with the serialised error.
@@ -372,13 +376,17 @@ describe("describeError", () => {
     expect(describeError(new Error("boom"))).toBe("boom");
     expect(describeError(new TypeError(""))).toBe("TypeError");
     expect(describeError("plain text")).toBe("plain text");
-    expect(describeError({ command: "x", message: "from rust" })).toBe("from rust");
+    expect(describeError({ command: "x", kind: "notFound", message: "from rust" })).toBe(
+      "from rust",
+    );
     expect(describeError({ code: 7 })).toBe('{"code":7}');
     expect(describeError(undefined)).toBe("undefined");
   });
 
   it("recognises the error of a Rust command", () => {
-    expect(isCommandError({ command: "x", message: "y" })).toBe(true);
+    expect(isCommandError({ command: "x", kind: "internal", message: "y" })).toBe(true);
+    // Without a kind it is not one.
+    expect(isCommandError({ command: "x", message: "y" })).toBe(false);
     expect(isCommandError(new Error("y"))).toBe(false);
     expect(isCommandError(null)).toBe(false);
     expect(isCommandError("x")).toBe(false);

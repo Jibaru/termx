@@ -25,6 +25,7 @@ use termx_core::workspace::{
     Project, ProjectKind, Session, SessionKey, SessionKind, SessionState, Snapshot,
 };
 
+use crate::commands::error::{CommandError, ErrorKind};
 use crate::commands::session::{CreateSessionRequest, StartSessionRequest, StartedSession};
 use crate::terminal::SessionEvent;
 
@@ -219,6 +220,26 @@ fn contract() -> Value {
     let SessionEvent::Exit { failure, .. } = &mut missing_claude;
     *failure = Some(LaunchFailure::claude_not_found("claude"));
 
+    let command_errors: Vec<CommandError> = [
+        ErrorKind::ClaudeNotFound,
+        ErrorKind::FolderMissing,
+        ErrorKind::InvalidCommand,
+        ErrorKind::SpawnFailed,
+        ErrorKind::LaunchUnconfirmed,
+        ErrorKind::StorageFull,
+        ErrorKind::NotFound,
+        ErrorKind::InvalidArgument,
+        ErrorKind::SessionRunning,
+        ErrorKind::Internal,
+    ]
+    .into_iter()
+    .map(|kind| CommandError {
+        command: "session_start",
+        kind,
+        message: "what happened, for the user".to_owned(),
+    })
+    .collect();
+
     json!({
         "comment": "Examples of what the frontend and the Rust side exchange. Written by \
                     `TERMX_UPDATE_CONTRACT=1 cargo test -p termx-desktop contract`; do not \
@@ -244,6 +265,7 @@ fn contract() -> Value {
             LaunchFailure::spawn_failed("too many open files"),
             LaunchFailure::launch_unconfirmed(),
         ],
+        "commandErrors": command_errors,
         "startedSession": StartedSession {
             terminal: 7,
             ack_batch_bytes: 8192,
