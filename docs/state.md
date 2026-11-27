@@ -43,8 +43,10 @@ for such values.
 
 - `claude-integration.json`: whether you accepted or declined the termx
   plugin for Claude Code.
-- `claude-plugin/`: that plugin, when it is installed. See
-  [Claude Code in termx](claude-code.md).
+- `claude-plugin/`: that plugin, when it is installed, and
+  `claude-plugin-install.json`: what your Claude Code settings looked like
+  before termx installed it, to give them back exactly (readable by you
+  only). See [Claude Code in termx](claude-code.md).
 
 The state of each Claude Code agent (working, waiting...) is never saved.
 

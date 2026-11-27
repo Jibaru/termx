@@ -24,18 +24,45 @@ termx asks once and shows the list below before changing anything.
    ```
 
    These are the same entries `claude plugin marketplace add` and
-   `claude plugin install` write. Everything else in the file, your own
+   `claude plugin install` write. The Claude Code documentation describes
+   `extraKnownMarketplaces` with a `directory` source for project settings;
+   that Claude Code also picks it up from your user settings rests on a
+   check with Claude Code 2.1.321, not on the documentation. Everything else in the file, your own
    hooks included, stays exactly as it was, with its formatting. Before
    the first change termx copies the file to `settings.json.termx-backup`.
-   A file that is not valid JSON is left alone and termx says so.
+   A file that is not valid JSON, a read-only file, or a link to a file
+   that does not exist is left alone and termx says so.
+
+   If your settings already have a marketplace named `termx` of your own,
+   or you turned the plugin off (`"termx@termx": false`), termx installs
+   nothing and shows a conflict: that is your choice to make.
 
 Claude Code picks the plugin up in the sessions it starts from then on.
 
 ## Removing it
 
-Uninstall from termx removes those two entries (your file comes back byte
-for byte), what Claude Code recorded about the plugin, and the plugin
-directory. You can also turn the plugin off in Claude Code with `/plugin`.
+termx records what your settings looked like before it installed, in
+`claude-plugin-install.json` in its state directory (readable by you
+only). Uninstall from termx then:
+
+- gives the file back byte for byte when you have not changed it since,
+  or removes it if termx created it;
+- otherwise removes only its two entries, and the objects around them only
+  if termx created those;
+- never touches a marketplace named `termx` that is not its own, or a
+  `false` you set;
+- removes what Claude Code recorded about the plugin, only when Claude
+  Code recorded it for termx's directory, and the plugin directory.
+
+You can also turn the plugin off in Claude Code with `/plugin`.
+
+## When the hooks cannot run
+
+Organisations can set `allowManagedHooksOnly` (or `disableAllHooks`) in
+the managed settings of Claude Code, and you can set `disableAllHooks` in
+yours. Claude Code then silently skips the hooks of the plugin. termx
+reads those settings and shows the plugin as _blocked_ instead of
+pretending it works.
 
 ## What the hooks send
 
@@ -53,9 +80,12 @@ with a secret drawn for each run of termx. Nothing leaves your machine.
 Outside termx (another terminal, CI, `claude -p`) the hooks find none of
 termx's variables and exit at once, silently. They never block Claude
 Code: all but `SessionEnd` run asynchronously, and the program gives up
-after 300 ms.
+after 250 ms reading its input and 300 ms waiting for termx.
 
 ## When termx does not know
+
+While Claude asks for permission, the row says so until the tool runs,
+the turn ends, or you answer in the terminal (Enter, a number, or Escape).
 
 termx never guesses from the screen. If a session said it was working and
 then nothing is heard and nothing is printed for 60 seconds, or the Claude
