@@ -1,5 +1,6 @@
 import { createContext, useContext, useSyncExternalStore } from "react";
 
+import type { NotificationSettings } from "../attention/notificationPrefs";
 import type { IntegrationSnapshot } from "../claude/integration";
 import type { Binding, CommandId } from "../keybindings/keybindings";
 import { shortcutOf } from "../keybindings/keybindings";
@@ -55,6 +56,11 @@ export function useAgentsReported(): boolean {
   // Renders again when the integration changes.
   useClaudeIntegration();
   return workbench.claude.reporting;
+}
+
+export function useNotificationSettings(): NotificationSettings {
+  const { notificationPrefs } = useWorkbench();
+  return useSyncExternalStore(notificationPrefs.subscribe, notificationPrefs.get);
 }
 
 /** The shortcut of a command as the user types it, or `null`. */

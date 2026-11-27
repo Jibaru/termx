@@ -1,6 +1,7 @@
 import { act, fireEvent, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { SETTLE_MS } from "./attention/monitor";
 import type { AgentState, Layout, Project, Session } from "./lib/ipc";
 import { fakeClaude, INSTALLED } from "./test/fakeClaude";
 import { flush, renderApp } from "./test/fakeWorkspace";
@@ -304,6 +305,33 @@ describe("going to the sessions that wait", () => {
       accelerator: "Shift+Cmd+KeyA",
     });
     expect(shortcuts).toContainEqual({ command: "nextWaitingSession", accelerator: null });
+  });
+});
+
+describe("notifications from the window", () => {
+  it("are sent for a session out of sight, announced, and a click shows the session", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const fake = fakeClaude();
+    const view = await renderApp(workspace([claude("s-1"), claude("s-2")]), { claude: fake });
+
+    view.update(claude("s-2", { agent: agent("waitingForPermission") }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SETTLE_MS);
+    });
+
+    expect(fake.callsOf("notify")).toEqual([
+      [{ title: "Task s-2", body: "Waiting for permission · app", sessionId: "s-2" }],
+    ]);
+    expect(fake.callsOf("setAttentionBadge").at(-1)).toEqual([1]);
+    expect(screen.getByTestId("live-region")).toHaveTextContent(
+      "Task s-2 needs you: waiting for permission.",
+    );
+
+    act(() => {
+      fake.click("s-2");
+    });
+    await flush();
+    expect(view.callsOf("showSession")).toEqual([[1, "s-2"]]);
   });
 });
 
