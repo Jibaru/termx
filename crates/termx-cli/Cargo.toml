@@ -1,0 +1,24 @@
+[package]
+name = "termx-cli"
+description = "Command line of termx: the hook sender of its Claude Code plugin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "termx-cli"
+path = "src/main.rs"
+
+# Only the protocol: the hook sender must start in a few milliseconds.
+[dependencies]
+termx-protocol = { workspace = true }
+
+[dev-dependencies]
+serde_json = "1.0.154"
+tempfile = "3.27.0"
+termx-core = { workspace = true }

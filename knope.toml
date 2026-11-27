@@ -16,6 +16,7 @@ versioned_files = [
   { path = "Cargo.lock", dependency = "termx-core" },
   { path = "Cargo.lock", dependency = "termx-desktop" },
   { path = "Cargo.lock", dependency = "termx-protocol" },
+  { path = "Cargo.lock", dependency = "termx-cli" },
   # A regex is used for the package.json files instead of Knope's built-in
   # support so that only the version changes and Prettier formatting is kept.
   { path = "package.json", regex = '(?m)^  "version": "(?<version>[^"]+)"' },
