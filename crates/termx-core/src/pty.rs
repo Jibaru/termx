@@ -107,6 +107,8 @@
 //!   emulator to answer by writing to the PTY.
 
 mod command;
+#[cfg(windows)]
+mod ctrl_c;
 mod error;
 #[cfg(windows)]
 mod job;

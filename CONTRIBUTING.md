@@ -268,7 +268,7 @@ is wrong and links to where it is explained. Do not skip it and do not weaken
 it: the test starts failing when the bug is fixed, which is the reminder to
 remove the mark. Check everything up to the bug in a test of its own, before
 the one marked: in a test marked `it.fails`, any failure passes, a timeout or
-a helper that never started included. `specs/ctrl-c.e2e.ts` has one.
+a helper that never started included.
 
 ## Code style
 
