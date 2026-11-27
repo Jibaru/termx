@@ -770,3 +770,42 @@ fn a_shell_termx_does_not_know_lends_its_path_to_sh() {
         assert_eq!(failure_of(&session), None);
     });
 }
+
+#[cfg(unix)]
+#[test]
+fn what_a_command_leaves_behind_when_it_exits_is_ended() {
+    use std::time::Duration;
+
+    guarded(|| {
+        for (index, shell) in job_control_shells().iter().enumerate() {
+            let setup = Setup::new();
+            let launcher = Launcher::new(shell.clone());
+            let manager = SessionManager::new().unwrap();
+            let (hup, trapped) = (9_873_001 + 10 * index as u64, 9_873_002 + 10 * index as u64);
+            let line = format!(
+                "nohup sleep {hup} >/dev/null 2>&1 & (trap '' HUP; sleep {trapped}) & sleep 0.3; exit"
+            );
+            let mut request = setup.request(SessionKind::Background);
+            request.command = Some(&line);
+            let command = setup
+                .isolate(launcher.command(&request).unwrap())
+                .kill_grace(Duration::from_millis(500));
+            let recorder = Recorder::default();
+            manager
+                .create(&SessionOptions::new(command), recorder.clone())
+                .unwrap();
+            recorder.wait_for_exit();
+
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !sleeping(hup).is_empty() || !sleeping(trapped).is_empty() {
+                assert!(
+                    Instant::now() < deadline,
+                    "{shell:?}: {:?} and {:?} outlived the command",
+                    sleeping(hup),
+                    sleeping(trapped)
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    });
+}

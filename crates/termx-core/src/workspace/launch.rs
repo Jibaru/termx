@@ -558,6 +558,14 @@ impl Launcher {
                     .run(&self.background_script(line, request.token))?
             }
         };
+        // Claude Code and background commands are ended with what they
+        // left running (Claude Code's background shells, a server started
+        // with `&`): nobody can reach those once the session has ended. A
+        // shell session keeps its jobs, as other terminals do.
+        let command = match request.kind {
+            SessionKind::Shell => command,
+            SessionKind::Claude | SessionKind::Background => command.end_leftovers_on_exit(true),
+        };
         Ok(command.cwd(request.cwd))
     }
 
@@ -819,6 +827,7 @@ mod tests {
             command,
             PtyCommand::new("/bin/zsh")
                 .args(["-l", "-i", "-c", script])
+                .end_leftovers_on_exit(true)
                 .cwd(dir.path())
         );
         assert!(!command.is_login_shell());
@@ -888,6 +897,7 @@ mod tests {
                 other.unwrap(),
                 PtyCommand::new("/bin/sh")
                     .args(["-l", "-c", script])
+                    .end_leftovers_on_exit(true)
                     .cwd(dir.path())
             );
         } else {
@@ -904,6 +914,7 @@ mod tests {
             powershell,
             PtyCommand::new("pwsh")
                 .args(["-NoLogo", "-EncodedCommand", &encode_powershell(script)])
+                .end_leftovers_on_exit(true)
                 .cwd(dir.path())
         );
     }
@@ -925,6 +936,7 @@ mod tests {
                     "-c",
                     "ngrok http 3000 --log \"a b\" | tee 'x y'"
                 ])
+                .end_leftovers_on_exit(true)
                 .cwd(dir.path())
         );
 
@@ -939,6 +951,7 @@ mod tests {
                         "ngrok http 3000 --log \"a b\" | tee 'x y'\nexit $LASTEXITCODE"
                     ),
                 ])
+                .end_leftovers_on_exit(true)
                 .cwd(dir.path())
         );
     }
@@ -1008,6 +1021,7 @@ mod tests {
                          *) {exec}claude ;; esac"
                     ),
                 ])
+                .end_leftovers_on_exit(true)
                 .cwd(dir.path())
         );
 
@@ -1027,6 +1041,7 @@ mod tests {
                         exec.trim_end().trim_end_matches(';')
                     ),
                 ])
+                .end_leftovers_on_exit(true)
                 .cwd(dir.path())
         );
     }

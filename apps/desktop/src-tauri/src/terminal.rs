@@ -46,6 +46,9 @@ use termx_core::workspace::{
 
 use crate::commands::error::{ErrorKind, Failure};
 
+/// How long quitting waits for the processes terminals left behind.
+const LEFTOVER_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// A message about a session, sent on its channel as JSON. Output is not
 /// one of them: it is sent as raw bytes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -311,6 +314,10 @@ impl TerminalState {
             manager.shutdown();
         }
         lock(&self.owners).clear();
+        // Jobs that shells which ended on their own left behind.
+        if !termx_core::pty::end_leftover_processes(LEFTOVER_WAIT) {
+            warn!("some processes left by terminals did not end in time");
+        }
     }
 
     /// The window a terminal belongs to.

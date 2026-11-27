@@ -1109,6 +1109,90 @@ fn killing_ends_what_the_process_started_outside_its_console() {
     });
 }
 
+/// The running processes whose command line is exactly `sleep <seconds>`.
+#[cfg(unix)]
+fn sleeping(seconds: u64) -> Vec<u32> {
+    let output = std::process::Command::new("pgrep")
+        .args(["-f", &format!("^sleep {seconds}$")])
+        .output()
+        .expect("cannot run pgrep");
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse().ok())
+        .filter(|pid: &u32| {
+            let state = std::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", &pid.to_string()])
+                .output()
+                .expect("cannot run ps");
+            let state = String::from_utf8_lossy(&state.stdout);
+            !state.trim().is_empty() && !state.trim_start().starts_with('Z')
+        })
+        .collect()
+}
+
+/// Starts a shell that leaves two jobs behind, one behind `nohup` and one
+/// ignoring `SIGHUP`, and exits. Returns the handle once it has exited.
+#[cfg(unix)]
+fn shell_leaving_jobs(first: u64, second: u64) -> Pty {
+    let line = format!(
+        "nohup sleep {first} >/dev/null 2>&1 & (trap '' HUP; sleep {second}) & sleep 0.3; exit"
+    );
+    let command = PtyCommand::new("/bin/sh")
+        .args(["-c", &line])
+        .kill_grace(Duration::from_millis(300));
+    let (pty, output) = Pty::spawn(&command, PtySize::default()).expect("failed to spawn");
+    drop(output);
+    pty.wait_timeout(TIMEOUT).expect("the shell did not exit");
+    let deadline = Instant::now() + TIMEOUT;
+    while sleeping(first).is_empty() || sleeping(second).is_empty() {
+        assert!(Instant::now() < deadline, "the jobs never started");
+        thread::sleep(Duration::from_millis(20));
+    }
+    pty
+}
+
+#[cfg(unix)]
+fn wait_until_none_sleeping(seconds: &[u64]) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while seconds.iter().any(|&s| !sleeping(s).is_empty()) {
+        assert!(Instant::now() < deadline, "jobs outlived their terminal");
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn killing_a_terminal_whose_shell_exited_ends_what_it_left() {
+    guarded(|| {
+        let pty = shell_leaving_jobs(9_874_001, 9_874_002);
+        // As in other terminals, the jobs outlive the shell...
+        thread::sleep(Duration::from_millis(300));
+        assert!(!sleeping(9_874_001).is_empty());
+
+        // ...until the terminal is closed.
+        pty.kill().expect("cannot kill");
+        drop(pty);
+
+        assert!(sleeping(9_874_001).is_empty(), "nohup job survived");
+        assert!(sleeping(9_874_002).is_empty(), "trapped job survived");
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn quitting_ends_what_terminals_that_ended_left() {
+    guarded(|| {
+        // Dropped without being killed, as when a shell ends on its own.
+        drop(shell_leaving_jobs(9_874_011, 9_874_012));
+        thread::sleep(Duration::from_millis(300));
+        assert!(!sleeping(9_874_011).is_empty());
+
+        assert!(termx_core::pty::end_leftover_processes(TIMEOUT));
+
+        wait_until_none_sleeping(&[9_874_011, 9_874_012]);
+    });
+}
+
 #[cfg(unix)]
 #[test]
 fn background_job_holding_the_terminal_does_not_keep_the_session_open() {

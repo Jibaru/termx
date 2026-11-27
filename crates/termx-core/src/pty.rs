@@ -133,6 +133,31 @@ pub use reader::READ_BUFFER_SIZE;
 pub use shell::default_shell;
 pub use types::{ExitStatus, PtySize};
 
+/// Ends what terminals that exited on their own left running (jobs a shell
+/// left behind, a program started with `nohup`): `SIGHUP`, then `SIGKILL`
+/// after [`DEFAULT_KILL_GRACE`]. Waits until they are gone, for at most
+/// `wait`, and returns whether they are. Call it when the application
+/// quits, after the terminals themselves were ended, so that nothing a
+/// terminal started outlives it.
+///
+/// Only processes that are still in the session of their terminal are
+/// known; one that left it on purpose (a daemon) is not. On Windows the
+/// job of each terminal ends everything with it, and this does nothing.
+pub fn end_leftover_processes(wait: std::time::Duration) -> bool {
+    #[cfg(unix)]
+    {
+        let now = std::time::Instant::now();
+        let sweeper = tree::Sweeper::get();
+        sweeper.terminate_all(now + DEFAULT_KILL_GRACE);
+        sweeper.wait_all(now + wait)
+    }
+    #[cfg(windows)]
+    {
+        let _ = wait;
+        true
+    }
+}
+
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 /// Locks a mutex, ignoring poisoning.

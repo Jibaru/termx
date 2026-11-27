@@ -124,6 +124,14 @@ struct ChildState {
     /// Set by `kill`: when the waiter thread must send `SIGKILL` to what is
     /// still alive of the session.
     force_kill_at: Option<Instant>,
+    /// See [`PtyCommand::end_leftovers_on_exit`].
+    end_leftovers_on_exit: bool,
+    /// Whether the child has exited and its session was handed to the
+    /// sweeper (see [`hand_over`]).
+    handed_over: bool,
+    /// Set by `kill` once the child has exited: when what it left must be
+    /// killed by force.
+    leftovers_deadline: Option<Instant>,
 }
 
 #[cfg(unix)]
@@ -141,7 +149,7 @@ impl ChildState {
             return Vec::new();
         };
         let foreground = rustix::termios::tcgetpgrp(&*self.master).ok();
-        tree::groups_of_session(leader, foreground)
+        tree::groups_of_live_session(leader, foreground)
     }
 
     /// Sends `SIGHUP` to every process group of the session, as closing a
@@ -162,6 +170,23 @@ impl ChildState {
         Ok(())
     }
 
+    /// Ends what the child left in its session, now that it has exited:
+    /// `SIGHUP`, and `SIGKILL` after the grace period. Asked once; the
+    /// sweeper does it, whether the session was handed over already or is
+    /// about to be.
+    fn end_leftovers(&mut self) {
+        if self.leftovers_deadline.is_some() {
+            return;
+        }
+        let deadline = after_grace(self.kill_grace);
+        self.leftovers_deadline = Some(deadline);
+        if self.handed_over
+            && let Some(session) = self.leader()
+        {
+            tree::Sweeper::get().terminate_if_watched(session, deadline);
+        }
+    }
+
     /// Sends `SIGKILL` to the child and to every process group of its
     /// session.
     fn kill_session(&mut self) {
@@ -171,44 +196,51 @@ impl ChildState {
     }
 }
 
-/// What is left to do once the child of a terminal that was killed has
-/// exited: the processes it started may still be there (Unix only).
+/// What becomes of the processes a child left in its session once it has
+/// exited (Unix only). Decided under the lock, right after the child was
+/// reaped, so that the session is handed to the [`tree::Sweeper`] while
+/// its identifier is certainly still the terminal's.
 #[cfg(unix)]
-struct Sweep {
-    /// The identifier of the session, which was the child's.
-    session: rustix::process::Pid,
-    /// When to send `SIGKILL` to what remains.
-    deadline: Instant,
-}
-
-#[cfg(unix)]
-impl Sweep {
-    /// Waits for the processes of the session to exit, and kills those
-    /// still there at the deadline.
-    ///
-    /// The identifier of the session cannot be handed out again while a
-    /// process belongs to it, so it stays valid for as long as there is
-    /// something to kill (see `tree`).
-    fn run(&self) {
-        loop {
-            if !tree::session_has_members(self.session) {
-                return;
-            }
-            let remaining = self.deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                let groups = tree::groups_of_session(self.session, None);
-                tree::signal_groups(&groups, rustix::process::Signal::KILL);
-                return;
-            }
-            thread::sleep(remaining.min(SWEEP_POLL));
+fn hand_over(state: &mut ChildState, forced: bool) -> Option<rustix::process::Pid> {
+    state.handed_over = true;
+    let session = state.leader()?;
+    let sweeper = tree::Sweeper::get();
+    if let Some(deadline) = state.leftovers_deadline {
+        // Killed in the moment between its exit and now.
+        sweeper.terminate(session, deadline, false);
+        return None;
+    }
+    match state.force_kill_at.or(forced.then(Instant::now)) {
+        // Killed: what is left was sent `SIGHUP` with the child, and gets
+        // `SIGKILL` at the same deadline. Dropping the handle waits for it.
+        Some(deadline) => {
+            sweeper.terminate(session, deadline, true);
+            Some(session)
+        }
+        None if state.end_leftovers_on_exit => {
+            sweeper.terminate(session, after_grace(state.kill_grace), false);
+            None
+        }
+        None => {
+            sweeper.watch(session);
+            None
         }
     }
 }
 
-/// How often the processes left by a killed terminal are checked for
-/// (Unix only).
+/// Now plus `grace`, or a day from now if that cannot be represented.
 #[cfg(unix)]
-const SWEEP_POLL: Duration = Duration::from_millis(20);
+fn after_grace(grace: Duration) -> Instant {
+    let now = Instant::now();
+    now.checked_add(grace)
+        .or_else(|| now.checked_add(Duration::from_secs(24 * 60 * 60)))
+        .unwrap_or(now)
+}
+
+/// How long dropping a handle waits for the processes its child left,
+/// beyond their grace period (Unix only).
+#[cfg(unix)]
+const LEFTOVER_WAIT_MARGIN: Duration = Duration::from_secs(3);
 
 /// On Windows a process is addressed by a handle, which stays valid after the
 /// process exits. The waiter thread owns the child and blocks until it exits,
@@ -301,6 +333,7 @@ impl Pty {
             child,
             size,
             command.kill_grace_period(),
+            command.ends_leftovers_on_exit(),
             reader_delay,
             keeper,
         )
@@ -316,13 +349,14 @@ impl Pty {
         mut child: Child,
         size: PtySize,
         kill_grace: Duration,
+        end_leftovers_on_exit: bool,
         reader_delay: Duration,
         keeper: TerminalKeeper,
     ) -> Result<(Self, PtyOutput), PtyError> {
         // Windows terminates a process at once: there is no grace period,
-        // and its console needs no keeper.
+        // its console needs no keeper, and the job ends what is left.
         #[cfg(windows)]
-        let _ = (kill_grace, keeper);
+        let _ = (kill_grace, keeper, end_leftovers_on_exit);
 
         let streams = match Streams::open(master.as_ref()) {
             Ok(streams) => streams,
@@ -376,6 +410,9 @@ impl Pty {
                 master: Arc::clone(&streams.master),
                 kill_grace,
                 force_kill_at: None,
+                end_leftovers_on_exit,
+                handed_over: false,
+                leftovers_deadline: None,
             }));
             let reader_task = {
                 let (sink, poke, shared) = (sink.clone(), poke.clone(), Arc::clone(&shared));
@@ -404,10 +441,14 @@ impl Pty {
             let waiter_task = {
                 let (state, shared) = (Arc::clone(&state), Arc::clone(&shared));
                 move || {
-                    let (status, sweep) = poll_exit(&state, &pokes);
+                    let (status, killed) = poll_exit(&state, &pokes);
                     shared.finish(status);
-                    if let Some(sweep) = sweep {
-                        sweep.run();
+                    // A terminal that was killed is only gone once what it
+                    // started is: dropping the handle joins this thread.
+                    if let Some(session) = killed {
+                        let grace = lock(&state).kill_grace;
+                        tree::Sweeper::get()
+                            .wait(session, after_grace(grace + LEFTOVER_WAIT_MARGIN));
                     }
                 }
             };
@@ -554,6 +595,16 @@ impl Pty {
     ///
     /// [`PtyError::Kill`] if the system refuses to signal the process.
     pub fn kill(&self) -> Result<(), PtyError> {
+        self.kill_inner(true)
+    }
+
+    /// [`kill`](Self::kill). Without `leftovers`, a process that has exited
+    /// already is left alone with what it left: that is how dropping the
+    /// handle of a terminal that ended on its own behaves.
+    fn kill_inner(&self, leftovers: bool) -> Result<(), PtyError> {
+        #[cfg(windows)]
+        let _ = leftovers;
+        #[cfg(windows)]
         if self.try_wait().is_some() {
             return Ok(());
         }
@@ -573,7 +624,15 @@ impl Pty {
                     }
                     sent
                 }
-                Ok(_) | Err(_) => Ok(()),
+                Ok(None) => Ok(()),
+                // It has exited: what it left in its session may still be
+                // there, and is ended too.
+                Ok(Some(_)) | Err(_) => {
+                    if leftovers {
+                        state.end_leftovers();
+                    }
+                    Ok(())
+                }
             };
             drop(state);
             // The waiter thread takes it from here: it notices the exit, or
@@ -658,7 +717,9 @@ impl Drop for Pty {
         // keep draining for the console to close.
         self.sink.shut_down();
 
-        let killed = self.kill().is_ok();
+        // A terminal that ended on its own keeps what it left, as in other
+        // terminals; one that was killed is waited for, leftovers included.
+        let killed = self.kill_inner(false).is_ok();
         self.shared.close();
 
         match self.waiter.take() {
@@ -667,6 +728,15 @@ impl Drop for Pty {
             // process eventually exits, rather than blocking here forever.
             Some(waiter) if killed => {
                 let _ = waiter.join();
+                #[cfg(unix)]
+                {
+                    let state = lock(&self.control.state);
+                    let ending = state.leftovers_deadline.zip(state.leader());
+                    drop(state);
+                    if let Some((deadline, session)) = ending {
+                        tree::Sweeper::get().wait(session, deadline + LEFTOVER_WAIT_MARGIN);
+                    }
+                }
             }
             Some(_) => {}
             // Spawning failed half-way and there is no waiter thread: reap
@@ -860,13 +930,13 @@ fn spawn_thread(
 /// Waits for the child to exit by polling it, and returns its status. Also
 /// carries out the forced kill requested by [`Pty::kill`].
 ///
-/// When the process was killed, also returns what is left to do for the
-/// processes it started.
+/// When the process was killed, also returns its session, whose leftovers
+/// the [`tree::Sweeper`] is ending.
 #[cfg(unix)]
 fn poll_exit(
     state: &Mutex<ChildState>,
     pokes: &std::sync::mpsc::Receiver<()>,
-) -> (ExitStatus, Option<Sweep>) {
+) -> (ExitStatus, Option<rustix::process::Pid>) {
     use std::sync::mpsc::RecvTimeoutError;
 
     let mut pause = EXIT_POLL_MIN;
@@ -876,21 +946,17 @@ fn poll_exit(
         // The lock is released before pausing, so that `kill` can run.
         let until_forced_kill = {
             let mut state = lock(state);
-            let sweep = |state: &ChildState| {
-                let deadline = state.force_kill_at.or(forced.then(Instant::now))?;
-                Some(Sweep {
-                    session: state.leader()?,
-                    deadline,
-                })
-            };
             match state.child.try_wait() {
                 Ok(Some(status)) => {
-                    return (portable_pty::ExitStatus::from(status).into(), sweep(&state));
+                    return (
+                        portable_pty::ExitStatus::from(status).into(),
+                        hand_over(&mut state, forced),
+                    );
                 }
                 Ok(None) => {}
                 // Something else reaped the process, for example a host
                 // application ignoring `SIGCHLD`. Its status is lost.
-                Err(_) => return (ExitStatus::unknown(), sweep(&state)),
+                Err(_) => return (ExitStatus::unknown(), hand_over(&mut state, forced)),
             }
             let now = Instant::now();
             if state.force_kill_at.is_some_and(|at| at <= now) {
