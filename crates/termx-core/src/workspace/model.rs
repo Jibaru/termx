@@ -37,15 +37,7 @@ impl SessionKey {
     /// hexadecimal digits drawn at random.
     #[must_use]
     pub fn generate() -> Self {
-        use std::hash::{BuildHasher, Hasher};
-
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        // `RandomState` is seeded from the operating system.
-        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
-        hasher.write_u64(COUNTER.fetch_add(1, Ordering::Relaxed));
-        hasher.write_u64(now_ms());
-        hasher.write_u32(std::process::id());
-        Self(format!("s-{:016x}", hasher.finish()))
+        Self(format!("s-{}", random_hex()))
     }
 
     /// Accepts a key received from outside: a frontend or a file.
@@ -203,6 +195,12 @@ pub struct Session {
     /// The identifier Claude Code gave its conversation, to resume it with
     /// `claude --resume`. `None` until it is known.
     pub claude_session_id: Option<String>,
+    /// Something the user should know about the session while it runs,
+    /// with a message for them. For now only
+    /// [`LaunchUnconfirmed`](LaunchFailure::LaunchUnconfirmed): its shell
+    /// did not get to the command. Cleared when the command starts after
+    /// all, and when the session starts again.
+    pub warning: Option<LaunchFailure>,
 }
 
 impl Session {
@@ -283,6 +281,19 @@ fn is_status_glyph(c: char) -> bool {
             c,
             '*' | '·' | '✢' | '✳' | '✶' | '✻' | '✽' | '∗' | '⏺' | '●' | '○'
         )
+}
+
+/// 16 hexadecimal digits that no other call returns, drawn at random.
+pub(crate) fn random_hex() -> String {
+    use std::hash::{BuildHasher, Hasher};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    // `RandomState` is seeded from the operating system.
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    hasher.write_u64(COUNTER.fetch_add(1, Ordering::Relaxed));
+    hasher.write_u64(now_ms());
+    hasher.write_u32(std::process::id());
+    format!("{:016x}", hasher.finish())
 }
 
 /// The current time, in milliseconds since the Unix epoch.

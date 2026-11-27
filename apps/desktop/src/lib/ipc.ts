@@ -141,7 +141,14 @@ export type LaunchMode = "fresh" | "resume";
  * and can be shown as it is.
  */
 export interface LaunchFailure {
-  kind: "claudeNotFound" | "folderMissing" | "invalidCommand" | "spawnFailed";
+  /**
+   * `launchUnconfirmed`: the user's shell did not get to the command, or
+   * not in time, typically because a file it reads at start-up starts
+   * another shell, stops with an error or waits for an answer. While the
+   * session runs it is a `warning`, cleared if the command starts after
+   * all; at the exit it is the `failure`.
+   */
+  kind: "claudeNotFound" | "folderMissing" | "invalidCommand" | "spawnFailed" | "launchUnconfirmed";
   message: string;
 }
 
@@ -150,6 +157,7 @@ export const LAUNCH_FAILURE_KINDS = [
   "folderMissing",
   "invalidCommand",
   "spawnFailed",
+  "launchUnconfirmed",
 ] as const satisfies readonly LaunchFailure["kind"][];
 
 /**
@@ -236,6 +244,11 @@ export interface Session {
   waitingSince: number | null;
   /** The conversation Claude Code resumes, once known. */
   claudeSessionId: string | null;
+  /**
+   * Something to tell the user while the session runs, with a message for
+   * them: for now only `launchUnconfirmed`. `null` otherwise.
+   */
+  warning: LaunchFailure | null;
 }
 
 /** How a split arranges its children: side by side, or stacked. */

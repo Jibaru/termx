@@ -9,12 +9,12 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use termx_core::pty::ExitStatus;
-use termx_core::workspace::launch::{CLAUDE_NOT_FOUND_EXIT_CODE, Shell};
+use termx_core::workspace::launch::{CLAUDE_MISSING_EXIT_CODE, LaunchMarker, Shell, marker};
 use termx_core::workspace::layout::Node;
 use termx_core::workspace::project::normalize;
 use termx_core::workspace::store::STATE_FILE;
 use termx_core::workspace::{
-    Direction, LaunchFailure, LaunchMode, Launcher, NewSession, PersistenceMode, Placement,
+    Direction, Launch, LaunchFailure, LaunchMode, Launcher, NewSession, PersistenceMode, Placement,
     ProjectKind, Session, SessionKey, SessionKind, SessionState, WindowGeometry, Workspace,
     WorkspaceConfig, WorkspaceError,
 };
@@ -550,11 +550,25 @@ fn a_claude_that_is_not_installed_ends_the_session_with_a_typed_failure() {
     let id = create(&workspace, SessionKind::Claude, &folders.make("app")).id;
     let launch = workspace.begin_launch(&id, LaunchMode::Fresh).unwrap();
     assert!(workspace.terminal_started(&id, launch.generation, 1));
+    let token = launch
+        .token
+        .clone()
+        .expect("a Claude Code session has markers");
+    let mut filter = workspace.output_filter(&id, &launch).unwrap();
 
+    // What the script prints when the shell cannot find `claude`.
+    let printed = filter.filter(
+        format!(
+            "profile output{}",
+            marker(&token, LaunchMarker::ClaudeMissing)
+        )
+        .into_bytes(),
+    );
+    assert_eq!(printed, b"profile output");
     workspace.terminal_exited(
         &id,
         launch.generation,
-        &ExitStatus::from_code(CLAUDE_NOT_FOUND_EXIT_CODE),
+        &ExitStatus::from_code(CLAUDE_MISSING_EXIT_CODE),
     );
 
     let SessionState::Exited {
@@ -565,13 +579,45 @@ fn a_claude_that_is_not_installed_ends_the_session_with_a_typed_failure() {
     else {
         panic!("the session has no failure");
     };
-    assert_eq!(code, Some(CLAUDE_NOT_FOUND_EXIT_CODE));
+    assert_eq!(code, Some(CLAUDE_MISSING_EXIT_CODE));
     assert!(matches!(failure, LaunchFailure::ClaudeNotFound { .. }));
     assert!(failure.message().contains("Claude Code is not installed"));
     // In the form the frontend receives.
     assert_eq!(
         serde_json::to_value(workspace.session(&id).unwrap().state).unwrap()["failure"]["kind"],
         "claudeNotFound"
+    );
+}
+
+#[test]
+fn only_the_markers_of_the_current_start_count() {
+    let folders = Folders::new();
+    let workspace = Workspace::open(quiet(None));
+    let id = create(&workspace, SessionKind::Claude, &folders.make("app")).id;
+    let first = workspace.begin_launch(&id, LaunchMode::Fresh).unwrap();
+    let mut old_filter = workspace.output_filter(&id, &first).unwrap();
+    let second = workspace.begin_launch(&id, LaunchMode::Fresh).unwrap();
+    assert!(workspace.terminal_started(&id, second.generation, 2));
+    assert_ne!(first.token, second.token);
+
+    // The old terminal says `claude` is missing; the new one, with the
+    // token of the first, that it runs it: neither counts.
+    old_filter
+        .filter(marker(first.token.as_ref().unwrap(), LaunchMarker::ClaudeMissing).into_bytes());
+    let mut filter = workspace.output_filter(&id, &second).unwrap();
+    let forged = marker(first.token.as_ref().unwrap(), LaunchMarker::Exec);
+    assert_eq!(
+        filter.filter(forged.clone().into_bytes()),
+        forged.into_bytes()
+    );
+    workspace.terminal_exited(&id, second.generation, &ExitStatus::from_code(0));
+
+    let SessionState::Exited { failure, .. } = workspace.session(&id).unwrap().state else {
+        panic!("the session did not end");
+    };
+    assert!(
+        matches!(failure, Some(LaunchFailure::LaunchUnconfirmed { .. })),
+        "{failure:?}"
     );
 }
 
@@ -783,7 +829,8 @@ fn each_kind_resumes_in_its_own_way() {
     let workspace = Workspace::open(quiet(Some(&folders.state_dir())));
     let [known, unknown, shell, background] = &ids;
     let launcher = Launcher::new(test_shell());
-    let request = |kind, command, claude_session_id, mode| {
+    // The same command, with the token the workspace drew for that start.
+    let request = |kind, command, claude_session_id, mode, launch: &Launch| {
         launcher
             .command(&termx_core::workspace::launch::LaunchRequest {
                 kind,
@@ -791,6 +838,7 @@ fn each_kind_resumes_in_its_own_way() {
                 command,
                 claude_session_id,
                 mode,
+                token: launch.token.as_ref(),
             })
             .unwrap()
     };
@@ -803,7 +851,8 @@ fn each_kind_resumes_in_its_own_way() {
             SessionKind::Claude,
             None,
             Some("0b9d6f7e-3c1a-4f3e-9a55-2f6f1f0f8a10"),
-            LaunchMode::Resume
+            LaunchMode::Resume,
+            &resumed,
         )
     );
     if cfg!(unix) {
@@ -817,7 +866,13 @@ fn each_kind_resumes_in_its_own_way() {
     let continued = workspace.begin_launch(unknown, LaunchMode::Resume).unwrap();
     assert_eq!(
         continued.command,
-        request(SessionKind::Claude, None, None, LaunchMode::Resume)
+        request(
+            SessionKind::Claude,
+            None,
+            None,
+            LaunchMode::Resume,
+            &continued
+        )
     );
     if cfg!(unix) {
         assert!(described(&continued).contains("claude --continue"));
@@ -827,20 +882,29 @@ fn each_kind_resumes_in_its_own_way() {
     let fresh = workspace.begin_launch(known, LaunchMode::Fresh).unwrap();
     assert_eq!(
         fresh.command,
-        request(SessionKind::Claude, None, None, LaunchMode::Fresh)
+        request(SessionKind::Claude, None, None, LaunchMode::Fresh, &fresh)
     );
     assert_ne!(fresh.command, resumed.command);
 
     // A shell and a background command start again in the same folder,
     // whichever way they are started.
     for mode in [LaunchMode::Resume, LaunchMode::Fresh] {
+        let launch = workspace.begin_launch(shell, mode).unwrap();
+        assert_eq!(launch.token, None, "a shell runs no script");
         assert_eq!(
-            workspace.begin_launch(shell, mode).unwrap().command,
-            request(SessionKind::Shell, None, None, mode)
+            launch.command,
+            request(SessionKind::Shell, None, None, mode, &launch)
         );
+        let launch = workspace.begin_launch(background, mode).unwrap();
         assert_eq!(
-            workspace.begin_launch(background, mode).unwrap().command,
-            request(SessionKind::Background, Some("pnpm dev"), None, mode)
+            launch.command,
+            request(
+                SessionKind::Background,
+                Some("pnpm dev"),
+                None,
+                mode,
+                &launch
+            )
         );
     }
     for id in &ids {

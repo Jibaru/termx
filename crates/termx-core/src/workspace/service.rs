@@ -11,7 +11,9 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
-use super::launch::{LaunchFailure, LaunchMode, LaunchRequest, Launcher};
+use super::launch::{
+    LaunchFailure, LaunchMarker, LaunchMode, LaunchRequest, LaunchToken, Launcher, MarkerFilter,
+};
 use super::layout::{Direction, Edge, Layout, LayoutError, PaneId, Placement, SplitId};
 use super::model::{
     MAX_COMMAND_BYTES, Session, SessionKey, SessionKind, SessionState, clean_title,
@@ -58,6 +60,13 @@ pub const GIT_DETECT_BUDGET: Duration = Duration::from_secs(2);
 /// to stop, and then for the last save, before it gives up on each.
 pub const SHUTDOWN_WAIT: Duration = Duration::from_secs(5);
 
+/// How long the script of a session has to say that it runs its command
+/// before the session is given a
+/// [`LaunchUnconfirmed`](LaunchFailure::LaunchUnconfirmed) warning. Long
+/// enough for a slow shell profile (a Node version manager can take
+/// seconds), short enough that a user staring at a bare prompt is told why.
+pub const LAUNCH_CONFIRM_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// How many project keys are remembered for their order.
 const MAX_PROJECT_ORDER: usize = 200;
 
@@ -90,6 +99,8 @@ pub struct WorkspaceConfig {
     pub git_detect_budget: Duration,
     /// See [`SHUTDOWN_WAIT`].
     pub shutdown_wait: Duration,
+    /// See [`LAUNCH_CONFIRM_TIMEOUT`].
+    pub launch_confirm_timeout: Duration,
     /// Finds the project of a folder: [`project::detect`], replaced by
     /// tests that need a detection that hangs.
     pub(crate) detector: fn(&Path) -> Detected,
@@ -118,6 +129,7 @@ impl WorkspaceConfig {
             git_poll_interval: GIT_POLL_INTERVAL,
             git_detect_budget: GIT_DETECT_BUDGET,
             shutdown_wait: SHUTDOWN_WAIT,
+            launch_confirm_timeout: LAUNCH_CONFIRM_TIMEOUT,
             detector: project::detect,
         }
     }
@@ -164,6 +176,11 @@ pub struct Launch {
     pub generation: u64,
     /// The terminal the session was running in, which must now be closed.
     pub previous_terminal: Option<u64>,
+    /// The token the script of this start prints its markers with. Pass
+    /// the output of the terminal through
+    /// [`Workspace::output_filter`], which takes them out and reports
+    /// them. `None` for a shell session, which runs no script.
+    pub token: Option<LaunchToken>,
 }
 
 /// Why an operation on the workspace was refused. Nothing was changed,
@@ -327,6 +344,44 @@ struct Entry {
     activity: Arc<AtomicU64>,
     /// Counts the starts of the session. See [`Launch::generation`].
     generation: u64,
+    /// What the script of the current start has said, while it has a
+    /// process.
+    launch: Option<Tracked>,
+}
+
+/// What is known of the start of a session whose script prints markers.
+struct Tracked {
+    /// When it was started.
+    started: Instant,
+    /// The script said that it runs the command.
+    confirmed: bool,
+    /// The script said that `claude` is missing.
+    claude_missing: bool,
+}
+
+/// Passes the markers of one start of a session to the workspace. See
+/// [`Workspace::output_filter`].
+struct LaunchWatch {
+    filter: MarkerFilter,
+    shared: std::sync::Weak<Shared>,
+    key: SessionKey,
+    generation: u64,
+}
+
+impl crate::session::OutputFilter for LaunchWatch {
+    fn filter(&mut self, bytes: Vec<u8>) -> Vec<u8> {
+        let (bytes, markers) = self.filter.filter(bytes);
+        if let Some(shared) = self.shared.upgrade() {
+            for marker in markers {
+                shared.launch_marker(&self.key, self.generation, marker);
+            }
+        }
+        bytes
+    }
+
+    fn finish(&mut self) -> Vec<u8> {
+        self.filter.finish()
+    }
 }
 
 struct State {
@@ -580,6 +635,70 @@ impl Shared {
         });
     }
 
+    /// Records what the script of a start said. A marker only ever
+    /// improves the state: one that comes late clears the warning.
+    fn launch_marker(&self, key: &SessionKey, generation: u64, marker: LaunchMarker) {
+        self.mutate(|state, mutation| {
+            let Ok(entry) = state.entry(key) else {
+                return;
+            };
+            if entry.generation != generation {
+                return;
+            }
+            let Some(launch) = &mut entry.launch else {
+                return;
+            };
+            match marker {
+                LaunchMarker::Exec => {
+                    launch.confirmed = true;
+                    if entry.session.warning.take().is_some() {
+                        mutation.changes.session(key);
+                    }
+                }
+                LaunchMarker::ClaudeMissing => {
+                    if !launch.confirmed {
+                        launch.claude_missing = true;
+                    }
+                }
+            }
+        });
+    }
+
+    /// Gives a warning to the sessions whose script has not said in time
+    /// that it runs the command. Returns when the next one is due.
+    fn flag_unconfirmed(&self, now: Instant) -> Option<Instant> {
+        let timeout = self.config.launch_confirm_timeout;
+        let waiting = lock(&self.state).entries.iter().any(|entry| {
+            entry
+                .launch
+                .as_ref()
+                .is_some_and(|launch| !launch.confirmed && !launch.claude_missing)
+                && entry.session.warning.is_none()
+        });
+        if !waiting {
+            return None;
+        }
+        self.mutate(|state, mutation| {
+            let mut next: Option<Instant> = None;
+            for entry in &mut state.entries {
+                let Some(launch) = &entry.launch else {
+                    continue;
+                };
+                if launch.confirmed || launch.claude_missing || entry.session.warning.is_some() {
+                    continue;
+                }
+                let due = after(launch.started, timeout);
+                if due > now {
+                    next = Some(next.map_or(due, |next| next.min(due)));
+                } else if entry.session.state.is_active() {
+                    entry.session.warning = Some(LaunchFailure::launch_unconfirmed());
+                    mutation.changes.session(&entry.session.id);
+                }
+            }
+            next
+        })
+    }
+
     /// Passes the activity on and writes the state file now.
     fn flush(&self) -> io::Result<bool> {
         *lock(&self.signals.save) = None;
@@ -699,6 +818,8 @@ fn run_ticker(shared: &Arc<Shared>) {
             shared.save_logged();
         }
 
+        let unconfirmed = shared.flag_unconfirmed(now);
+
         // Sleep until the earliest thing that is due, or until woken.
         let mut wake = last_git.map_or(now, |last| after(last, config.git_poll_interval));
         if signals.activity.load(Ordering::Acquire) {
@@ -709,6 +830,9 @@ fn run_ticker(shared: &Arc<Shared>) {
             wake = wake.min(deadline);
         }
         if let Some(deadline) = *lock(&signals.retry) {
+            wake = wake.min(deadline);
+        }
+        if let Some(deadline) = unconfirmed {
             wake = wake.min(deadline);
         }
         if signals.git.load(Ordering::Acquire)
@@ -775,6 +899,7 @@ impl Workspace {
                     created_at: stored.created_at,
                     last_activity_at: stored.last_activity_at,
                     waiting_since: None,
+                    warning: None,
                     claude_session_id: stored
                         .claude_session_id
                         .filter(|id| is_valid_claude_session_id(id)),
@@ -784,6 +909,7 @@ impl Workspace {
                     session,
                     activity: Arc::default(),
                     generation: 0,
+                    launch: None,
                 }
             })
             .collect();
@@ -987,6 +1113,7 @@ impl Workspace {
             created_at: now,
             last_activity_at: now,
             waiting_since: None,
+            warning: None,
             claude_session_id: None,
         };
         session.refresh_title();
@@ -1010,6 +1137,7 @@ impl Workspace {
                 session: session.clone(),
                 activity: Arc::default(),
                 generation: 0,
+                launch: None,
             });
             session
         }))
@@ -1264,13 +1392,18 @@ impl Workspace {
         let session = self
             .session(key)
             .ok_or_else(|| WorkspaceError::UnknownSession(key.clone()))?;
+        let launcher = &self.shared.config.launcher;
+        let token = launcher
+            .uses_markers(session.kind)
+            .then(LaunchToken::generate);
         // Checks that the folder exists: outside the lock.
-        let command = self.shared.config.launcher.command(&LaunchRequest {
+        let command = launcher.command(&LaunchRequest {
             kind: session.kind,
             cwd: &session.cwd,
             command: session.command.as_deref(),
             claude_session_id: session.claude_session_id.as_deref(),
             mode,
+            token: token.as_ref(),
         });
 
         let launch = self.shared.mutate(|state, mutation| {
@@ -1281,17 +1414,26 @@ impl Workspace {
                     let previous_terminal = entry.session.terminal_id.take();
                     entry.session.live_cwd = None;
                     entry.session.state = SessionState::Starting;
+                    entry.session.warning = None;
                     entry.session.last_activity_at = now_ms();
+                    entry.launch = token.as_ref().map(|_| Tracked {
+                        started: Instant::now(),
+                        confirmed: false,
+                        claude_missing: false,
+                    });
                     mutation.changes.session(key);
                     Ok(Launch {
                         command,
                         generation: entry.generation,
                         previous_terminal,
+                        token,
                     })
                 }
                 Err(failure) => {
                     if entry.session.terminal_id.is_none() {
                         entry.generation += 1;
+                        entry.launch = None;
+                        entry.session.warning = None;
                         entry.session.state = SessionState::Exited {
                             code: None,
                             signal: None,
@@ -1303,6 +1445,8 @@ impl Workspace {
                 }
             }
         });
+        // The ticker watches for a confirmation that does not come.
+        self.shared.signals.wake();
         if launch.is_ok() && session.live_cwd.is_some() {
             // The project shown was that of a folder the session has left.
             self.refresh_git();
@@ -1345,11 +1489,15 @@ impl Workspace {
             if entry.generation != generation || !entry.session.state.is_active() {
                 return false;
             }
-            let failure = self
-                .shared
-                .config
-                .launcher
-                .failure_for_exit(entry.session.kind, status);
+            let failure = match entry.launch.take() {
+                Some(launch) if launch.claude_missing => Some(LaunchFailure::claude_not_found(
+                    self.shared.config.launcher.claude_program_name(),
+                )),
+                // The script ended without getting to the command.
+                Some(launch) if !launch.confirmed => Some(LaunchFailure::launch_unconfirmed()),
+                _ => None,
+            };
+            entry.session.warning = None;
             entry.session.state = SessionState::Exited {
                 code: status.code(),
                 signal: status.signal().map(str::to_owned),
@@ -1382,6 +1530,8 @@ impl Workspace {
                 failure: Some(failure),
             };
             entry.session.terminal_id = None;
+            entry.session.warning = None;
+            entry.launch = None;
             mutation.changes.session(key);
         });
     }
@@ -1402,6 +1552,8 @@ impl Workspace {
             entry.generation += 1;
             entry.session.state = SessionState::Dormant;
             entry.session.terminal_id = None;
+            entry.session.warning = None;
+            entry.launch = None;
             mutation.changes.session(key);
             (true, entry.session.live_cwd.take().is_some())
         });
@@ -1409,6 +1561,25 @@ impl Workspace {
             self.refresh_git();
         }
         suspended
+    }
+
+    /// The filter to pass the output of the terminal of `launch` through:
+    /// it takes the markers of its script out (see
+    /// [`launch`](super::launch)) and records what they say in the state
+    /// of the session. `None` when the launch has no markers.
+    #[must_use]
+    pub fn output_filter(
+        &self,
+        key: &SessionKey,
+        launch: &Launch,
+    ) -> Option<Box<dyn crate::session::OutputFilter>> {
+        let token = launch.token.as_ref()?;
+        Some(Box::new(LaunchWatch {
+            filter: MarkerFilter::new(token),
+            shared: Arc::downgrade(&self.shared),
+            key: key.clone(),
+            generation: launch.generation,
+        }))
     }
 
     /// A handle that records the output of a session cheaply. `None` for

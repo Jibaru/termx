@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use super::batch::{BATCH_MAX_BYTES, Batcher};
 use super::flow::FlowControl;
-use super::{SessionId, SessionSink};
+use super::{OutputFilter, SessionId, SessionSink};
 use crate::diagnostics::tracing::warn;
 use crate::pty::{ExitStatus, Pty, PtyOutput, RecvTimeoutError};
 
@@ -129,6 +129,8 @@ pub(crate) struct Pump {
     stalled_since: Option<Instant>,
     /// Write-offs since the last acknowledgement.
     write_offs: u32,
+    /// What the output goes through first.
+    filter: Option<Box<dyn OutputFilter>>,
 }
 
 impl Pump {
@@ -143,7 +145,14 @@ impl Pump {
             exit_check: None,
             stalled_since: None,
             write_offs: 0,
+            filter: None,
         }
+    }
+
+    /// Passes the output through `filter` before anything else.
+    pub(crate) fn with_filter(mut self, filter: Option<Box<dyn OutputFilter>>) -> Self {
+        self.filter = filter;
+        self
     }
 
     /// Records that the frontend has processed `bytes` of output at `now`.
@@ -220,11 +229,23 @@ impl Pump {
                 }
                 match self.source.try_recv(room) {
                     Received::Data(bytes) => {
-                        self.batcher.push(now, bytes);
+                        let bytes = match &mut self.filter {
+                            Some(filter) => filter.filter(bytes),
+                            None => bytes,
+                        };
+                        if !bytes.is_empty() {
+                            self.batcher.push(now, bytes);
+                        }
                         progressed = true;
                     }
                     Received::Empty => break,
                     Received::Closed => {
+                        if let Some(filter) = &mut self.filter {
+                            let held = filter.finish();
+                            if !held.is_empty() {
+                                self.batcher.push(now, held);
+                            }
+                        }
                         self.source_closed = true;
                         progressed = true;
                     }
@@ -507,6 +528,45 @@ mod tests {
         f.poll_at_deadline();
         assert_eq!(f.sink.batches(), [b"hello world".to_vec()]);
         assert_eq!(f.pump.deadline(), None, "idle: only an event wakes it");
+    }
+
+    /// Removes every `#`, and keeps a trailing `!` back until it knows
+    /// what follows.
+    struct NoHashes {
+        held: Vec<u8>,
+    }
+
+    impl OutputFilter for NoHashes {
+        fn filter(&mut self, bytes: Vec<u8>) -> Vec<u8> {
+            let mut all = std::mem::take(&mut self.held);
+            all.extend(bytes.into_iter().filter(|&b| b != b'#'));
+            if all.last() == Some(&b'!') {
+                self.held = all.split_off(all.len() - 1);
+            }
+            all
+        }
+
+        fn finish(&mut self) -> Vec<u8> {
+            std::mem::take(&mut self.held)
+        }
+    }
+
+    #[test]
+    fn a_filter_sees_the_output_before_it_is_batched_and_counted() {
+        let mut f = fixture();
+        f.pump = Pump::new(ID, Box::new(f.source.clone()), Box::new(f.sink.clone()))
+            .with_filter(Some(Box::new(NoHashes { held: Vec::new() })));
+        f.source.push("##a#b!");
+        f.poll();
+        f.poll_at_deadline();
+        assert_eq!(f.sink.output(), b"ab");
+
+        // What was held back comes out when the output ends.
+        f.source.close();
+        f.source.exit(exit_code(0));
+        assert_eq!(f.poll(), PumpState::Finished);
+        assert_eq!(f.sink.output(), b"ab!");
+        assert_eq!(f.sink.exit(), Some(exit_code(0)));
     }
 
     #[test]

@@ -113,7 +113,7 @@ pub mod project;
 mod service;
 pub mod store;
 
-pub use launch::{LaunchFailure, LaunchMode, Launcher};
+pub use launch::{LaunchFailure, LaunchMarker, LaunchMode, LaunchToken, Launcher, MarkerFilter};
 pub use layout::{Direction, Edge, Layout, LayoutError, Node, PaneId, Placement, SplitId};
 pub use model::{
     InvalidSessionKey, MAX_CLAUDE_SESSION_ID_BYTES, MAX_COMMAND_BYTES, MAX_TITLE_CHARS, Session,
@@ -122,9 +122,9 @@ pub use model::{
 pub use notify::{ChangeSet, Subscription};
 pub use project::{GitInfo, Project, ProjectKind};
 pub use service::{
-    ACTIVITY_COALESCE, ActivityHandle, Delta, GIT_DETECT_BUDGET, GIT_POLL_INTERVAL, Launch,
-    NewSession, SAVE_DEBOUNCE, SAVE_MAX_WAIT, SAVE_RETRY, SHUTDOWN_WAIT, Snapshot, Workspace,
-    WorkspaceConfig, WorkspaceError, parse_reported_cwd,
+    ACTIVITY_COALESCE, ActivityHandle, Delta, GIT_DETECT_BUDGET, GIT_POLL_INTERVAL,
+    LAUNCH_CONFIRM_TIMEOUT, Launch, NewSession, SAVE_DEBOUNCE, SAVE_MAX_WAIT, SAVE_RETRY,
+    SHUTDOWN_WAIT, Snapshot, Workspace, WorkspaceConfig, WorkspaceError, parse_reported_cwd,
 };
 pub use store::{PersistenceMode, WindowGeometry};
 

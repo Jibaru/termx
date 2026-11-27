@@ -23,10 +23,10 @@ use std::time::Instant;
 use common::{TIMEOUT, guarded, visible_text};
 use termx_core::pty::{ExitStatus, PtyCommand};
 use termx_core::session::{SessionId, SessionManager, SessionOptions, SessionSink};
-use termx_core::workspace::launch::{CLAUDE_NOT_FOUND_EXIT_CODE, LaunchRequest, Shell};
+use termx_core::workspace::launch::{CLAUDE_MISSING_EXIT_CODE, LaunchRequest, Shell};
 use termx_core::workspace::{
-    LaunchFailure, LaunchMode, Launcher, NewSession, SessionKey, SessionKind, SessionState,
-    Workspace, WorkspaceConfig,
+    LaunchFailure, LaunchMode, Launcher, NewSession, Session, SessionKey, SessionKind,
+    SessionState, Workspace, WorkspaceConfig,
 };
 
 /// What a session printed and how it ended.
@@ -208,6 +208,7 @@ impl Setup {
             command: None,
             claude_session_id: None,
             mode: LaunchMode::Fresh,
+            token: None,
         }
     }
 }
@@ -253,8 +254,6 @@ fn claude_is_found_through_the_profile_of_the_shell() {
                 "{shell:?} printed {output:?}"
             );
             assert_eq!(exit.code(), Some(7), "{shell:?} printed {output:?}");
-            // An exit code of the program itself is not a failure of termx.
-            assert_eq!(launcher.failure_for_exit(SessionKind::Claude, &exit), None);
             if cfg!(unix) {
                 let project = std::fs::canonicalize(setup.project()).unwrap();
                 assert!(
@@ -316,79 +315,215 @@ fn a_claude_that_is_an_alias_is_run_by_the_shell() {
     });
 }
 
+/// A workspace whose sessions run `claude_program` through `shell`.
+fn workspace_for(shell: Shell, claude_program: &str) -> Arc<Workspace> {
+    let mut config = WorkspaceConfig::in_memory();
+    config.launcher = Launcher::new(shell).claude_program(claude_program);
+    Arc::new(Workspace::open(config))
+}
+
+/// Starts a session of `kind` as the application does: through the
+/// workspace, with its output filtered by it. Returns the manager, the
+/// terminal and what records the output.
+fn start(
+    workspace: &Arc<Workspace>,
+    setup: &Setup,
+    kind: SessionKind,
+    command: Option<&str>,
+) -> (SessionManager, SessionId, Recorder, SessionKey) {
+    let mut new = NewSession::new(kind, setup.project());
+    new.command = command.map(str::to_owned);
+    let session = workspace.create_session(new).unwrap();
+    let launch = workspace
+        .begin_launch(&session.id, LaunchMode::Fresh)
+        .unwrap();
+    let recorder = Recorder {
+        report_to: Some((Arc::clone(workspace), session.id.clone(), launch.generation)),
+        ..Recorder::default()
+    };
+    let manager = SessionManager::new().unwrap();
+    let filter = workspace.output_filter(&session.id, &launch);
+    let terminal = manager
+        .create_filtered(
+            &SessionOptions::new(setup.isolate(launch.command)),
+            filter,
+            recorder.clone(),
+        )
+        .unwrap();
+    assert!(workspace.terminal_started(&session.id, launch.generation, terminal.as_u64()));
+    (manager, terminal, recorder, session.id)
+}
+
+/// Runs a session until it ends, as the application does. Returns what it
+/// printed, how its process ended and the session afterwards.
+fn run_session(
+    workspace: &Arc<Workspace>,
+    setup: &Setup,
+    kind: SessionKind,
+    command: Option<&str>,
+) -> (String, ExitStatus, Session) {
+    let (_manager, _terminal, recorder, key) = start(workspace, setup, kind, command);
+    let (output, exit) = recorder.wait_for_exit();
+    (output, exit, workspace.session(&key).unwrap())
+}
+
+/// The failure an ended session reports.
+fn failure_of(session: &Session) -> Option<LaunchFailure> {
+    match &session.state {
+        SessionState::Exited { failure, .. } => failure.clone(),
+        other => panic!("the session did not end: {other:?}"),
+    }
+}
+
 #[test]
 fn a_claude_that_is_not_installed_is_a_typed_failure_not_a_dead_terminal() {
     guarded(|| {
         let setup = Setup::new();
         for shell in shells() {
-            let launcher = Launcher::new(shell.clone()).claude_program(Setup::MISSING);
+            let workspace = workspace_for(shell.clone(), Setup::MISSING);
 
-            let command = launcher
-                .command(&setup.request(SessionKind::Claude))
-                .unwrap();
-            let (output, exit) = run(setup.isolate(command));
+            let (output, exit, session) =
+                run_session(&workspace, &setup, SessionKind::Claude, None);
 
             assert_eq!(
                 exit.code(),
-                Some(CLAUDE_NOT_FOUND_EXIT_CODE),
+                Some(CLAUDE_MISSING_EXIT_CODE),
                 "{shell:?} printed {output:?}"
             );
-            let failure = launcher
-                .failure_for_exit(SessionKind::Claude, &exit)
-                .expect("the exit was not recognised");
+            let failure = failure_of(&session).expect("the failure was not recognised");
             assert!(matches!(failure, LaunchFailure::ClaudeNotFound { .. }));
             assert!(failure.message().contains(Setup::MISSING));
+            assert_eq!(session.terminal_id, None);
+            // The markers never reach the terminal.
+            assert!(!output.contains("7703"), "{shell:?} printed {output:?}");
         }
     });
 }
 
 #[test]
-fn a_session_whose_claude_is_missing_ends_exited_with_the_failure() {
+fn a_program_that_exits_like_a_missing_claude_is_not_taken_for_one() {
+    guarded(|| {
+        let setup = Setup::new();
+        setup.install_stand_in();
+        for shell in shells() {
+            let workspace = workspace_for(shell.clone(), Setup::STAND_IN);
+
+            let (output, exit, session) =
+                run_session(&workspace, &setup, SessionKind::Claude, None);
+
+            assert!(
+                output.contains("stand-in-ran:"),
+                "{shell:?} printed {output:?}"
+            );
+            assert!(!output.contains("7703"), "{shell:?} printed {output:?}");
+            assert_eq!(exit.code(), Some(7), "{shell:?} printed {output:?}");
+            // The program ran and chose its exit code: not a failure.
+            assert_eq!(failure_of(&session), None, "{shell:?} printed {output:?}");
+        }
+
+        // The code that used to mean "not installed", from the program.
+        let name = "termx-test-claude-that-exits-113";
+        if cfg!(windows) {
+            std::fs::write(
+                setup.bin().join(format!("{name}.cmd")),
+                "@echo off\r\necho ran-and-exited\r\nexit /b 113\r\n",
+            )
+            .unwrap();
+        } else {
+            let path = setup.bin().join(name);
+            std::fs::write(&path, "#!/bin/sh\necho ran-and-exited\nexit 113\n").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+        for shell in shells() {
+            let workspace = workspace_for(shell.clone(), name);
+
+            let (output, exit, session) =
+                run_session(&workspace, &setup, SessionKind::Claude, None);
+
+            assert!(
+                output.contains("ran-and-exited"),
+                "{shell:?} printed {output:?}"
+            );
+            assert_eq!(exit.code(), Some(113), "{shell:?}");
+            assert_eq!(failure_of(&session), None, "{shell:?}");
+        }
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn a_profile_that_replaces_the_shell_is_reported() {
+    guarded(|| {
+        if !Path::new("/bin/zsh").is_file() || !Path::new("/bin/bash").is_file() {
+            return;
+        }
+        let setup = Setup::new();
+        setup.install_stand_in();
+        // The command never runs: zsh is replaced by a bare bash.
+        std::fs::write(setup.home().join(".zshrc"), "exec /bin/bash --norc -i\n").unwrap();
+        let mut config = WorkspaceConfig::in_memory();
+        config.launcher = Launcher::new(Shell::new("/bin/zsh")).claude_program(Setup::STAND_IN);
+        config.launch_confirm_timeout = std::time::Duration::from_millis(500);
+        let workspace = Arc::new(Workspace::open(config));
+
+        let (manager, terminal, recorder, key) =
+            start(&workspace, &setup, SessionKind::Claude, None);
+
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            let session = workspace.session(&key).unwrap();
+            if let Some(warning) = session.warning {
+                assert!(matches!(warning, LaunchFailure::LaunchUnconfirmed { .. }));
+                assert_eq!(session.state, SessionState::Running);
+                break;
+            }
+            assert!(Instant::now() < deadline, "no warning: {session:?}");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        manager.write(terminal, b"exit 0\r").unwrap();
+        let (output, _) = recorder.wait_for_exit();
+        assert!(!output.contains("stand-in-ran"), "{output:?}");
+        let session = workspace.session(&key).unwrap();
+        assert!(
+            matches!(
+                failure_of(&session),
+                Some(LaunchFailure::LaunchUnconfirmed { .. })
+            ),
+            "{session:?}"
+        );
+        assert_eq!(session.warning, None);
+    });
+}
+
+#[test]
+fn a_session_that_starts_its_command_is_confirmed() {
     guarded(|| {
         let setup = Setup::new();
         let shell = shells().remove(0);
         let mut config = WorkspaceConfig::in_memory();
-        config.launcher = Launcher::new(shell).claude_program(Setup::MISSING);
+        config.launcher = Launcher::new(shell);
+        config.launch_confirm_timeout = std::time::Duration::from_millis(200);
         let workspace = Arc::new(Workspace::open(config));
-        let manager = SessionManager::new().unwrap();
-        let session = workspace
-            .create_session(NewSession::new(SessionKind::Claude, setup.project()))
-            .unwrap();
-        assert_eq!(session.state, SessionState::Starting);
-
-        // What the application does to start a session.
-        let launch = workspace
-            .begin_launch(&session.id, LaunchMode::Fresh)
-            .unwrap();
-        let recorder = Recorder {
-            report_to: Some((
-                Arc::clone(&workspace),
-                session.id.clone(),
-                launch.generation,
-            )),
-            ..Recorder::default()
+        let line = if cfg!(windows) {
+            "Write-Output 'ready'; Start-Sleep 2"
+        } else {
+            "echo ready; sleep 2"
         };
-        let terminal = manager
-            .create(
-                &SessionOptions::new(setup.isolate(launch.command)),
-                recorder.clone(),
-            )
-            .unwrap();
-        assert!(workspace.terminal_started(&session.id, launch.generation, terminal.as_u64()));
-        recorder.wait_for_exit();
 
-        let after = workspace.session(&session.id).unwrap();
-        let SessionState::Exited {
-            code,
-            failure: Some(failure),
-            ..
-        } = after.state
-        else {
-            panic!("the session did not end with a failure: {:?}", after.state);
-        };
-        assert_eq!(code, Some(CLAUDE_NOT_FOUND_EXIT_CODE));
-        assert!(matches!(failure, LaunchFailure::ClaudeNotFound { .. }));
-        assert_eq!(after.terminal_id, None);
+        let (_manager, _terminal, recorder, key) =
+            start(&workspace, &setup, SessionKind::Background, Some(line));
+        recorder.wait_for_output("ready");
+        // Well past the timeout, the session still has no warning.
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        assert_eq!(workspace.session(&key).unwrap().warning, None);
+
+        let (output, _) = recorder.wait_for_exit();
+        assert!(!output.contains("7703"), "{output:?}");
+        assert_eq!(failure_of(&workspace.session(&key).unwrap()), None);
     });
 }
 
@@ -416,10 +551,6 @@ fn a_background_command_runs_with_the_environment_of_the_shell() {
             };
             assert!(output.contains(expected), "{shell:?} printed {output:?}");
             assert_eq!(exit.code(), Some(5), "{shell:?} printed {output:?}");
-            assert_eq!(
-                launcher.failure_for_exit(SessionKind::Background, &exit),
-                None
-            );
         }
     });
 }

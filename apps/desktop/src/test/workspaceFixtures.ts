@@ -24,6 +24,7 @@ export function session(id: SessionId, overrides: Partial<Session> = {}): Sessio
     lastActivityAt: 1_000,
     waitingSince: null,
     claudeSessionId: null,
+    warning: null,
     ...overrides,
   };
 }
