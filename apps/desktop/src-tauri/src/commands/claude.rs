@@ -19,8 +19,11 @@ impl From<IntegrationError> for Failure {
     fn from(error: IntegrationError) -> Self {
         let kind = match error.kind {
             IntegrationErrorKind::InvalidSettings => ErrorKind::InvalidSettings,
-            IntegrationErrorKind::Conflict => ErrorKind::SettingsConflict,
+            IntegrationErrorKind::Conflict | IntegrationErrorKind::Blocked => ErrorKind::Conflict,
             IntegrationErrorKind::SenderMissing => ErrorKind::SenderMissing,
+            IntegrationErrorKind::PermissionDenied => ErrorKind::PermissionDenied,
+            IntegrationErrorKind::StorageFull => ErrorKind::StorageFull,
+            IntegrationErrorKind::NotFound => ErrorKind::NotFound,
             _ => ErrorKind::Internal,
         };
         Self::new(kind, error.message)
@@ -66,7 +69,8 @@ pub fn get_claude_integration<R: Runtime>(
 /// # Errors
 ///
 /// `invalidSettings` when the settings of Claude Code are not valid JSON,
-/// `settingsConflict` when they declare another marketplace named termx,
+/// `conflict` when they declare another marketplace named termx or the
+/// user turned the plugin off, `permissionDenied` for a read-only file,
 /// `senderMissing` in a build without the hook sender.
 #[tauri::command(async)]
 pub fn preview_claude_integration(state: State<'_, ClaudeState>) -> CommandResult<ClaudePreview> {

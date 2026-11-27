@@ -65,8 +65,10 @@ pub enum ErrorKind {
     /// termx can change safely. termx changed nothing.
     InvalidSettings,
     /// The settings of Claude Code declare another marketplace named
-    /// `termx`.
-    SettingsConflict,
+    /// `termx`, or the user turned the plugin off: theirs to decide.
+    Conflict,
+    /// A file cannot be written: read-only, or not the user's.
+    PermissionDenied,
     /// The hook sender of termx (`termx-cli`) is not next to the
     /// application.
     SenderMissing,

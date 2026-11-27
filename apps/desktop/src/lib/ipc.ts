@@ -59,7 +59,8 @@ export type CommandErrorKind =
   | "invalidArgument"
   | "sessionRunning"
   | "invalidSettings"
-  | "settingsConflict"
+  | "conflict"
+  | "permissionDenied"
   | "senderMissing"
   | "internal";
 
@@ -74,7 +75,8 @@ export const COMMAND_ERROR_KINDS = [
   "invalidArgument",
   "sessionRunning",
   "invalidSettings",
-  "settingsConflict",
+  "conflict",
+  "permissionDenied",
   "senderMissing",
   "internal",
 ] as const satisfies readonly CommandErrorKind[];
@@ -869,14 +871,45 @@ export function quitShown(): Promise<void> {
 // `termx_core::claude` for exactly what it changes.
 
 /** Whether the plugin is installed. */
-export type ClaudePluginStatus = "notInstalled" | "installed" | "outdated" | "error";
+/**
+ * Whether the plugin is installed. `conflict`: the settings declare another
+ * marketplace named termx, or the user turned the plugin off; termx changes
+ * nothing, the user decides. `blocked`: installed, but Claude Code does not
+ * run its hooks (managed `allowManagedHooksOnly`, or `disableAllHooks`).
+ */
+export type ClaudePluginStatus =
+  "notInstalled" | "installed" | "outdated" | "conflict" | "blocked" | "error";
 
 export const CLAUDE_PLUGIN_STATUSES = [
   "notInstalled",
   "installed",
   "outdated",
+  "conflict",
+  "blocked",
   "error",
 ] as const satisfies readonly ClaudePluginStatus[];
+
+/** The kinds of `ClaudeIntegrationError`. */
+export type ClaudeIntegrationErrorKind =
+  | "invalidSettings"
+  | "conflict"
+  | "blocked"
+  | "senderMissing"
+  | "permissionDenied"
+  | "storageFull"
+  | "notFound"
+  | "io";
+
+export const CLAUDE_INTEGRATION_ERROR_KINDS = [
+  "invalidSettings",
+  "conflict",
+  "blocked",
+  "senderMissing",
+  "permissionDenied",
+  "storageFull",
+  "notFound",
+  "io",
+] as const satisfies readonly ClaudeIntegrationErrorKind[];
 
 /** What the user answered when asked whether to install the plugin. */
 export type ClaudeConsent = "unasked" | "accepted" | "declined";
@@ -887,15 +920,18 @@ export const CLAUDE_CONSENTS = [
   "declined",
 ] as const satisfies readonly ClaudeConsent[];
 
-/** Why the integration failed, with a message for the user. */
+/** Why the integration failed, or cannot run, with a message for the user. */
 export interface ClaudeIntegrationError {
   /**
    * `invalidSettings`: the settings of Claude Code are not valid JSON;
-   * `conflict`: they declare another marketplace named termx;
+   * `conflict`: another marketplace named termx, or the plugin turned off
+   * by the user; `blocked`: hooks are turned off by policy;
    * `senderMissing`: a build of termx without its hook sender;
-   * `io`: a file could not be read or written.
+   * `permissionDenied`: a read-only settings file; `storageFull`;
+   * `notFound`: a settings file that is a link to nothing; `io`: another
+   * failure to read or write.
    */
-  kind: "invalidSettings" | "conflict" | "senderMissing" | "io";
+  kind: ClaudeIntegrationErrorKind;
   message: string;
 }
 
@@ -929,6 +965,14 @@ export interface ClaudeIntegrationPreview {
   note?: string;
 }
 
+/** A notification of the system about a session. */
+export interface AttentionNotification {
+  title: string;
+  body: string;
+  /** The session a click on the notification brings to the front. */
+  sessionId: SessionId;
+}
+
 /** The payload of the `notification-clicked` event. */
 export interface NotificationClicked {
   sessionId: SessionId;
@@ -941,7 +985,7 @@ export function getClaudeIntegration(): Promise<ClaudeIntegration> {
 
 /**
  * What installing the plugin would change. Rejects with `invalidSettings`,
- * `settingsConflict` or `senderMissing` when it cannot be installed.
+ * `conflict`, `permissionDenied` or `senderMissing` when it cannot be installed.
  */
 export function previewClaudeIntegration(): Promise<ClaudeIntegrationPreview> {
   return call("preview_claude_integration");
@@ -966,12 +1010,8 @@ export function setClaudeConsent(consent: "accepted" | "declined"): Promise<void
  * Shows a notification of the system about a session. Clicking it brings
  * the window to the front and fires `notification-clicked`.
  */
-export function notify(notification: {
-  title: string;
-  body: string;
-  sessionId: SessionId;
-}): Promise<void> {
-  return call("notify", notification);
+export function notify(notification: AttentionNotification): Promise<void> {
+  return call("notify", { ...notification });
 }
 
 /**

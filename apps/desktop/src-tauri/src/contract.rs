@@ -86,6 +86,26 @@ fn claude_integration() -> Vec<IntegrationStatus> {
             error: None,
         },
         IntegrationStatus {
+            claude_installed: true,
+            plugin: PluginStatus::Conflict,
+            version: None,
+            consent: Consent::Accepted,
+            error: Some(IntegrationError {
+                kind: IntegrationErrorKind::Conflict,
+                message: "The termx plugin is turned off in ~/.claude/settings.json".to_owned(),
+            }),
+        },
+        IntegrationStatus {
+            claude_installed: true,
+            plugin: PluginStatus::Blocked,
+            version: Some("0.1.0+plugin.1".to_owned()),
+            consent: Consent::Accepted,
+            error: Some(IntegrationError {
+                kind: IntegrationErrorKind::Blocked,
+                message: "The managed settings of Claude Code allow managed hooks only".to_owned(),
+            }),
+        },
+        IntegrationStatus {
             claude_installed: false,
             plugin: PluginStatus::Error,
             version: None,
@@ -280,7 +300,8 @@ fn contract() -> Value {
         ErrorKind::InvalidArgument,
         ErrorKind::SessionRunning,
         ErrorKind::InvalidSettings,
-        ErrorKind::SettingsConflict,
+        ErrorKind::Conflict,
+        ErrorKind::PermissionDenied,
         ErrorKind::SenderMissing,
         ErrorKind::Internal,
     ]
@@ -356,7 +377,19 @@ fn contract() -> Value {
                 PluginStatus::NotInstalled,
                 PluginStatus::Installed,
                 PluginStatus::Outdated,
+                PluginStatus::Conflict,
+                PluginStatus::Blocked,
                 PluginStatus::Error,
+            ],
+            "integrationErrorKind": [
+                IntegrationErrorKind::InvalidSettings,
+                IntegrationErrorKind::Conflict,
+                IntegrationErrorKind::Blocked,
+                IntegrationErrorKind::SenderMissing,
+                IntegrationErrorKind::PermissionDenied,
+                IntegrationErrorKind::StorageFull,
+                IntegrationErrorKind::NotFound,
+                IntegrationErrorKind::Io,
             ],
             "consent": [Consent::Unasked, Consent::Accepted, Consent::Declined],
             "agentStatus": [

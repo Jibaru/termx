@@ -5,12 +5,14 @@ import {
   AGENT_STATUSES,
   type AgentState,
   CLAUDE_CONSENTS,
+  CLAUDE_INTEGRATION_ERROR_KINDS,
   CLAUDE_PLUGIN_STATUSES,
   type ClaudeChange,
   type ClaudeIntegrationPreview,
   type ClaudeConsent,
   type ClaudeIntegration,
   type ClaudeIntegrationError,
+  type ClaudeIntegrationErrorKind,
   type ClaudePluginStatus,
   type NotificationClicked,
   type AgentStatus,
@@ -230,7 +232,8 @@ export const EXHAUSTIVE: [
   Exhaustive<AgentStatus, typeof AGENT_STATUSES>,
   Exhaustive<ClaudePluginStatus, typeof CLAUDE_PLUGIN_STATUSES>,
   Exhaustive<ClaudeConsent, typeof CLAUDE_CONSENTS>,
-] = [true, true, true, true, true, true, true, true, true, true, true, true, true];
+  Exhaustive<ClaudeIntegrationErrorKind, typeof CLAUDE_INTEGRATION_ERROR_KINDS>,
+] = [true, true, true, true, true, true, true, true, true, true, true, true, true, true];
 
 type Json = Record<string, unknown>;
 
@@ -357,6 +360,7 @@ describe("the contract with the Rust side", () => {
       agentStatus: AGENT_STATUSES,
       pluginStatus: CLAUDE_PLUGIN_STATUSES,
       consent: CLAUDE_CONSENTS,
+      integrationErrorKind: CLAUDE_INTEGRATION_ERROR_KINDS,
     });
     expect(contract.persistence.map((persistence) => persistence.mode)).toEqual(PERSISTENCE_MODES);
     expect(contract.persistence.map(keysOf)).toEqual([
