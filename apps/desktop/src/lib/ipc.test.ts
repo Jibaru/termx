@@ -8,6 +8,8 @@ import {
   applyWorkspaceDelta,
   closePane,
   closeSession,
+  removeSession,
+  stopSession,
   type CommandError,
   createSession,
   createSiblingSession,
@@ -172,6 +174,8 @@ describe("session commands", () => {
     await reportSessionTitle("s-abc", "\u2733 Fix the login");
     await reportSessionCwd("s-abc", "file://host/work/app");
     await closeSession("s-abc");
+    await stopSession("s-abc");
+    await removeSession("s-abc");
 
     expect(ipc.calls).toEqual([
       { command: "session_create", args: { request: { kind: "shell" } } },
@@ -196,6 +200,8 @@ describe("session commands", () => {
       { command: "session_report_title", args: { id: "s-abc", title: "\u2733 Fix the login" } },
       { command: "session_report_cwd", args: { id: "s-abc", cwd: "file://host/work/app" } },
       { command: "session_close", args: { id: "s-abc" } },
+      { command: "session_stop", args: { id: "s-abc" } },
+      { command: "session_remove", args: { id: "s-abc" } },
     ]);
   });
 

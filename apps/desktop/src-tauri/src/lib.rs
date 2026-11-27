@@ -31,6 +31,8 @@ macro_rules! command_handlers {
             crate::commands::session::project_reorder,
             crate::commands::session::session_start,
             crate::commands::session::session_close,
+            crate::commands::session::session_stop,
+            crate::commands::session::session_remove,
             crate::commands::session::session_report_title,
             crate::commands::session::session_report_cwd,
             crate::commands::session::session_write,
