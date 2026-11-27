@@ -10,10 +10,12 @@ versioned_files = [
   "Cargo.toml",
   # The `termx-core` entry in `[workspace.dependencies]`.
   { path = "Cargo.toml", dependency = "termx-core" },
+  { path = "Cargo.toml", dependency = "termx-protocol" },
   # The workspace members recorded in the lockfile. Add an entry for every new
   # crate, otherwise `cargo --locked` fails after a release.
   { path = "Cargo.lock", dependency = "termx-core" },
   { path = "Cargo.lock", dependency = "termx-desktop" },
+  { path = "Cargo.lock", dependency = "termx-protocol" },
   # A regex is used for the package.json files instead of Knope's built-in
   # support so that only the version changes and Prettier formatting is kept.
   { path = "package.json", regex = '(?m)^  "version": "(?<version>[^"]+)"' },

@@ -31,6 +31,15 @@ tracing-subscriber = { version = "0.3.23", default-features = false, features = 
 flate2 = "1.1.11"
 zip = { version = "9.8.2", default-features = false, features = ["deflate-flate2"] }
 
+# The local socket the hooks of Claude Code talk to (`socket`): Unix
+# domain sockets and named pipes with timeouts, on one thread. Already part
+# of the dependency tree, through Tauri.
+termx-protocol = { workspace = true }
+tokio = { version = "1.54.1", default-features = false, features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+# The ticket of the socket, from the random generator of the system.
+# Already part of the dependency tree.
+getrandom = "0.3.4"
+
 # Used on Unix to wait on the PTY and a wake-up pipe at the same time, so the
 # reader thread can always be stopped. Already part of the dependency tree
 # through portable-pty.
@@ -57,6 +66,7 @@ tempfile = "3.27.0"
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
     "Win32_Security",
+    "Win32_Security_Authorization",
     "Win32_System_Console",
     "Win32_System_JobObjects",
     "Win32_System_Threading",

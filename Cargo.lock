@@ -4585,6 +4585,7 @@ version = "0.0.0"
 dependencies = [
  "filedescriptor",
  "flate2",
+ "getrandom 0.3.4",
  "libc",
  "os_info",
  "portable-pty",
@@ -4595,8 +4596,10 @@ dependencies = [
  "serde_json",
  "sys-locale",
  "tempfile",
+ "termx-protocol",
  "thiserror 2.0.21",
  "time",
+ "tokio",
  "tracing",
  "tracing-log",
  "tracing-subscriber",
@@ -4623,6 +4626,16 @@ dependencies = [
  "tauri-plugin-wdio-webdriver",
  "tempfile",
  "termx-core",
+]
+
+[[package]]
+name = "termx-protocol"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
