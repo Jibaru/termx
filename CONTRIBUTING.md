@@ -221,8 +221,13 @@ The rules that keep the suite deterministic:
   or the time is up, and say what the terminal showed when it is.
 - **Never repeat a test.** A test that fails once in a while is a failing
   test: find out why. The only thing that is repeated is a start of the
-  application that never got as far as a WebDriver session, and CI reports
-  every one of those.
+  application whose WebDriver server lost its port to another process, at
+  most once per run of the suite; a second one fails the test, and CI
+  annotates every one. An application that exits while it starts is a
+  failure, never repeated, with what it printed attached. When a terminal
+  does not get to its prompt, the failure also describes the page
+  (`startup-diagnostics.json` in the directory of the run): visibility,
+  focus, status of the session, what the buffer of xterm.js holds.
 - **Tell your output apart with a token.** The tests of a file share a
   terminal, and the command line you type is on screen too. Wait for a line
   that _is_ `terminal.token()`, not for one that contains a fixed word.

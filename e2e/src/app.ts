@@ -1,5 +1,13 @@
 import { type ChildProcess, spawn } from "node:child_process";
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, rmSync } from "node:fs";
+import {
+  appendFileSync,
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  rmSync,
+} from "node:fs";
 import { mkdtemp, readdir, readFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -18,14 +26,29 @@ export const ARTIFACTS_DIR = fileURLToPath(new URL("../artifacts", import.meta.u
 /**
  * One line per start of the application that had to be repeated. The suite
  * never repeats a test; this file is how repeated starts stay visible.
+ * `run.mjs` empties it when a run of the suite begins.
  */
 export const STARTUP_RETRIES_FILE = join(ARTIFACTS_DIR, "startup-retries.log");
 
 /** How long the application may take to start and show its window. */
 const STARTUP_TIMEOUT_MS = 90_000;
 
-/** How often the application is started before a test is failed for it. */
-const STARTUP_ATTEMPTS = 3;
+/**
+ * How many starts may be repeated in one run of the suite, over all its
+ * files. A start is only repeated for a race on the port of the WebDriver
+ * server (see `App.start`), which the suite cannot rule out: it picks a free
+ * port, and something else can take it before the application does. That
+ * happening once in a run is bad luck; twice is something to look at, so
+ * the second fails the test instead.
+ */
+const MAX_REPEATED_STARTS_PER_RUN = 1;
+
+/**
+ * What the WebDriver server logs when its port was taken
+ * (`tauri-plugin-wdio-webdriver`, `server/mod.rs`). The application keeps
+ * running without a server.
+ */
+const PORT_TAKEN_LOG = "Failed to bind WebDriver server";
 
 /** The identifier of the application, in `tauri.conf.json`. */
 export const APP_IDENTIFIER = "io.github.jibaru.termx";
@@ -173,11 +196,14 @@ export class App {
    * Starts the application and waits until its terminal runs a shell that
    * is at its prompt.
    *
-   * A start that does not get as far as a WebDriver session (the process
-   * does not start, or its WebDriver server does not answer) is repeated,
-   * and recorded in `STARTUP_RETRIES_FILE`. Nothing after that point is
-   * ever repeated: a page that does not load, a window that stays empty or
-   * a shell that does not start fails the test.
+   * A start is repeated only when the WebDriver server of the application
+   * could not listen on the port the suite picked, a race the suite cannot
+   * rule out, and at most `MAX_REPEATED_STARTS_PER_RUN` times in a run of
+   * the suite. Every repeated start is recorded in `STARTUP_RETRIES_FILE`.
+   * Anything else fails the test: an application that exits while it
+   * starts, with what it printed and logged; a server that never answers;
+   * and everything after a WebDriver session exists (a page that does not
+   * load, a window that stays empty, a shell that does not start).
    */
   static async launch(name: string, options: LaunchOptions = {}): Promise<App> {
     const binary = binaryPath();
@@ -186,19 +212,25 @@ export class App {
         `${binary} does not exist. Build the application for the suite with "pnpm e2e:build".`,
       );
     }
-    let failure: unknown;
-    for (let attempt = 1; attempt <= STARTUP_ATTEMPTS; attempt += 1) {
+    for (let attempt = 1; ; attempt += 1) {
       const runName = attempt === 1 ? name : `${name}-attempt-${String(attempt)}`;
       let app: App;
       try {
         app = await App.start(binary, runName, options);
       } catch (error) {
-        if (!(error instanceof StartupError)) throw error;
-        failure = error.cause;
-        const message = `${new Date().toISOString()} ${name}: start ${String(attempt)} of ${String(STARTUP_ATTEMPTS)} failed: ${String(error.cause)}`;
-        console.warn(message);
+        if (!(error instanceof PortRace)) throw error;
+        const repeated = repeatedStarts();
+        const message = `${new Date().toISOString()} ${name}: start ${String(attempt)} failed: ${error.message}`;
         mkdirSync(ARTIFACTS_DIR, { recursive: true });
         appendFileSync(STARTUP_RETRIES_FILE, `${message}\n`);
+        if (repeated >= MAX_REPEATED_STARTS_PER_RUN) {
+          throw new Error(
+            `${message}. ${String(repeated)} start(s) were already repeated in this run of the suite, ` +
+              `and at most ${String(MAX_REPEATED_STARTS_PER_RUN)} may be: see ${STARTUP_RETRIES_FILE}`,
+            { cause: error },
+          );
+        }
+        console.warn(`${message}; starting it again`);
         continue;
       }
       // From here on a failure is a failure of the application.
@@ -219,7 +251,6 @@ export class App {
         throw error;
       }
     }
-    throw new Error(`the application could not be started: ${String(failure)}`);
   }
 
   private static async start(binary: string, name: string, options: LaunchOptions): Promise<App> {
@@ -232,7 +263,8 @@ export class App {
 
     // Everything the application prints, which in a debug build includes
     // its log records.
-    const output = openSync(join(runDir, "app-output.log"), "w");
+    const outputPath = join(runDir, "app-output.log");
+    const output = openSync(outputPath, "w");
     const child = spawn(binary, [], {
       cwd: home,
       env: environment(home, logDir, port),
@@ -258,13 +290,35 @@ export class App {
         async () => {
           if (spawnError) throw spawnError;
           if (exited) {
-            throw new Error(`the application exited while starting: ${JSON.stringify(exited)}`);
+            throw new Error(
+              `the application exited while starting (${JSON.stringify(exited)})\n\n` +
+                outputOfRun(outputPath, logDir),
+            );
+          }
+          if (readText(outputPath).includes(PORT_TAKEN_LOG)) {
+            throw new PortRace(`its WebDriver server could not listen on port ${String(port)}`);
           }
           return isReady(origin);
         },
-        { what: "the WebDriver server of the application", timeoutMs: STARTUP_TIMEOUT_MS },
+        {
+          what: "the WebDriver server of the application",
+          timeoutMs: STARTUP_TIMEOUT_MS,
+          describe: () => outputOfRun(outputPath, logDir),
+        },
       );
-      const driver = await WebDriver.connect(origin);
+      let driver: WebDriver;
+      try {
+        driver = await WebDriver.connect(origin);
+      } catch (error) {
+        // `fetch` rejects with a TypeError when the connection itself
+        // fails: the server that answered is gone, or was not ours.
+        if (error instanceof TypeError && !exited) {
+          throw new PortRace(`its WebDriver server stopped answering: ${String(error.cause)}`, {
+            cause: error,
+          });
+        }
+        throw error;
+      }
       return new App(name, child, driver, new Terminal(driver), home, logDir);
     } catch (error) {
       child.kill("SIGKILL");
@@ -273,7 +327,7 @@ export class App {
         timeoutMs: EXIT_TIMEOUT_MS,
       }).catch(() => undefined);
       removeHome(home);
-      throw new StartupError(error);
+      throw error;
     }
   }
 
@@ -321,12 +375,44 @@ export class App {
   }
 }
 
-/** A start of the application that did not reach a WebDriver session. */
-class StartupError extends Error {
-  constructor(override readonly cause: unknown) {
-    super("the application did not start");
-    this.name = "StartupError";
+/**
+ * A start that lost a race for the port of the WebDriver server: the only
+ * kind of start that is repeated.
+ */
+class PortRace extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "PortRace";
   }
+}
+
+/** How many starts were repeated so far in this run of the suite. */
+function repeatedStarts(): number {
+  return readText(STARTUP_RETRIES_FILE)
+    .split("\n")
+    .filter((line) => line !== "").length;
+}
+
+function readText(path: string): string {
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    return "";
+  }
+}
+
+/** The last lines of a text, to quote in a failure. */
+function tail(text: string, lines: number): string {
+  return text.split("\n").slice(-lines).join("\n");
+}
+
+/** What the application printed and logged, to attach to a failure. */
+function outputOfRun(outputPath: string, logDir: string): string {
+  return [
+    `The last lines the application printed (${outputPath}):`,
+    tail(readText(outputPath), 60) || "(nothing)",
+    `Its log files are in ${logDir}.`,
+  ].join("\n");
 }
 
 /**

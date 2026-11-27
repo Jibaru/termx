@@ -141,8 +141,10 @@ jobs:
             env -u TERMX_ALLOW_E2E \
             cargo check -p termx-desktop --features e2e,tauri/custom-protocol --locked
 
-      # A failed test is never run again: only starting the application is
-      # (see e2e/src/app.ts), and every repeated start is reported below.
+      # A failed test is never run again. Only a start of the application
+      # that lost the port of its WebDriver server to another process is,
+      # at most once per run of the suite (see e2e/src/app.ts); a second one
+      # fails the run, and every one is reported below.
       - name: Run the end-to-end suite
         env:
           REPEAT: ${{ inputs.repeat || 1 }}
@@ -154,7 +156,12 @@ jobs:
           failed=0
           for ((run = 1; run <= REPEAT; run++)); do
             echo "::group::Run $run of $REPEAT"
-            if ! "${launcher[@]}" pnpm e2e; then
+            status=0
+            "${launcher[@]}" pnpm e2e || status=$?
+            if [[ -f e2e/artifacts/startup-retries.log ]]; then
+              sed "s/^/run $run: /" e2e/artifacts/startup-retries.log >>e2e/startup-retries-all.log
+            fi
+            if ((status != 0)); then
               failed=$((failed + 1))
               # Keep what this run left behind: the next one starts over.
               if [[ -d e2e/artifacts ]]; then
@@ -166,16 +173,19 @@ jobs:
           echo "Failed runs: $failed of $REPEAT" | tee -a "$GITHUB_STEP_SUMMARY"
           ((failed == 0))
 
+      # Each one is also an annotation of the run, so that it is seen even
+      # when everything passed.
       - name: Report the starts of the application that were repeated
         if: always()
         run: |
-          shopt -s nullglob
-          logs=(e2e/artifacts*/startup-retries.log)
-          if ((${#logs[@]} == 0)); then
-            echo "Repeated starts of the application: 0" | tee -a "$GITHUB_STEP_SUMMARY"
-          else
-            echo "Repeated starts of the application: $(cat "${logs[@]}" | wc -l)" | tee -a "$GITHUB_STEP_SUMMARY"
-            cat "${logs[@]}"
+          log=e2e/startup-retries-all.log
+          count=0
+          [[ -f "$log" ]] && count=$(wc -l <"$log")
+          echo "Repeated starts of the application: $count" | tee -a "$GITHUB_STEP_SUMMARY"
+          if ((count > 0)); then
+            while IFS= read -r line; do
+              echo "::warning title=Repeated start of the application::$line"
+            done <"$log"
           fi
 
       # The logs of the application, what the terminal showed and a
