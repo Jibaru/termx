@@ -13,7 +13,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "dev": "pnpm --filter @termx/desktop tauri dev",
+    "dev": "cargo build -p termx-cli && pnpm --filter @termx/desktop tauri dev",
     "build": "pnpm --filter @termx/desktop build",
     "typecheck": "pnpm --filter @termx/desktop typecheck && pnpm --filter @termx/e2e typecheck",
     "tauri": "pnpm --filter @termx/desktop tauri",

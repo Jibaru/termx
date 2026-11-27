@@ -34,6 +34,13 @@ macro_rules! command_handlers {
             crate::commands::app::app_quit_cancel,
             crate::commands::app::app_quit_shown,
             crate::commands::app::menu_set_shortcuts,
+            crate::commands::claude::claude_integration_status,
+            crate::commands::claude::claude_integration_preview,
+            crate::commands::claude::claude_integration_install,
+            crate::commands::claude::claude_integration_uninstall,
+            crate::commands::claude::claude_integration_set_consent,
+            crate::commands::claude::notify,
+            crate::commands::claude::set_attention_badge,
             crate::commands::diagnostics::log_frontend_event,
             crate::commands::diagnostics::open_log_folder,
             crate::commands::diagnostics::export_diagnostics,
@@ -67,6 +74,7 @@ macro_rules! command_handlers {
     };
 }
 
+pub mod claude;
 pub mod commands;
 #[cfg(test)]
 mod contract;
@@ -75,6 +83,7 @@ mod e2e;
 #[cfg(test)]
 mod ipc_tests;
 pub mod logging;
+pub mod notify;
 pub mod quit;
 pub mod terminal;
 #[cfg(test)]
@@ -94,6 +103,12 @@ pub fn run() {
 
     raise_open_file_limit();
 
+    let workspace_state = workspace::WorkspaceState::start();
+    let claude_state = claude::ClaudeState::start(
+        workspace_state.workspace(),
+        workspace::state_dir().as_deref(),
+    );
+
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
         // Only used from Rust, for the folder picker: the webview is given
@@ -103,7 +118,8 @@ pub fn run() {
         .manage(state)
         .manage(terminal::TerminalState::start())
         .manage(quit::QuitState::default())
-        .manage(workspace::WorkspaceState::start())
+        .manage(workspace_state)
+        .manage(claude_state)
         .invoke_handler(command_handlers!())
         .setup(|app| {
             // Before the window shows anything, so that it does not jump.
@@ -180,6 +196,10 @@ pub fn run() {
             if let Some(terminal) = app.try_state::<terminal::TerminalState>() {
                 terminal.shutdown();
             }
+            // No more reports from the hooks.
+            if let Some(claude) = app.try_state::<claude::ClaudeState>() {
+                claude.shutdown();
+            }
             // Then the workspace, which saves what is to be restored.
             if let Some(workspace) = app.try_state::<workspace::WorkspaceState>() {
                 workspace.shutdown();
@@ -205,7 +225,7 @@ fn raise_open_file_limit() {
 }
 
 /// Label of the window of the application, as in `tauri.conf.json`.
-const MAIN_WINDOW: &str = "main";
+pub(crate) const MAIN_WINDOW: &str = "main";
 
 /// Lets go of the page of the window `label`, which is loading again: its
 /// subscription to the workspace ends, its terminals keep running.

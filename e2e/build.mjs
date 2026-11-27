@@ -7,6 +7,14 @@
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
+// The hook sender first: the application finds it next to itself.
+const sender = spawnSync("cargo", ["build", "-p", "termx-cli", "--locked"], {
+  cwd: fileURLToPath(new URL("..", import.meta.url)),
+  stdio: "inherit",
+});
+if (sender.error) throw sender.error;
+if (sender.status !== 0) process.exit(sender.status ?? 1);
+
 const result = spawnSync(
   "cargo",
   ["build", "-p", "termx-desktop", "--features", "e2e,tauri/custom-protocol", "--locked"],

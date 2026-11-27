@@ -48,6 +48,9 @@ impl Harness {
             .manage(TerminalState::start())
             .manage(crate::quit::QuitState::default())
             .manage(state)
+            .manage(crate::claude::ClaudeState::with_integration(
+                termx_core::claude::Integration::new(claude_paths(home)),
+            ))
             .invoke_handler(command_handlers!())
             .build(mock_context(noop_assets()))
             .expect("the mock application could not be built");
@@ -109,6 +112,22 @@ impl Harness {
 }
 
 /// A channel as the webview passes it: Tauri recognises the text.
+/// Where the integration of the harness keeps everything: inside `home`,
+/// never in the configuration of whoever runs the tests.
+fn claude_paths(home: &Path) -> termx_core::claude::Paths {
+    let sender = home.join("app").join(termx_core::claude::SENDER);
+    let _ = std::fs::create_dir_all(sender.parent().unwrap());
+    let _ = std::fs::write(&sender, b"sender");
+    termx_core::claude::Paths {
+        config_dir: home.join("claude-config"),
+        plugin_dir: home.join("state").join("claude-plugin"),
+        consent_file: Some(home.join("state").join("claude-integration.json")),
+        sender,
+        home: Some(home.to_owned()),
+        search_path: None,
+    }
+}
+
 fn channel(id: u32) -> Value {
     json!(format!("__CHANNEL__:{id}"))
 }
@@ -508,6 +527,86 @@ fn a_command_that_fails_rejects_with_its_name_and_a_message() {
     // An identifier that is not one is refused before the command runs.
     assert!(
         app.invoke("session_close", json!({ "id": "../etc" }))
+            .is_err()
+    );
+}
+
+#[test]
+fn the_claude_code_integration_is_previewed_installed_and_removed() {
+    let home = tempfile::tempdir().unwrap();
+    let app = Harness::new(home.path());
+
+    let status = app.ok("claude_integration_status", json!({}));
+    assert_eq!(status["plugin"], "notInstalled");
+    assert_eq!(status["consent"], "unasked");
+    assert!(status["claudeInstalled"].is_boolean());
+
+    let preview = app.ok("claude_integration_preview", json!({}));
+    let changes = preview["changes"].as_array().unwrap();
+    assert!(!changes.is_empty());
+    assert!(
+        changes
+            .iter()
+            .all(|change| change["path"].as_str().unwrap().starts_with('~'))
+    );
+
+    app.ok(
+        "claude_integration_set_consent",
+        json!({ "consent": "declined" }),
+    );
+    assert_eq!(
+        app.ok("claude_integration_status", json!({}))["consent"],
+        "declined"
+    );
+
+    app.ok("claude_integration_install", json!({}));
+    let status = app.ok("claude_integration_status", json!({}));
+    assert_eq!(status["plugin"], "installed");
+    assert_eq!(status["consent"], "accepted");
+    assert!(status["version"].is_string());
+    assert!(
+        home.path()
+            .join("claude-config")
+            .join("settings.json")
+            .exists()
+    );
+
+    app.ok("claude_integration_uninstall", json!({}));
+    let status = app.ok("claude_integration_status", json!({}));
+    assert_eq!(status["plugin"], "notInstalled");
+    assert_eq!(status["consent"], "declined");
+
+    // Settings that are not JSON are refused with a kind of their own.
+    std::fs::write(
+        home.path().join("claude-config").join("settings.json"),
+        "{ nope",
+    )
+    .unwrap();
+    let refused = app
+        .invoke("claude_integration_install", json!({}))
+        .unwrap_err();
+    assert_eq!(refused["kind"], "invalidSettings");
+    assert!(
+        app.invoke(
+            "claude_integration_set_consent",
+            json!({ "consent": "maybe" })
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn the_attention_badge_takes_a_count() {
+    let home = tempfile::tempdir().unwrap();
+    let app = Harness::new(home.path());
+
+    // The mock runtime has no Dock: what matters is that the call is read.
+    assert!(
+        app.ok("set_attention_badge", json!({ "count": 3 }))
+            .is_boolean()
+    );
+    assert!(
+        app.invoke("set_attention_badge", json!({ "count": -1 }))
             .is_err()
     );
 }

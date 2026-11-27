@@ -103,6 +103,17 @@ pub fn state_dir_from_env(
     state_dir_for(os, home, local_data.as_deref(), xdg_state_home.as_deref())
 }
 
+/// The state directory of this run: [`state_dir_from_env`] for this
+/// process.
+#[must_use]
+pub fn state_dir() -> Option<PathBuf> {
+    state_dir_from_env(
+        std::env::consts::OS,
+        |name| std::env::var_os(name),
+        std::env::home_dir().as_deref(),
+    )
+}
+
 /// Application state for the workspace, managed by Tauri.
 pub struct WorkspaceState {
     workspace: Arc<Workspace>,
@@ -119,11 +130,7 @@ impl WorkspaceState {
     #[must_use]
     pub fn start() -> Self {
         let home = std::env::home_dir();
-        let dir = state_dir_from_env(
-            std::env::consts::OS,
-            |name| std::env::var_os(name),
-            home.as_deref(),
-        );
+        let dir = state_dir();
         let config = match dir {
             Some(dir) => WorkspaceConfig::new(dir),
             None => {

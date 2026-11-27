@@ -61,6 +61,15 @@ pub enum ErrorKind {
     InvalidArgument,
     /// The session is running, and the operation needs one that is not.
     SessionRunning,
+    /// The settings of Claude Code are not valid JSON, or not in a shape
+    /// termx can change safely. termx changed nothing.
+    InvalidSettings,
+    /// The settings of Claude Code declare another marketplace named
+    /// `termx`.
+    SettingsConflict,
+    /// The hook sender of termx (`termx-cli`) is not next to the
+    /// application.
+    SenderMissing,
     /// Anything else, including a command that panicked.
     Internal,
 }
