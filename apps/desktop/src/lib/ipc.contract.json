@@ -37,7 +37,8 @@
         "description": "Set \"termx@termx\" to true in \"enabledPlugins\".",
         "path": "~/.claude/settings.json"
       }
-    ]
+    ],
+    "note": "Your existing settings and hooks are kept as they are: termx adds two entries to settings.json."
   },
   "commandErrors": [
     {

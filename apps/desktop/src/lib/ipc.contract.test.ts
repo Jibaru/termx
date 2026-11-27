@@ -7,6 +7,7 @@ import {
   CLAUDE_CONSENTS,
   CLAUDE_PLUGIN_STATUSES,
   type ClaudeChange,
+  type ClaudeIntegrationPreview,
   type ClaudeConsent,
   type ClaudeIntegration,
   type ClaudeIntegrationError,
@@ -191,6 +192,11 @@ const CLAUDE_CHANGE_KEYS = {
   path: true,
   description: true,
 } satisfies Record<keyof ClaudeChange, true>;
+
+const CLAUDE_PREVIEW_KEYS = {
+  changes: true,
+  note: true,
+} satisfies Record<keyof ClaudeIntegrationPreview, true>;
 
 const NOTIFICATION_CLICKED_KEYS = {
   sessionId: true,
@@ -388,8 +394,9 @@ describe("the contract with the Rust side", () => {
     }
     expect(statuses.some((status) => status.version !== undefined)).toBe(true);
     expect(statuses.some((status) => status.error !== undefined)).toBe(true);
-    const preview = contract.claudePreview as { changes: unknown[] };
-    expect(keysOf(preview)).toEqual(["changes"]);
+    const preview = contract.claudePreview as { changes: unknown[]; note?: unknown };
+    expectKeys(preview, CLAUDE_PREVIEW_KEYS);
+    expect(typeof preview.note).toBe("string");
     for (const change of preview.changes) expectKeys(change, CLAUDE_CHANGE_KEYS);
     expectKeys(contract.notificationClicked, NOTIFICATION_CLICKED_KEYS);
   });

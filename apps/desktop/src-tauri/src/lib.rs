@@ -34,11 +34,11 @@ macro_rules! command_handlers {
             crate::commands::app::app_quit_cancel,
             crate::commands::app::app_quit_shown,
             crate::commands::app::menu_set_shortcuts,
-            crate::commands::claude::claude_integration_status,
-            crate::commands::claude::claude_integration_preview,
-            crate::commands::claude::claude_integration_install,
-            crate::commands::claude::claude_integration_uninstall,
-            crate::commands::claude::claude_integration_set_consent,
+            crate::commands::claude::get_claude_integration,
+            crate::commands::claude::preview_claude_integration,
+            crate::commands::claude::install_claude_integration,
+            crate::commands::claude::uninstall_claude_integration,
+            crate::commands::claude::set_claude_consent,
             crate::commands::claude::notify,
             crate::commands::claude::set_attention_badge,
             crate::commands::diagnostics::log_frontend_event,
@@ -129,6 +129,7 @@ pub fn run() {
             ) {
                 workspace::restore_window(&window, state.workspace());
             }
+            claude::ClaudeState::watch(app.handle());
             // The menu bar of a Mac application, without the Close Window
             // item that would bind Cmd+W to ending every session.
             #[cfg(target_os = "macos")]

@@ -8,14 +8,17 @@
 //! socket (it could not be created), termx works as before, without agent
 //! states.
 //!
-//! It also owns the [`Integration`] behind the `claude_*` commands. When
-//! the user accepted the plugin, a plugin left by another version of termx
-//! is upgraded at start, on a thread of its own.
+//! It also owns the [`Integration`] behind the commands of the
+//! integration ([`crate::commands::claude`]). Once the application runs,
+//! [`ClaudeState::watch`] upgrades a plugin left by another version of
+//! termx (when the user accepted it) and looks again every
+//! [`CHECK_INTERVAL`] for changes made elsewhere.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
-use termx_core::claude::{Integration, Paths};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
+use termx_core::claude::{Integration, IntegrationStatus, Paths};
 use termx_core::diagnostics::tracing::{info, warn};
 use termx_core::socket::{Server, ServerConfig};
 use termx_core::workspace::{AgentChannel, SessionKey, Workspace, WorkspaceError};
@@ -25,7 +28,14 @@ use termx_protocol::{ErrorKind, Op, Response};
 pub struct ClaudeState {
     integration: Integration,
     server: Mutex<Option<Server>>,
+    /// The status the window was last given, to tell it when it changes.
+    last: Mutex<Option<IntegrationStatus>>,
 }
+
+/// The event the window receives, without a payload, whenever the plugin is installed, upgraded or removed, the answer of the
+/// user changes, or a check finds that something else changed them (the
+/// settings edited by hand).
+pub const CHANGED_EVENT: &str = "claude-integration-changed";
 
 impl ClaudeState {
     /// Starts the socket for `workspace`, and prepares the installer with
@@ -58,18 +68,18 @@ impl ClaudeState {
             }
         };
 
-        let state = Self {
+        Self {
+            last: Mutex::new(Some(integration.status())),
             integration,
             server: Mutex::new(server),
-        };
-        state.upgrade_in_background();
-        state
+        }
     }
 
     /// The integration at `integration`, without a socket: for tests.
     #[must_use]
     pub fn with_integration(integration: Integration) -> Self {
         Self {
+            last: Mutex::new(Some(integration.status())),
             integration,
             server: Mutex::new(None),
         }
@@ -79,6 +89,23 @@ impl ClaudeState {
     #[must_use]
     pub fn integration(&self) -> &Integration {
         &self.integration
+    }
+
+    /// The status now. When it differs from the one last read (or the one
+    /// at start), the window is told with [`CHANGED_EVENT`].
+    pub fn check<R: Runtime>(&self, app: &AppHandle<R>) -> IntegrationStatus {
+        let status = self.integration.status();
+        let previous = self
+            .last
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .replace(status.clone());
+        if previous.is_some_and(|previous| previous != status)
+            && let Err(error) = app.emit(CHANGED_EVENT, ())
+        {
+            warn!(error = %error, "the window could not be told that the claude code integration changed");
+        }
+        status
     }
 
     /// Closes the socket. Called when the application exits.
@@ -91,26 +118,41 @@ impl ClaudeState {
         drop(server);
     }
 
-    /// Brings an installed plugin up to date, when the user accepted it.
-    fn upgrade_in_background(&self) {
-        if self.integration.consent() != termx_core::claude::Consent::Accepted {
-            return;
-        }
-        let integration = self.integration.clone();
+    /// Watches the integration, on a thread of its own, once the
+    /// application runs: brings an installed plugin up to date when the
+    /// user accepted it, then checks every [`CHECK_INTERVAL`] whether
+    /// something else changed it (the settings edited by hand, Claude Code
+    /// installed), telling the window with [`CHANGED_EVENT`].
+    pub fn watch<R: Runtime>(app: &AppHandle<R>) {
+        let app = app.clone();
         let spawned = std::thread::Builder::new()
-            .name("termx-claude-upgrade".to_owned())
-            .spawn(move || match integration.upgrade() {
-                Ok(true) => info!("claude code plugin upgraded"),
-                Ok(false) => {}
-                Err(error) => {
-                    warn!(kind = ?error.kind, "the claude code plugin could not be upgraded");
+            .name("termx-claude-watch".to_owned())
+            .spawn(move || {
+                let Some(state) = app.try_state::<Self>() else {
+                    return;
+                };
+                if state.integration.consent() == termx_core::claude::Consent::Accepted {
+                    match state.integration.upgrade() {
+                        Ok(true) => info!("claude code plugin upgraded"),
+                        Ok(false) => {}
+                        Err(error) => {
+                            warn!(kind = ?error.kind, "the claude code plugin could not be upgraded");
+                        }
+                    }
+                }
+                loop {
+                    state.check(&app);
+                    std::thread::sleep(CHECK_INTERVAL);
                 }
             });
         if let Err(error) = spawned {
-            warn!(error = %error, "could not start the thread that upgrades the claude code plugin");
+            warn!(error = %error, "could not start the thread that watches the claude code integration");
         }
     }
 }
+
+/// How often [`ClaudeState::watch`] looks at the integration again.
+pub const CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// What the socket does with a request: a report of a hook goes to the
 /// workspace.

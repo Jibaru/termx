@@ -330,6 +330,7 @@ fn contract() -> Value {
                     description: "Set \"termx@termx\" to true in \"enabledPlugins\".".to_owned(),
                 },
             ],
+            note: Some("Your existing settings and hooks are kept as they are: termx adds two entries to settings.json.".to_owned()),
         },
         "notificationClicked": NotificationClicked {
             session_id: "s-claude".to_owned(),
