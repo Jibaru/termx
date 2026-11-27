@@ -20,6 +20,6 @@ waiting for you, once you let it install its Claude Code plugin.
   turned off, and turned on for finished sessions, at the bottom of the
   sidebar.
 - The first time termx finds Claude Code it asks before installing anything,
-  with the exact list of what the plugin adds. Your own hooks and settings
-  are not changed, and the plugin can be updated or removed from the bottom
-  of the sidebar.
+  and shows the exact list of what the plugin adds before it can be
+  installed. Hooks you already have are kept, and the plugin can be updated
+  or removed from the bottom of the sidebar.
