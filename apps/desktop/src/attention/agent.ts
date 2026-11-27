@@ -57,7 +57,8 @@ const KNOWN: Record<
 export function viewAgent(agent: AgentState | null | undefined): AgentView | null {
   if (!agent) return null;
   const status = agent.status as string;
-  const known = status in KNOWN ? KNOWN[status as keyof typeof KNOWN] : null;
+  // Own keys only: a status such as "constructor" is unknown, not a method.
+  const known = Object.hasOwn(KNOWN, status) ? KNOWN[status as keyof typeof KNOWN] : null;
   const stale = agent.stale;
   const waitingSince = toMillis(agent.waitingSince);
   const since = toMillis(agent.since) ?? waitingSince;
