@@ -17,7 +17,7 @@ import { sessionOfPane, visibleSessions } from "../workspace/layoutTree";
 import { ChevronIcon, PlusIcon } from "./icons";
 import { Menu, type MenuItem } from "./Menu";
 import { groupElementId, rowElementId } from "./elementIds";
-import { SessionRow } from "./SessionRow";
+import { type RowActions, SessionRow } from "./SessionRow";
 
 /** The key of the background section, among the keys of project groups. */
 const BACKGROUND = "\u0000background";
@@ -368,7 +368,92 @@ export function SessionTree({ workspace }: { workspace: WorkspaceSnapshot }) {
 
   // --- Rendering ----------------------------------------------------------------
 
-  const renderRow = (session: Session, siblings: SessionId[], showProject: boolean): ReactNode => {
+  // What rows do, by session id. Rows get `rowActions`, which never
+  // changes, and which calls the latest of these.
+  const rowImpl: RowActions = {
+    activate: (id) => {
+      setCursor(`s:${id}`);
+      void workbench.activate(id);
+    },
+    startRename: (id) => {
+      workbench.startRenaming(id);
+    },
+    rename: (id, name) => {
+      focusAfterRender.current = true;
+      void workbench.rename(id, name);
+    },
+    cancelRename: () => {
+      focusAfterRender.current = true;
+      workbench.stopRenaming();
+    },
+    resume: (id) => {
+      workbench.resume(id);
+    },
+    contextMenu: (id, event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      setCursor(`s:${id}`);
+      openMenu(id, { x: event.clientX, y: event.clientY });
+    },
+    focus: (id) => {
+      setCursor(`s:${id}`);
+    },
+    dragStart: (id, event) => {
+      const section = sections.find((each) => each.sessions.some((session) => session.id === id));
+      startSessionDrag(event, id, section?.sessions.map((session) => session.id) ?? [id]);
+    },
+    dragOver: (id, event) => {
+      overSession(event, id);
+    },
+    drop: (id, event) => {
+      dropOnSession(event, id);
+    },
+    dragEnd: endDrag,
+  };
+  const latestRowImpl = useRef(rowImpl);
+  useEffect(() => {
+    latestRowImpl.current = rowImpl;
+  });
+  const rowActions = useMemo<RowActions>(
+    () => ({
+      activate: (id) => {
+        latestRowImpl.current.activate(id);
+      },
+      startRename: (id) => {
+        latestRowImpl.current.startRename(id);
+      },
+      rename: (id, name) => {
+        latestRowImpl.current.rename(id, name);
+      },
+      cancelRename: () => {
+        latestRowImpl.current.cancelRename();
+      },
+      resume: (id) => {
+        latestRowImpl.current.resume(id);
+      },
+      contextMenu: (id, event) => {
+        latestRowImpl.current.contextMenu(id, event);
+      },
+      focus: (id) => {
+        latestRowImpl.current.focus(id);
+      },
+      dragStart: (id, event) => {
+        latestRowImpl.current.dragStart(id, event);
+      },
+      dragOver: (id, event) => {
+        latestRowImpl.current.dragOver(id, event);
+      },
+      drop: (id, event) => {
+        latestRowImpl.current.drop(id, event);
+      },
+      dragEnd: () => {
+        latestRowImpl.current.dragEnd();
+      },
+    }),
+    [],
+  );
+
+  const renderRow = (session: Session, showProject: boolean): ReactNode => {
     const key = `s:${session.id}`;
     return (
       <SessionRow
@@ -380,43 +465,7 @@ export function SessionTree({ workspace }: { workspace: WorkspaceSnapshot }) {
         renaming={ui.renaming === session.id}
         dropAt={drop?.target === key ? drop.position : null}
         showProject={showProject}
-        onActivate={() => {
-          setCursor(key);
-          void workbench.activate(session.id);
-        }}
-        onStartRename={() => {
-          workbench.startRenaming(session.id);
-        }}
-        onRename={(name) => {
-          focusAfterRender.current = true;
-          void workbench.rename(session.id, name);
-        }}
-        onCancelRename={() => {
-          focusAfterRender.current = true;
-          workbench.stopRenaming();
-        }}
-        onResume={() => {
-          workbench.resume(session.id);
-        }}
-        onContextMenu={(event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          setCursor(key);
-          openMenu(session.id, { x: event.clientX, y: event.clientY });
-        }}
-        onFocus={() => {
-          setCursor(key);
-        }}
-        onDragStart={(event) => {
-          startSessionDrag(event, session.id, siblings);
-        }}
-        onDragOver={(event) => {
-          overSession(event, session.id);
-        }}
-        onDrop={(event) => {
-          dropOnSession(event, session.id);
-        }}
-        onDragEnd={endDrag}
+        actions={rowActions}
       />
     );
   };
@@ -434,7 +483,6 @@ export function SessionTree({ workspace }: { workspace: WorkspaceSnapshot }) {
         {sections.map((section) => {
           const open = !collapsed.has(section.key);
           const key = `g:${section.key}`;
-          const siblings = section.sessions.map((session) => session.id);
           const isBackground = section.key === BACKGROUND;
           const first = section.sessions[0];
           return (
@@ -499,7 +547,7 @@ export function SessionTree({ workspace }: { workspace: WorkspaceSnapshot }) {
               </div>
               {open && (
                 <ul role="group" className="session-group-rows">
-                  {section.sessions.map((session) => renderRow(session, siblings, isBackground))}
+                  {section.sessions.map((session) => renderRow(session, isBackground))}
                 </ul>
               )}
             </li>
