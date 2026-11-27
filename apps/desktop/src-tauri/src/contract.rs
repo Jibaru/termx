@@ -19,7 +19,7 @@ use std::path::PathBuf;
 
 use serde_json::{Value, json};
 use termx_core::pty::ExitStatus;
-use termx_core::workspace::launch::CLAUDE_NOT_FOUND_EXIT_CODE;
+use termx_core::workspace::launch::CLAUDE_MISSING_EXIT_CODE;
 use termx_core::workspace::{
     Delta, Direction, Edge, GitInfo, LaunchFailure, LaunchMode, Layout, PersistenceMode, Placement,
     Project, ProjectKind, Session, SessionKey, SessionKind, SessionState, Snapshot,
@@ -76,6 +76,7 @@ fn running_claude() -> Session {
         last_activity_at: 1_795_716_005_340,
         waiting_since: None,
         claude_session_id: Some("0b9d6f7e-3c1a-4f3e-9a55-2f6f1f0f8a10".to_owned()),
+        warning: None,
     }
 }
 
@@ -98,6 +99,7 @@ fn dormant_shell() -> Session {
         last_activity_at: 1_795_700_100_000,
         waiting_since: None,
         claude_session_id: None,
+        warning: None,
     }
 }
 
@@ -114,6 +116,8 @@ fn starting_background() -> Session {
             worktree: None,
         }),
         state: SessionState::Starting,
+        // Its shell profile has not let the command start yet.
+        warning: Some(LaunchFailure::launch_unconfirmed()),
         cwd: PathBuf::from("/work/app"),
         project: git_project(),
         ..dormant_shell()
@@ -127,7 +131,7 @@ fn failed_claude() -> Session {
         kind: SessionKind::Claude,
         title: "Claude Code".to_owned(),
         state: SessionState::Exited {
-            code: Some(CLAUDE_NOT_FOUND_EXIT_CODE),
+            code: Some(CLAUDE_MISSING_EXIT_CODE),
             signal: None,
             failure: Some(LaunchFailure::claude_not_found("claude")),
         },
@@ -211,7 +215,7 @@ fn contract() -> Value {
         recent_folders: None,
         persistence: None,
     };
-    let mut missing_claude = SessionEvent::from(&ExitStatus::from_code(CLAUDE_NOT_FOUND_EXIT_CODE));
+    let mut missing_claude = SessionEvent::from(&ExitStatus::from_code(CLAUDE_MISSING_EXIT_CODE));
     let SessionEvent::Exit { failure, .. } = &mut missing_claude;
     *failure = Some(LaunchFailure::claude_not_found("claude"));
 
@@ -238,6 +242,7 @@ fn contract() -> Value {
                 message: "This background session has no command to run.".to_owned(),
             },
             LaunchFailure::spawn_failed("too many open files"),
+            LaunchFailure::launch_unconfirmed(),
         ],
         "startedSession": StartedSession {
             terminal: 7,

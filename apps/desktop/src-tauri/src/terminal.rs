@@ -39,7 +39,7 @@ use serde::Serialize;
 use tauri::ipc::{Channel, InvokeResponseBody, IpcResponse};
 use termx_core::diagnostics::tracing::{error, info, warn};
 use termx_core::pty::{ExitStatus, PtyError, PtySize};
-use termx_core::session::{SessionId, SessionManager, SessionOptions, SessionSink};
+use termx_core::session::{OutputFilter, SessionId, SessionManager, SessionOptions, SessionSink};
 use termx_core::workspace::{
     ActivityHandle, LaunchFailure, LaunchMode, SessionKey, SessionState, Workspace,
 };
@@ -144,7 +144,7 @@ impl TerminalState {
         options: &SessionOptions,
         channel: Channel<InvokeResponseBody>,
     ) -> Result<SessionId, String> {
-        self.spawn(owner, options, channel, None)
+        self.spawn(owner, options, None, channel, None)
     }
 
     /// Starts the session `key` of `workspace` in a new terminal of the
@@ -184,8 +184,11 @@ impl TerminalState {
             key: key.clone(),
             generation: launch.generation,
         };
+        // Takes the markers of the launch script out of the output, and
+        // tells the workspace what they say.
+        let filter = workspace.output_filter(key, &launch);
         let options = SessionOptions::new(launch.command).size(size);
-        let id = match self.spawn(owner, &options, channel, Some(link)) {
+        let id = match self.spawn(owner, &options, filter, channel, Some(link)) {
             Ok(id) => id,
             Err(reason) => {
                 workspace.launch_failed(
@@ -209,6 +212,7 @@ impl TerminalState {
         &self,
         owner: &str,
         options: &SessionOptions,
+        filter: Option<Box<dyn OutputFilter>>,
         channel: Channel<InvokeResponseBody>,
         session: Option<SessionLink>,
     ) -> Result<SessionId, String> {
@@ -228,7 +232,7 @@ impl TerminalState {
         // behind by removing it too early.
         let mut owners = lock(&self.owners);
         let id = manager
-            .create(options, sink)
+            .create_filtered(options, filter, sink)
             .map_err(|source| source.to_string())?;
         owners.insert(
             id,
@@ -423,7 +427,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use termx_core::pty::PtyCommand;
-    use termx_core::workspace::launch::{CLAUDE_NOT_FOUND_EXIT_CODE, Shell};
+    use termx_core::workspace::launch::{CLAUDE_MISSING_EXIT_CODE, Shell};
     use termx_core::workspace::{Launcher, NewSession, SessionKind, WorkspaceConfig};
 
     use super::*;
@@ -821,7 +825,7 @@ mod tests {
             }
         };
         assert_eq!(exit["event"], "exit");
-        assert_eq!(exit["code"], CLAUDE_NOT_FOUND_EXIT_CODE);
+        assert_eq!(exit["code"], CLAUDE_MISSING_EXIT_CODE);
         assert_eq!(exit["failure"]["kind"], "claudeNotFound");
         assert!(
             exit["failure"]["message"]

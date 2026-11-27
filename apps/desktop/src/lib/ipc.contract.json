@@ -46,17 +46,10 @@
           "root": "/work/app"
         }
       ],
-      "recentFolders": [
-        "/work/app"
-      ],
-      "removed": [
-        "s-killed"
-      ],
+      "recentFolders": ["/work/app"],
+      "removed": ["s-killed"],
       "revision": 43,
-      "sessionOrder": [
-        "s-claude",
-        "s-shell"
-      ],
+      "sessionOrder": ["s-claude", "s-shell"],
       "sessions": [
         {
           "autoTitle": "Fix the login",
@@ -85,7 +78,8 @@
           },
           "terminalId": 7,
           "title": "Login work",
-          "waitingSince": null
+          "waitingSince": null,
+          "warning": null
         }
       ]
     },
@@ -101,40 +95,13 @@
     }
   ],
   "enums": {
-    "direction": [
-      "row",
-      "column"
-    ],
-    "edge": [
-      "left",
-      "right",
-      "top",
-      "bottom",
-      "center"
-    ],
-    "launchMode": [
-      "fresh",
-      "resume"
-    ],
-    "placement": [
-      "before",
-      "after"
-    ],
-    "projectKind": [
-      "git",
-      "folder"
-    ],
-    "sessionKind": [
-      "claude",
-      "shell",
-      "background"
-    ],
-    "sessionStatus": [
-      "dormant",
-      "starting",
-      "running",
-      "exited"
-    ]
+    "direction": ["row", "column"],
+    "edge": ["left", "right", "top", "bottom", "center"],
+    "launchMode": ["fresh", "resume"],
+    "placement": ["before", "after"],
+    "projectKind": ["git", "folder"],
+    "sessionKind": ["claude", "shell", "background"],
+    "sessionStatus": ["dormant", "starting", "running", "exited"]
   },
   "exitEvents": [
     {
@@ -143,7 +110,7 @@
       "signal": null
     },
     {
-      "code": 113,
+      "code": 127,
       "event": "exit",
       "failure": {
         "kind": "claudeNotFound",
@@ -168,6 +135,10 @@
     {
       "kind": "spawnFailed",
       "message": "The session could not be started: too many open files."
+    },
+    {
+      "kind": "launchUnconfirmed",
+      "message": "Your shell profile did not run the command: a file your shell reads when it starts (such as ~/.zshrc or ~/.bashrc) may start another shell, stop with an error or wait for an answer."
     }
   ],
   "persistence": [
@@ -264,10 +235,7 @@
         "root": "/work/notes"
       }
     ],
-    "recentFolders": [
-      "/work/app",
-      "/work/notes"
-    ],
+    "recentFolders": ["/work/app", "/work/notes"],
     "revision": 42,
     "sessions": [
       {
@@ -297,7 +265,8 @@
         },
         "terminalId": 7,
         "title": "Login work",
-        "waitingSince": null
+        "waitingSince": null,
+        "warning": null
       },
       {
         "autoTitle": null,
@@ -322,7 +291,8 @@
         },
         "terminalId": null,
         "title": "Shell",
-        "waitingSince": null
+        "waitingSince": null,
+        "warning": null
       },
       {
         "autoTitle": null,
@@ -351,7 +321,11 @@
         },
         "terminalId": null,
         "title": "ngrok http 3000",
-        "waitingSince": null
+        "waitingSince": null,
+        "warning": {
+          "kind": "launchUnconfirmed",
+          "message": "Your shell profile did not run the command: a file your shell reads when it starts (such as ~/.zshrc or ~/.bashrc) may start another shell, stop with an error or wait for an answer."
+        }
       },
       {
         "autoTitle": null,
@@ -372,7 +346,7 @@
           "root": "/work/notes"
         },
         "state": {
-          "code": 113,
+          "code": 127,
           "failure": {
             "kind": "claudeNotFound",
             "message": "Claude Code is not installed, or your shell cannot find it: the `claude` command was not found. Install Claude Code, check that `claude` works in a terminal, and start the session again."
@@ -382,7 +356,8 @@
         },
         "terminalId": null,
         "title": "Claude Code",
-        "waitingSince": null
+        "waitingSince": null,
+        "warning": null
       },
       {
         "autoTitle": null,
@@ -410,7 +385,8 @@
         },
         "terminalId": null,
         "title": "Shell",
-        "waitingSince": null
+        "waitingSince": null,
+        "warning": null
       }
     ]
   },

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use super::driver::{self, Event};
 use super::pump::{PtySource, Pump};
-use super::{SessionId, SessionSink};
+use super::{OutputFilter, SessionId, SessionSink};
 use crate::diagnostics::tracing::{debug, info, warn};
 use crate::pty::{DEFAULT_KILL_GRACE, Pty, PtyCommand, PtyError, PtyManager, PtySize, lock};
 
@@ -185,6 +185,21 @@ impl SessionManager {
         options: &SessionOptions,
         sink: impl SessionSink,
     ) -> Result<SessionId, PtyError> {
+        self.create_filtered(options, None, sink)
+    }
+
+    /// Like [`create`](Self::create), with the output passed through
+    /// `filter` before anything else sees it.
+    ///
+    /// # Errors
+    ///
+    /// Those of [`create`](Self::create).
+    pub fn create_filtered(
+        &self,
+        options: &SessionOptions,
+        filter: Option<Box<dyn OutputFilter>>,
+        sink: impl SessionSink,
+    ) -> Result<SessionId, PtyError> {
         let (id, mut output) = self.ptys.spawn(&options.command, options.size)?;
         // Gone already if the manager was shut down in the meantime.
         let pty = self.ptys.get(id).ok_or(PtyError::ManagerShutDown)?;
@@ -202,7 +217,7 @@ impl SessionManager {
         let process_id = pty.process_id();
         drop(pty);
 
-        let pump = Pump::new(id, Box::new(source), Box::new(sink));
+        let pump = Pump::new(id, Box::new(source), Box::new(sink)).with_filter(filter);
         if self.events.send(Event::Add(id, Box::new(pump))).is_err() {
             // The driver thread is gone: the manager was shut down.
             self.kill_and_remove(id);

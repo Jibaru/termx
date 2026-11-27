@@ -129,6 +129,23 @@ pub use pump::{PTY_BUFFER_BYTES, STALL_TIMEOUT, STALL_WRITE_OFFS_MAX};
 use crate::pty::ExitStatus;
 pub use crate::pty::SessionId;
 
+/// Takes something out of the output of a session before it is batched,
+/// counted for flow control and handed to the [`SessionSink`]: what a
+/// filter removes is never sent, and never waits for an acknowledgement.
+///
+/// Called on the manager's driver thread, like the sink: it must be quick
+/// and must not block.
+pub trait OutputFilter: Send + 'static {
+    /// Returns what is left of `bytes`. It may keep bytes back, to decide
+    /// on them with the next call.
+    fn filter(&mut self, bytes: Vec<u8>) -> Vec<u8>;
+
+    /// The output has ended: returns what was kept back.
+    fn finish(&mut self) -> Vec<u8> {
+        Vec::new()
+    }
+}
+
 /// Receives what a session produces: its output and, at the end, how its
 /// process exited.
 ///

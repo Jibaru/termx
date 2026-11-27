@@ -28,14 +28,29 @@
 //! A [`SessionKind::Shell`] session is the login shell itself, with no
 //! script.
 //!
-//! # When `claude` is not installed
+//! # Knowing that the command ran
 //!
-//! The script checks that the shell can find `claude` (as a program, an
-//! alias or a function) before running it, and exits with
-//! [`CLAUDE_NOT_FOUND_EXIT_CODE`] if it cannot. [`failure_for_exit`] turns
-//! that exit into [`LaunchFailure::ClaudeNotFound`], which a frontend shows
-//! instead of a dead terminal. For a shell of the "any other" family the
-//! check is not made: the session ends with whatever that shell reports.
+//! Going through the user's shell means running whatever its profile does
+//! first, and a profile can do anything: `exec` another shell (the session
+//! then shows a bare prompt and the command never runs), stop with an
+//! error, or wait for an answer. An exit code cannot tell those apart from
+//! the program's own exit codes. So the script tells termx itself, in the
+//! output of the terminal, with private escape sequences ([`marker`]):
+//!
+//! - right before it runs the command (`exec`),
+//! - or that the shell cannot find `claude`, as a program, an alias or a
+//!   function (`missing`).
+//!
+//! Each start of a session has a [`LaunchToken`] of its own, drawn at
+//! random, which the sequences carry: a program that prints something that
+//! looks like them cannot forge them without knowing it. [`MarkerFilter`]
+//! takes them out of the output before it reaches the terminal, and the
+//! workspace turns them into the state of the session:
+//! [`LaunchFailure::ClaudeNotFound`] when `claude` is missing, and
+//! [`LaunchFailure::LaunchUnconfirmed`] when the command was not reached in
+//! time, which a frontend can explain ("your shell profile did not run the
+//! command"). A marker can only improve the state: one that arrives late
+//! still clears the warning.
 //!
 //! # Privacy
 //!
@@ -48,17 +63,162 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use super::model::{SessionKind, is_valid_claude_session_id};
-use crate::pty::{ExitStatus, PtyCommand, default_shell};
+use crate::pty::{PtyCommand, default_shell};
 
 /// The program a [`SessionKind::Claude`] session runs.
 pub const CLAUDE_PROGRAM: &str = "claude";
 
-/// The exit code of the launch script when the shell cannot find `claude`.
+/// The exit code of the launch script when the shell cannot find `claude`:
+/// that of a command that was not found. It is the marker, not this code,
+/// that tells termx (see the [module documentation](self)).
+pub const CLAUDE_MISSING_EXIT_CODE: u32 = 127;
+
+/// The start of the private escape sequences of the launch scripts: an
+/// operating system command (OSC) with a number no terminal uses. See
+/// [`marker`].
+const MARKER_PREFIX: &str = "\x1b]7703;termx;";
+
+/// Identifies one start of a session in the [markers](marker) of its
+/// script: 16 hexadecimal digits drawn at random.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct LaunchToken(String);
+
+impl LaunchToken {
+    /// A token no other start has.
+    #[must_use]
+    pub fn generate() -> Self {
+        Self(super::model::random_hex())
+    }
+
+    /// The token as text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for LaunchToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Not a secret worth hiding from the log, but nothing needs it.
+        f.write_str("LaunchToken(..)")
+    }
+}
+
+/// What a launch script tells termx.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LaunchMarker {
+    /// The script is about to run the command.
+    Exec,
+    /// The shell cannot find `claude`.
+    ClaudeMissing,
+}
+
+impl LaunchMarker {
+    fn word(self) -> &'static str {
+        match self {
+            Self::Exec => "exec",
+            Self::ClaudeMissing => "missing",
+        }
+    }
+}
+
+/// The bytes a launch script prints for `marker`: `ESC ] 7703 ; termx ;
+/// <token> ; <word> BEL`. A terminal ignores an OSC it does not know, but
+/// [`MarkerFilter`] takes these out before they get there.
+#[must_use]
+pub fn marker(token: &LaunchToken, marker: LaunchMarker) -> String {
+    format!("{MARKER_PREFIX}{};{}\x07", token.as_str(), marker.word())
+}
+
+/// Takes the [markers](marker) of one start of a session out of its
+/// output, and reports them.
 ///
-/// Shells use 127 for a command that was not found, but so does `claude`
-/// itself when the interpreter it needs is missing. A code of its own tells
-/// the two apart.
-pub const CLAUDE_NOT_FOUND_EXIT_CODE: u32 = 113;
+/// Output is passed through unchanged otherwise. A chunk that ends with
+/// the beginning of a marker keeps that beginning until the next chunk
+/// tells whether it is one, or until [`finish`](Self::finish). Once the
+/// script has said it runs the command, nothing more is looked for and
+/// nothing is held back.
+#[derive(Debug)]
+pub struct MarkerFilter {
+    /// The sequences looked for, with what each one means. Both endings of
+    /// an OSC are accepted: BEL, and `ESC \`, which the Windows console
+    /// may use when it passes the sequence on.
+    patterns: Vec<(Vec<u8>, LaunchMarker)>,
+    held: Vec<u8>,
+    done: bool,
+}
+
+impl MarkerFilter {
+    /// A filter for the markers carrying `token`.
+    #[must_use]
+    pub fn new(token: &LaunchToken) -> Self {
+        let mut patterns = Vec::new();
+        for kind in [LaunchMarker::Exec, LaunchMarker::ClaudeMissing] {
+            let bel = marker(token, kind).into_bytes();
+            let mut st = bel[..bel.len() - 1].to_vec();
+            st.extend_from_slice(b"\x1b\\");
+            patterns.push((bel, kind));
+            patterns.push((st, kind));
+        }
+        Self {
+            patterns,
+            held: Vec::new(),
+            done: false,
+        }
+    }
+
+    /// Returns `bytes` without the markers, and the markers found.
+    pub fn filter(&mut self, bytes: Vec<u8>) -> (Vec<u8>, Vec<LaunchMarker>) {
+        if self.done && self.held.is_empty() {
+            return (bytes, Vec::new());
+        }
+        let mut input = std::mem::take(&mut self.held);
+        input.extend_from_slice(&bytes);
+        let mut output = Vec::with_capacity(input.len());
+        let mut found = Vec::new();
+        let mut index = 0;
+        while index < input.len() {
+            if self.done {
+                output.extend_from_slice(&input[index..]);
+                break;
+            }
+            let Some(escape) = input[index..].iter().position(|&b| b == 0x1b) else {
+                output.extend_from_slice(&input[index..]);
+                break;
+            };
+            let at = index + escape;
+            output.extend_from_slice(&input[index..at]);
+            let rest = &input[at..];
+            if let Some((pattern, kind)) = self
+                .patterns
+                .iter()
+                .find(|(pattern, _)| rest.starts_with(pattern))
+            {
+                found.push(*kind);
+                index = at + pattern.len();
+                // The script prints nothing after it.
+                self.done = true;
+            } else if self
+                .patterns
+                .iter()
+                .any(|(pattern, _)| rest.len() < pattern.len() && pattern.starts_with(rest))
+            {
+                // The rest of the chunk may be the start of a marker.
+                self.held = rest.to_vec();
+                break;
+            } else {
+                output.push(0x1b);
+                index = at + 1;
+            }
+        }
+        (output, found)
+    }
+
+    /// The output ended: returns what was held back.
+    pub fn finish(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.held)
+    }
+}
 
 /// How a session is started.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -108,6 +268,16 @@ pub enum LaunchFailure {
         /// What to tell the user.
         message: String,
     },
+    /// The shell did not get to the command in time, or ended before it:
+    /// typically a shell profile that starts another shell (`exec bash` in
+    /// `.zshrc`), stops with an error, or waits for an answer. While the
+    /// session runs, this is a warning ([`Session::warning`](super::Session::warning));
+    /// it is cleared if the command starts after all.
+    #[error("{message}")]
+    LaunchUnconfirmed {
+        /// What to tell the user.
+        message: String,
+    },
 }
 
 impl LaunchFailure {
@@ -131,6 +301,17 @@ impl LaunchFailure {
         }
     }
 
+    /// The failure for a shell that did not get to the command.
+    #[must_use]
+    pub fn launch_unconfirmed() -> Self {
+        Self::LaunchUnconfirmed {
+            message: "Your shell profile did not run the command: a file your shell reads \
+                      when it starts (such as ~/.zshrc or ~/.bashrc) may start another \
+                      shell, stop with an error or wait for an answer."
+                .to_owned(),
+        }
+    }
+
     /// The failure for a process the system refused to start. `reason` is
     /// shown to the user: it must not contain a command line.
     #[must_use]
@@ -147,7 +328,8 @@ impl LaunchFailure {
             Self::ClaudeNotFound { message }
             | Self::FolderMissing { message }
             | Self::InvalidCommand { message }
-            | Self::SpawnFailed { message } => message,
+            | Self::SpawnFailed { message }
+            | Self::LaunchUnconfirmed { message } => message,
         }
     }
 }
@@ -242,6 +424,11 @@ pub struct LaunchRequest<'a> {
     pub claude_session_id: Option<&'a str>,
     /// From scratch, or carrying on.
     pub mode: LaunchMode,
+    /// The token of this start, for the script to print its markers with
+    /// (see the [module documentation](self)). Without one the script
+    /// prints none, and a missing `claude` is only an exit code of
+    /// [`CLAUDE_MISSING_EXIT_CODE`].
+    pub token: Option<&'a LaunchToken>,
 }
 
 /// Builds the commands of the sessions.
@@ -313,22 +500,23 @@ impl Launcher {
                         message: "This background session has no command to run.".to_owned(),
                     });
                 }
-                self.shell.run(&self.background_script(line))
+                self.shell.run(&self.background_script(line, request.token))
             }
         };
         Ok(command.cwd(request.cwd))
     }
 
-    /// The failure an exit of a session of this launcher stands for, if
-    /// any. See [`failure_for_exit`].
+    /// The name of the program that runs as Claude Code.
     #[must_use]
-    pub fn failure_for_exit(
-        &self,
-        kind: SessionKind,
-        status: &ExitStatus,
-    ) -> Option<LaunchFailure> {
-        (kind == SessionKind::Claude && status.code() == Some(CLAUDE_NOT_FOUND_EXIT_CODE))
-            .then(|| LaunchFailure::claude_not_found(&self.claude_program))
+    pub fn claude_program_name(&self) -> &str {
+        &self.claude_program
+    }
+
+    /// Whether the scripts of this launcher print [markers](marker). Only
+    /// a shell session, which runs no script, does without.
+    #[must_use]
+    pub fn uses_markers(&self, kind: SessionKind) -> bool {
+        kind != SessionKind::Shell
     }
 
     /// The arguments of `claude` for this request.
@@ -347,49 +535,72 @@ impl Launcher {
     fn claude_script(&self, request: &LaunchRequest<'_>) -> String {
         let program = &self.claude_program;
         let arguments = Self::claude_arguments(request);
+        let say = |kind| self.print_marker(request.token, kind);
+        let exec = say(LaunchMarker::Exec);
+        let missing = say(LaunchMarker::ClaudeMissing);
         match self.shell.family {
             // A program on PATH replaces the shell (`exec`), so that no
             // extra process stays around. An alias or a function can only
             // be run by the shell itself.
             ShellFamily::Posix => format!(
                 "case \"$(command -v {program} 2>/dev/null)\" in \
-                 /*) exec {program}{arguments} ;; \
-                 '') exit {CLAUDE_NOT_FOUND_EXIT_CODE} ;; \
-                 *) {program}{arguments} ;; \
+                 /*) {exec}exec {program}{arguments} ;; \
+                 '') {missing}exit {CLAUDE_MISSING_EXIT_CODE} ;; \
+                 *) {exec}{program}{arguments} ;; \
                  esac"
             ),
             ShellFamily::Fish => format!(
-                "if command -sq {program}; exec {program}{arguments}; \
-                 else if type -q {program}; {program}{arguments}; \
-                 else; exit {CLAUDE_NOT_FOUND_EXIT_CODE}; end"
+                "if command -sq {program}; {exec}exec {program}{arguments}; \
+                 else if type -q {program}; {exec}{program}{arguments}; \
+                 else; {missing}exit {CLAUDE_MISSING_EXIT_CODE}; end"
             ),
             ShellFamily::PowerShell => format!(
                 "if (-not (Get-Command {program} -ErrorAction SilentlyContinue)) \
-                 {{ exit {CLAUDE_NOT_FOUND_EXIT_CODE} }}\n\
-                 & {program}{arguments}\n\
+                 {{ {missing}exit {CLAUDE_MISSING_EXIT_CODE} }}\n\
+                 {exec}& {program}{arguments}\n\
                  exit $LASTEXITCODE"
             ),
-            ShellFamily::Other => format!("{program}{arguments}"),
+            ShellFamily::Other => format!("{exec}{program}{arguments}"),
         }
     }
 
-    fn background_script(&self, line: &str) -> String {
+    /// The command of the shell that prints `kind`, followed by the
+    /// separator of commands; nothing without a token.
+    fn print_marker(&self, token: Option<&LaunchToken>, kind: LaunchMarker) -> String {
+        let Some(token) = token else {
+            return String::new();
+        };
+        // The token is hexadecimal and the word a constant: nothing in it
+        // needs quoting.
+        let (token, word) = (token.as_str(), kind.word());
+        match self.shell.family {
+            ShellFamily::Posix | ShellFamily::Other => {
+                format!("printf '\\033]7703;termx;{token};{word}\\007'; ")
+            }
+            ShellFamily::Fish => format!("printf '\\e]7703;termx;{token};{word}\\a'; "),
+            ShellFamily::PowerShell => {
+                format!("[Console]::Write(\"$([char]27)]7703;termx;{token};{word}$([char]7)\"); ")
+            }
+        }
+    }
+
+    fn background_script(&self, line: &str, token: Option<&LaunchToken>) -> String {
+        // On a line of its own before the command, which can then be
+        // anything the shell understands, comments included.
+        let exec = self.print_marker(token, LaunchMarker::Exec);
+        let exec = exec.trim_end().trim_end_matches(';');
+        let exec = if exec.is_empty() {
+            String::new()
+        } else {
+            format!("{exec}\n")
+        };
         match self.shell.family {
             // PowerShell does not end with the exit code of the last
             // program on its own.
-            ShellFamily::PowerShell => format!("{line}\nexit $LASTEXITCODE"),
-            _ => line.to_owned(),
+            ShellFamily::PowerShell => format!("{exec}{line}\nexit $LASTEXITCODE"),
+            _ => format!("{exec}{line}"),
         }
     }
-}
-
-/// The failure an exit stands for, for a session started by the default
-/// [`Launcher`]: a Claude Code session whose script could not find `claude`
-/// ([`CLAUDE_NOT_FOUND_EXIT_CODE`]). `None` for any other exit.
-#[must_use]
-pub fn failure_for_exit(kind: SessionKind, status: &ExitStatus) -> Option<LaunchFailure> {
-    (kind == SessionKind::Claude && status.code() == Some(CLAUDE_NOT_FOUND_EXIT_CODE))
-        .then(|| LaunchFailure::claude_not_found(CLAUDE_PROGRAM))
 }
 
 /// Encodes a script for the `-EncodedCommand` option of PowerShell: its
@@ -426,6 +637,7 @@ mod tests {
             command: None,
             claude_session_id: None,
             mode: LaunchMode::Fresh,
+            token: None,
         }
     }
 
@@ -487,7 +699,7 @@ mod tests {
             .unwrap();
 
         let script = "case \"$(command -v claude 2>/dev/null)\" in \
-                      /*) exec claude ;; '') exit 113 ;; *) claude ;; esac";
+                      /*) exec claude ;; '') exit 127 ;; *) claude ;; esac";
         assert_eq!(
             command,
             PtyCommand::new("/bin/zsh")
@@ -549,7 +761,7 @@ mod tests {
             fish.contains("if command -sq claude; exec claude;"),
             "{fish}"
         );
-        assert!(fish.contains("exit 113; end"), "{fish}");
+        assert!(fish.contains("exit 127; end"), "{fish}");
 
         let other = launcher("/bin/tcsh").command(&claude).unwrap();
         assert_eq!(
@@ -560,7 +772,7 @@ mod tests {
         );
 
         let powershell = launcher("pwsh").command(&claude).unwrap();
-        let script = "if (-not (Get-Command claude -ErrorAction SilentlyContinue)) { exit 113 }\n\
+        let script = "if (-not (Get-Command claude -ErrorAction SilentlyContinue)) { exit 127 }\n\
                       & claude\nexit $LASTEXITCODE";
         assert_eq!(
             powershell,
@@ -646,32 +858,113 @@ mod tests {
     }
 
     #[test]
-    fn only_the_exit_code_of_the_script_means_that_claude_is_missing() {
-        let exit = |code| ExitStatus::from_code(code);
-        let launcher = launcher("/bin/sh").claude_program("my-claude");
-
-        let failure = launcher
-            .failure_for_exit(SessionKind::Claude, &exit(CLAUDE_NOT_FOUND_EXIT_CODE))
-            .unwrap();
-        assert!(matches!(failure, LaunchFailure::ClaudeNotFound { .. }));
-        assert!(failure.message().contains("`my-claude`"), "{failure}");
-        assert_eq!(
-            failure_for_exit(SessionKind::Claude, &exit(CLAUDE_NOT_FOUND_EXIT_CODE)),
-            Some(LaunchFailure::claude_not_found("claude"))
+    fn scripts_with_a_token_say_what_they_do() {
+        let dir = tempfile::tempdir().unwrap();
+        let token = LaunchToken::generate();
+        let mut claude = request(SessionKind::Claude, dir.path());
+        claude.token = Some(&token);
+        let exec = format!("printf '\\033]7703;termx;{};exec\\007'; ", token.as_str());
+        let missing = format!(
+            "printf '\\033]7703;termx;{};missing\\007'; ",
+            token.as_str()
         );
 
-        for code in [0, 1, 127, 130] {
-            assert_eq!(
-                launcher.failure_for_exit(SessionKind::Claude, &exit(code)),
-                None
-            );
+        assert_eq!(
+            launcher("/bin/zsh").command(&claude).unwrap(),
+            PtyCommand::new("/bin/zsh")
+                .args([
+                    "-l",
+                    "-i",
+                    "-c",
+                    &format!(
+                        "case \"$(command -v claude 2>/dev/null)\" in \
+                         /*) {exec}exec claude ;; '') {missing}exit 127 ;; \
+                         *) {exec}claude ;; esac"
+                    ),
+                ])
+                .cwd(dir.path())
+        );
+
+        let mut background = request(SessionKind::Background, dir.path());
+        background.command = Some("pnpm dev # a comment");
+        background.token = Some(&token);
+        let command = launcher("/bin/bash").command(&background).unwrap();
+        assert_eq!(
+            command,
+            PtyCommand::new("/bin/bash")
+                .args([
+                    "-l",
+                    "-i",
+                    "-c",
+                    &format!(
+                        "{}\npnpm dev # a comment",
+                        exec.trim_end().trim_end_matches(';')
+                    ),
+                ])
+                .cwd(dir.path())
+        );
+    }
+
+    #[test]
+    fn markers_are_taken_out_of_the_output() {
+        let token = LaunchToken::generate();
+        let exec = marker(&token, LaunchMarker::Exec);
+        let mut filter = MarkerFilter::new(&token);
+
+        let (out, found) =
+            filter.filter(format!("profile says hi\r\n{exec}claude starts").into_bytes());
+
+        assert_eq!(out, b"profile says hi\r\nclaude starts");
+        assert_eq!(found, [LaunchMarker::Exec]);
+        // Nothing is looked for afterwards.
+        let (out, found) = filter.filter(exec.clone().into_bytes());
+        assert_eq!(out, exec.as_bytes());
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    fn a_marker_split_between_chunks_is_still_found() {
+        let token = LaunchToken::generate();
+        let missing = marker(&token, LaunchMarker::ClaudeMissing).into_bytes();
+        for cut in 1..missing.len() {
+            let mut filter = MarkerFilter::new(&token);
+            let mut first = b"\x1b[1mbold".to_vec();
+            first.extend_from_slice(&missing[..cut]);
+            let mut second = missing[cut..].to_vec();
+            second.extend_from_slice(b"after");
+
+            let (a, found_a) = filter.filter(first);
+            let (b, found_b) = filter.filter(second);
+
+            assert_eq!([a, b].concat(), b"\x1b[1mboldafter", "cut at {cut}");
+            assert_eq!([found_a, found_b].concat(), [LaunchMarker::ClaudeMissing]);
         }
-        for kind in [SessionKind::Shell, SessionKind::Background] {
-            assert_eq!(
-                launcher.failure_for_exit(kind, &exit(CLAUDE_NOT_FOUND_EXIT_CODE)),
-                None
-            );
+    }
+
+    #[test]
+    fn markers_with_another_token_and_lookalikes_pass_through() {
+        let token = LaunchToken::generate();
+        let forged = marker(&LaunchToken::generate(), LaunchMarker::Exec);
+        let mut filter = MarkerFilter::new(&token);
+
+        for text in [
+            forged.as_str(),
+            "\x1b]7703;termx;",
+            "\x1b]0;a title\x07",
+            "\x1b",
+            "plain",
+        ] {
+            let (out, found) = filter.filter(text.as_bytes().to_vec());
+            let out = [out, filter.finish()].concat();
+            assert_eq!(out, text.as_bytes(), "{text:?}");
+            assert!(found.is_empty(), "{text:?}");
         }
+        // The other ending of an OSC is understood too.
+        let st = marker(&token, LaunchMarker::Exec).replace('\x07', "\x1b\\");
+        assert_eq!(
+            filter.filter(st.into_bytes()),
+            (Vec::new(), vec![LaunchMarker::Exec])
+        );
     }
 
     #[test]
@@ -687,6 +980,10 @@ mod tests {
 
     #[test]
     fn failures_are_tagged_with_their_kind() {
+        assert_eq!(
+            serde_json::to_value(LaunchFailure::launch_unconfirmed()).unwrap()["kind"],
+            "launchUnconfirmed"
+        );
         assert_eq!(
             serde_json::to_value(LaunchFailure::folder_missing()).unwrap(),
             serde_json::json!({

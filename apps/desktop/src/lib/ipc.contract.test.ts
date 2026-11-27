@@ -66,6 +66,7 @@ const SESSION_KEYS = {
   lastActivityAt: true,
   waitingSince: true,
   claudeSessionId: true,
+  warning: true,
 } satisfies Record<keyof Session, true>;
 
 const PROJECT_KEYS = {
@@ -196,6 +197,7 @@ function expectSession(value: unknown): void {
     expect(keysOf(state)).toEqual(["status"]);
   }
   expect(SESSION_KINDS).toContain(session.kind);
+  if (session.warning !== null) expectFailure(session.warning);
 }
 
 function expectFailure(value: unknown): void {
@@ -240,6 +242,8 @@ describe("the contract with the Rust side", () => {
     );
     expect(snapshot.sessions.some((session) => session.git === null)).toBe(true);
     expect(snapshot.sessions.some((session) => session.git !== null)).toBe(true);
+    expect(snapshot.sessions.some((session) => session.warning === null)).toBe(true);
+    expect(snapshot.sessions.some((session) => session.warning !== null)).toBe(true);
   });
 
   it("has deltas with the fields of WorkspaceDelta, set or null", () => {
