@@ -1,5 +1,9 @@
+import { existsSync } from "node:fs";
+import { join, relative } from "node:path";
+
 import { describe, expect, it } from "vitest";
 
+import { APP_IDENTIFIER, webviewDataDir } from "../src/app.ts";
 import { useApp } from "../src/fixture.ts";
 import type { Drawing } from "../src/page.ts";
 import { type Coverage, coverage } from "../src/pixels.ts";
@@ -71,5 +75,45 @@ describe("launching the application", () => {
     console.info(
       `drawn by xterm.js: ${JSON.stringify(drawing)}; on screen: ${JSON.stringify(onScreen)}`,
     );
+  });
+});
+
+describe("the environment of the application", () => {
+  // Set before the application starts, as whoever runs the suite could have.
+  process.env.TERMX_E2E_INHERITED = "from the environment of the suite";
+  // Windows: where Tauri would keep the profile of WebView2 without the
+  // suite. Looked at before the application starts.
+  const realProfile =
+    process.platform === "win32" && process.env.LOCALAPPDATA
+      ? join(process.env.LOCALAPPDATA, APP_IDENTIFIER)
+      : undefined;
+  const realProfileExisted = realProfile !== undefined && existsSync(realProfile);
+
+  const fixture = useApp("isolation");
+
+  it("has the directories of termx in its home and none of its settings", async () => {
+    const { app, terminal } = fixture;
+    const { id } = await terminal.startHelper("env");
+    const env = await terminal.waitForLine("the environment of the shell", (line) =>
+      line.startsWith(`ENV-${id}:`)
+        ? (JSON.parse(line.slice(`ENV-${id}:`.length)) as Record<string, string>)
+        : undefined,
+    );
+    expect(env).not.toHaveProperty("TERMX_E2E_INHERITED");
+    const stateDir = env.TERMX_STATE_DIR;
+    if (stateDir !== undefined) {
+      expect(relative(app.home, stateDir).startsWith(".."), stateDir).toBe(false);
+    }
+  });
+
+  it.runIf(process.platform === "win32")("keeps the profile of WebView2 in its home", async () => {
+    const { app } = fixture;
+    const dataDir = webviewDataDir(app.home);
+    await waitFor(() => existsSync(join(dataDir, "EBWebView")), {
+      what: `WebView2 to keep its profile in ${dataDir}`,
+    });
+    if (realProfile !== undefined && !realProfileExisted) {
+      expect(existsSync(realProfile), `${realProfile} was created`).toBe(false);
+    }
   });
 });

@@ -27,6 +27,9 @@ const STARTUP_TIMEOUT_MS = 90_000;
 /** How often the application is started before a test is failed for it. */
 const STARTUP_ATTEMPTS = 3;
 
+/** The identifier of the application, in `tauri.conf.json`. */
+export const APP_IDENTIFIER = "io.github.jibaru.termx";
+
 /** How long the application may take to exit once it was asked to. */
 export const EXIT_TIMEOUT_MS = 30_000;
 
@@ -82,13 +85,34 @@ export interface ExitInfo {
 }
 
 /**
+ * Where WebView2 keeps its profile (cookies, storage, caches) in a run on
+ * Windows, inside `home`.
+ *
+ * Tauri passes WebView2 `<local app data>/<identifier>`, where it resolves
+ * the local app data folder with `SHGetKnownFolderPath`, not from
+ * `LOCALAPPDATA`. WebView2 gives `WEBVIEW2_USER_DATA_FOLDER` precedence over
+ * that, so the suite sets it. `specs/launch.e2e.ts` checks the result.
+ */
+export function webviewDataDir(home: string): string {
+  return join(home, "WebView2");
+}
+
+/**
  * The environment of the application: the one of the suite, with every
- * directory an application or a shell keeps state in moved to `home`.
+ * directory an application or a shell keeps state in moved to `home`, and
+ * none of the settings of termx (`TERMX_*`) of whoever runs the suite.
  */
 function environment(home: string, logDir: string, port: number): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, ...SHELL.env };
-  for (const name of ["LC_ALL", "LC_CTYPE", "ENV", "BASH_ENV", "TERMX_LOG_DIR", "TERMX_LOG"]) {
-    Reflect.deleteProperty(env, name);
+  for (const name of Object.keys(env)) {
+    const upper = name.toUpperCase();
+    if (
+      upper.startsWith("TERMX_") ||
+      upper.startsWith("WEBVIEW2_") ||
+      ["LC_ALL", "LC_CTYPE", "ENV", "BASH_ENV"].includes(upper)
+    ) {
+      Reflect.deleteProperty(env, name);
+    }
   }
   const state = {
     HOME: home,
@@ -102,12 +126,16 @@ function environment(home: string, logDir: string, port: number): NodeJS.Process
     USERPROFILE: home,
     APPDATA: join(home, "AppData", "Roaming"),
     LOCALAPPDATA: join(home, "AppData", "Local"),
+    WEBVIEW2_USER_DATA_FOLDER: webviewDataDir(home),
   };
   return {
     ...env,
     ...(process.platform === "win32" ? windows : state),
     // The tests run `node` in the terminal: the one that runs the suite.
     PATH: `${dirname(process.execPath)}${delimiter}${process.env.PATH ?? ""}`,
+    // Every directory termx keeps something in, set explicitly rather than
+    // derived from the home directory.
+    TERMX_STATE_DIR: join(home, "termx-state"),
     TERMX_LOG_DIR: logDir,
     TERMX_LOG: "debug",
     TERMX_E2E_SHELL: SHELL.command.join("\n"),
@@ -240,6 +268,11 @@ export class App {
       return new App(name, child, driver, new Terminal(driver), home, logDir);
     } catch (error) {
       child.kill("SIGKILL");
+      await waitFor(() => exited ?? spawnError, {
+        what: "the application to exit after it was killed",
+        timeoutMs: EXIT_TIMEOUT_MS,
+      }).catch(() => undefined);
+      removeHome(home);
       throw new StartupError(error);
     }
   }
@@ -275,7 +308,7 @@ export class App {
       while (!this.exitInfo() && Date.now() < deadline) await delay(50);
       if (!this.exitInfo()) this.child.kill("SIGKILL");
     }
-    rmSync(this.home, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    removeHome(this.home);
   }
 
   /** The text of every log file the application has written. */
@@ -293,5 +326,18 @@ class StartupError extends Error {
   constructor(override readonly cause: unknown) {
     super("the application did not start");
     this.name = "StartupError";
+  }
+}
+
+/**
+ * Removes a home directory of a run. A process of WebView2 can keep a file
+ * open for a moment after the application is gone, so this tries a few
+ * times, and only warns if it cannot.
+ */
+function removeHome(home: string): void {
+  try {
+    rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
+  } catch (error) {
+    console.warn(`the home directory of a run could not be removed: ${String(error)}`);
   }
 }

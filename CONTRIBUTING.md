@@ -143,9 +143,12 @@ in the terminal under test, which loses you those keys and can fail the test.
 Leave the keyboard alone while the suite runs.
 
 The tests never touch your files or your shell configuration: every
-application they start gets an empty home directory, its own log directory
-and a shell that reads no profile (`bash --noprofile --norc`, or
-`cmd.exe /D` on Windows). One test overwrites the system clipboard; it only
+application they start gets an empty home directory, which also holds its
+state directory (`TERMX_STATE_DIR`) and, on Windows, the profile of WebView2
+(`WEBVIEW2_USER_DATA_FOLDER`), its own log directory, none of the `TERMX_*`
+variables of your environment, and a shell that reads no profile
+(`bash --noprofile --norc`, or `cmd.exe /D` on Windows). The home directory
+is deleted afterwards, also when the application failed to start. One test overwrites the system clipboard; it only
 runs in CI, or with `TERMX_E2E_CLIPBOARD=1`.
 
 When a test fails, look in `e2e/artifacts/<name of the run>/`: `failures/`
