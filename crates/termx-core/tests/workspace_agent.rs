@@ -5,6 +5,7 @@
 #![allow(clippy::unwrap_used)]
 
 use termx_core::pty::ExitStatus;
+use termx_core::workspace::launch::LaunchRequest;
 use termx_core::workspace::{
     AgentChannel, AgentStatus, HookOutcome, LaunchMode, NewSession, Session, SessionKey,
     SessionKind, Workspace, WorkspaceConfig, WorkspaceError,
@@ -149,9 +150,33 @@ fn the_conversation_is_saved_and_resumed_but_the_agent_state_is_not() {
     assert_eq!(restored.claude_session_id.as_deref(), Some(CONVERSATION));
     assert_eq!(restored.agent, None);
     // Resuming it runs `claude --resume <conversation>`.
+    // (The script is encoded for PowerShell on Windows: compare it with
+    // the one the launcher writes for that conversation.)
     let launch = workspace.begin_launch(&key, LaunchMode::Resume).unwrap();
-    let described = format!("{:?}", launch.command);
-    assert!(described.contains(CONVERSATION), "{described}");
+    let expected = workspace
+        .launcher()
+        .command(&LaunchRequest {
+            kind: SessionKind::Claude,
+            cwd: &restored.cwd,
+            command: None,
+            claude_session_id: Some(CONVERSATION),
+            mode: LaunchMode::Resume,
+            token: launch.token.as_ref(),
+        })
+        .unwrap();
+    assert_eq!(launch.command, expected);
+    let unknown = workspace
+        .launcher()
+        .command(&LaunchRequest {
+            kind: SessionKind::Claude,
+            cwd: &restored.cwd,
+            command: None,
+            claude_session_id: None,
+            mode: LaunchMode::Resume,
+            token: launch.token.as_ref(),
+        })
+        .unwrap();
+    assert_ne!(launch.command, unknown);
     // What was saved holds nothing of the agent state.
     let saved = std::fs::read_to_string(state.join("state.json")).unwrap();
     for word in ["agent", "working", "waitingSince"] {
