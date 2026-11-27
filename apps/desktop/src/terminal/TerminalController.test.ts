@@ -1159,6 +1159,52 @@ describe("a session that already runs (the page was reloaded)", () => {
   });
 });
 
+describe("on Windows", () => {
+  it("gives a new pseudo-console a blank screen when something is shown already", () => {
+    const fake = fakeBackend();
+    const controller = new TerminalController({
+      sessionId: "s-restored",
+      autoStart: "dormant",
+      backend: fake.backend,
+      platform: "windows",
+    });
+    controller.attach(pane());
+    const terminal = FakeTerminal.last;
+    // The notice of a restored session is on screen.
+    terminal.buffer.active.cursorY = 2;
+    const before = terminal.writes.length;
+
+    controller.startDetached("resume");
+
+    // What was shown goes to the scrollback, the cursor to the top, before
+    // the first byte of the new process.
+    expect(terminal.writes[before]?.data).toBe(`${"\r\n".repeat(24)}\x1b[H`);
+    expect(fake.creates).toHaveLength(1);
+  });
+
+  it("leaves an empty screen alone, and does nothing of the kind elsewhere", () => {
+    const fake = fakeBackend();
+    new TerminalController({
+      sessionId: "s-new",
+      backend: fake.backend,
+      platform: "windows",
+    }).attach(pane());
+    expect(FakeTerminal.last.text).toBe("");
+
+    const mac = new TerminalController({
+      sessionId: "s-mac",
+      autoStart: "dormant",
+      backend: fake.backend,
+      platform: "macos",
+    });
+    mac.attach(pane());
+    FakeTerminal.last.buffer.active.cursorY = 2;
+    const before = FakeTerminal.last.writes.length;
+    mac.startDetached("resume");
+    expect(FakeTerminal.last.writes).toHaveLength(before);
+  });
+});
+
 describe("a session whose process ended before its terminal existed", () => {
   it("says how it ended, and Enter starts it again", () => {
     const fake = fakeBackend();

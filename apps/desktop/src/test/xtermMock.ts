@@ -59,6 +59,8 @@ export class FakeTerminal {
   readonly resizes: { cols: number; rows: number }[] = [];
   selection = "";
   focusCount = 0;
+  /** Where the cursor is: set by a test that needs it. */
+  readonly buffer = { active: { baseY: 0, cursorX: 0, cursorY: 0 } };
   disposed = false;
   keyHandler: ((event: KeyboardEvent) => boolean) | undefined;
   readonly oscHandlers = new Map<number, (payload: string) => boolean | Promise<boolean>>();
