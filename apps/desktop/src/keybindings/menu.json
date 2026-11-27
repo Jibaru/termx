@@ -1,7 +1,7 @@
 [
   {
     "command": "newSession",
-    "label": "New Session\u2026",
+    "label": "New Session…",
     "menu": "File",
     "section": 1
   },
@@ -37,7 +37,7 @@
   },
   {
     "command": "closeSession",
-    "label": "Close Session\u2026",
+    "label": "Close Session…",
     "menu": "File",
     "section": 3
   },
