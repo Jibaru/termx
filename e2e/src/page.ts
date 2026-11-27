@@ -32,13 +32,17 @@ export interface KeyEvent {
 
 /** The state of the session behind the terminal, as the application sees it. */
 export interface TerminalStatus {
-  kind: "idle" | "starting" | "running" | "exited" | "failed";
-  sessionId?: number;
-  exit?: { code: number | null; signal: string | null };
+  /** `dormant`: restored from the previous run, waiting for Enter. */
+  kind: "idle" | "dormant" | "starting" | "running" | "exited" | "failed";
+  /** While running: the terminal the session runs in, new at every start. */
+  terminal?: number;
+  exit?: { code: number | null; signal: string | null; failure?: unknown };
   message?: string;
 }
 
 export interface TerminalState {
+  /** The session of the workspace, which keeps its id across restarts. */
+  session: string;
   status: TerminalStatus;
   cols: number;
   rows: number;
@@ -64,6 +68,7 @@ export interface PageDiagnostics {
   hook: "missing" | "marker only" | "installed";
   /** What went wrong reading the terminal, if it could not be read. */
   terminalError?: string;
+  session?: string;
   status?: TerminalStatus;
   cols?: number;
   rows?: number;
@@ -127,6 +132,7 @@ export function pageLibrary() {
     buffer: { active: { length: number; getLine(index: number): BufferLine | undefined } };
   }
   interface Controller {
+    sessionId: string;
     terminal: XtermTerminal;
     renderer: "webgl" | "dom";
     getStatus(): TerminalStatus;
@@ -201,6 +207,7 @@ export function pageLibrary() {
       try {
         const active = controller();
         const terminal = active.terminal;
+        result.session = active.sessionId;
         result.status = active.getStatus();
         result.cols = terminal.cols;
         result.rows = terminal.rows;
@@ -233,6 +240,7 @@ export function pageLibrary() {
       const active = controller();
       const terminal = active.terminal;
       return {
+        session: active.sessionId,
         status: active.getStatus(),
         cols: terminal.cols,
         rows: terminal.rows,
