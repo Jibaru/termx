@@ -265,6 +265,36 @@ describe("renaming", () => {
     expect(rowTitles()).toEqual(["zsh"]);
   });
 
+  it("does not commit on the Enter that confirms what an input method composed", async () => {
+    const view = await renderApp(workspace([running("s-1")]));
+
+    fireEvent.doubleClick(row("s-1"));
+    const input = screen.getByTestId("rename-input");
+    fireEvent.change(input, { target: { value: "日本" } });
+    const composing = new KeyboardEvent("keydown", {
+      key: "Enter",
+      bubbles: true,
+      cancelable: true,
+    });
+    // happy-dom does not take these from the init dictionary.
+    Object.defineProperty(composing, "isComposing", { value: true });
+    Object.defineProperty(composing, "keyCode", { value: 229 });
+    fireEvent(input, composing);
+    await flush();
+
+    expect(screen.getByTestId("rename-input")).toBeInTheDocument();
+    expect(view.callsOf("renameSession")).toEqual([]);
+    fireEvent.keyDown(input, { key: "Enter" });
+    await flush();
+    expect(view.callsOf("renameSession")).toEqual([["s-1", "日本"]]);
+  });
+
+  it("isolates titles written in the other direction", async () => {
+    await renderApp(workspace([running("s-1", { title: "שלום" })]));
+
+    expect(within(row("s-1")).getByText("שלום")).toHaveAttribute("dir", "auto");
+  });
+
   it("changes nothing on Escape", async () => {
     const view = await renderApp(workspace([running("s-1")]));
 

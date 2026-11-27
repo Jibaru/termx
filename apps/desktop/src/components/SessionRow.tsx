@@ -16,6 +16,7 @@ import {
   relativeTime,
   relativeTimeLong,
 } from "../workspace/describe";
+import { isComposing } from "../terminal/keymap";
 import { AgentSlot } from "./AgentSlot";
 import { rowElementId } from "./elementIds";
 import { BranchIcon, KindIcon } from "./icons";
@@ -140,7 +141,7 @@ export const SessionRow = memo(function SessionRow(props: SessionRowProps) {
             onCancel={actions.cancelRename}
           />
         ) : (
-          <span className="row-title" title={session.title}>
+          <span className="row-title" dir="auto" title={session.title}>
             {session.title}
           </span>
         )}
@@ -228,6 +229,7 @@ function RenameInput({
     <input
       ref={input}
       className="rename-input"
+      dir="auto"
       data-testid="rename-input"
       aria-label="Session name. Leave empty to use the automatic title."
       defaultValue={initial}
@@ -238,6 +240,8 @@ function RenameInput({
       onKeyDown={(event: KeyboardEvent) => {
         // The keys of the input stay in it, away from the tree.
         event.stopPropagation();
+        // Enter that confirms what an input method composed is not a commit.
+        if (isComposing(event.nativeEvent)) return;
         if (event.key === "Enter") {
           event.preventDefault();
           commit();

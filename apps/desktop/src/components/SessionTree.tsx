@@ -523,7 +523,7 @@ export function SessionTree({ workspace }: { workspace: WorkspaceSnapshot }) {
                 onDragEnd={endDrag}
               >
                 <ChevronIcon className="group-chevron" />
-                <span className="group-name" title={section.title}>
+                <span className="group-name" dir="auto" title={section.title}>
                   {section.name}
                 </span>
                 <span className="group-count" aria-hidden="true">

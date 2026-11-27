@@ -268,6 +268,16 @@ body {
   min-width: 0;
 }
 
+/* Titles come from programs: text in another direction is isolated, so it
+   cannot reorder what is around it. */
+.row-title,
+.pane-title,
+.group-name,
+.folder-name,
+.rename-input {
+  unicode-bidi: isolate;
+}
+
 .row-title {
   display: -webkit-box;
   flex: 1;
