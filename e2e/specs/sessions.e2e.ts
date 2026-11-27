@@ -2,41 +2,14 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { App, createHome, removeHome } from "../src/app.ts";
 import { chord } from "../src/keys.ts";
-import type { TerminalState } from "../src/page.ts";
+import { inFront, stepTimer } from "../src/sessions.ts";
 import { Sidebar } from "../src/sidebar.ts";
-import type { Terminal } from "../src/terminal.ts";
-import { waitFor } from "../src/wait.ts";
 
 /** The shortcut that splits the focused pane side by side. */
 const SPLIT_RIGHT =
   process.platform === "darwin"
     ? chord({ key: "d", code: "KeyD", keyCode: 68 }, { meta: true })
     : chord({ key: "D", code: "KeyD", keyCode: 68 }, { ctrl: true, shift: true });
-
-/**
- * Waits for the terminal in front to satisfy `check`. While the focused
- * pane is empty there is no terminal in front, which is not a failure.
- */
-function inFront(
-  terminal: Terminal,
-  what: string,
-  check: (state: TerminalState) => boolean,
-): Promise<TerminalState> {
-  let last: unknown;
-  return waitFor(
-    async () => {
-      try {
-        const state = await terminal.state();
-        last = state;
-        return check(state) ? state : undefined;
-      } catch (error) {
-        last = String(error);
-        return undefined;
-      }
-    },
-    { what, describe: () => last },
-  );
-}
 
 describe("several sessions", () => {
   let home: string | undefined;
@@ -53,7 +26,9 @@ describe("several sessions", () => {
 
   it("are listed, renamed, split, switched and restored dormant", async () => {
     if (home === undefined) throw new Error("no home directory");
+    const step = stepTimer("sessions");
     const first = await App.launch("sessions-first", { home });
+    step("launch");
     apps.push(first);
     const sidebar = new Sidebar(first.driver);
     const { terminal } = first;
@@ -77,12 +52,15 @@ describe("several sessions", () => {
       (state) => state.session === second.id && state.status.kind === "running",
     );
     await terminal.waitForPrompt();
+    step("second session at its prompt");
 
     // Renamed: the name is what the sidebar shows from then on.
     await sidebar.rename(second.id, "Second shell");
     await sidebar.waitForRows("the new name", (rows) =>
       rows.some((row) => row.id === second.id && row.title === "Second shell"),
     );
+
+    step("rename");
 
     // Split with the shortcut: a new, empty pane takes the focus, and the
     // first session goes in it.
@@ -113,10 +91,13 @@ describe("several sessions", () => {
     );
     expect(switched.status).toEqual(started.status);
 
+    step("split and switch");
     expect(await first.quit()).toEqual({ code: 0, signal: null });
+    step("quit");
 
     // Started again: both sessions are back, with their name, not running.
     const again = await App.launch("sessions-second", { home, restored: true });
+    step("launch again");
     apps.push(again);
     const restoredSidebar = new Sidebar(again.driver);
     const restored = await restoredSidebar.waitForRows(
@@ -127,5 +108,6 @@ describe("several sessions", () => {
     expect(restored.find((row) => row.id === second.id)?.title).toBe("Second shell");
     await restoredSidebar.waitForPanes("the two panes", (panes) => panes.length === 2);
     expect(await restoredSidebar.has('[data-testid="restore-banner"]')).toBe(true);
+    step("restored");
   });
 });
