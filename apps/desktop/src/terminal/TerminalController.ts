@@ -95,12 +95,20 @@ const RESTORE_TERMINAL =
 export type TerminalStatus =
   /** No session was started yet: the terminal was never shown. */
   | { kind: "idle" }
+  /**
+   * The session was restored from the previous run and nothing runs. It
+   * waits for the user: Enter resumes it.
+   */
+  | { kind: "dormant" }
   | { kind: "starting" }
   | { kind: "running"; terminal: number }
   /** The process ended. Enter starts a new one. */
   | { kind: "exited"; exit: SessionExit }
   /** The session could not be started. Enter tries again. */
   | { kind: "failed"; message: string };
+
+/** See `TerminalControllerOptions.autoStart`. */
+export type AutoStart = LaunchMode | "dormant" | false;
 
 /** What a controller needs from the outside. Tests replace it. */
 export interface TerminalBackend {
@@ -136,10 +144,12 @@ export interface TerminalControllerOptions {
   sessionId: SessionId;
   /**
    * How the session is started when the terminal is first shown: from
-   * scratch by default, `resume` for a session restored from the previous
-   * run, or `false` to wait for `start` to be called.
+   * scratch by default, `resume` to carry on, `dormant` for a session
+   * restored from the previous run (a notice says so, and Enter resumes
+   * it: nothing starts on its own), or `false` to wait for `start` to be
+   * called.
    */
-  autoStart?: LaunchMode | false;
+  autoStart?: AutoStart;
   config?: TerminalConfig;
   platform?: Platform;
   backend?: TerminalBackend;
@@ -165,6 +175,11 @@ export function exitNotice(exit: SessionExit): string {
     what = "The process exited.";
   }
   return notice(`${what} Press Enter to restart.`);
+}
+
+/** The message shown in the terminal of a session restored from the last run. */
+export function dormantNotice(): string {
+  return notice("This session was restored and is not running. Press Enter to start it.");
 }
 
 /** The message shown in the terminal when its session could not be started. */
@@ -206,7 +221,7 @@ export class TerminalController {
   private readonly backend: TerminalBackend;
   /** The session of the workspace this terminal shows. */
   readonly sessionId: SessionId;
-  private readonly autoStart: LaunchMode | false;
+  private readonly autoStart: AutoStart;
 
   private readonly fitAddon = new FitAddon();
   private webglAddon: WebglAddon | null = null;
@@ -344,7 +359,15 @@ export class TerminalController {
     window.addEventListener("blur", this.handleWindowBlur);
     this.terminal.focus();
 
-    if (this.status.kind === "idle" && this.autoStart !== false) this.start(this.autoStart);
+    if (this.status.kind !== "idle") return;
+    if (this.autoStart === "dormant") {
+      // A session restored from the last run waits for the user: a
+      // background command or an agent is never started behind their back.
+      this.setStatus({ kind: "dormant" });
+      this.terminal.write(dormantNotice());
+    } else if (this.autoStart !== false) {
+      this.start(this.autoStart);
+    }
   }
 
   /** Takes the terminal off the screen. Its session keeps running. */
@@ -503,12 +526,22 @@ export class TerminalController {
 
   private handleInput(data: string, binary: boolean): void {
     if (this.disposed) return;
-    if (this.status.kind === "exited" || this.status.kind === "failed") {
+    if (
+      this.status.kind === "exited" ||
+      this.status.kind === "failed" ||
+      this.status.kind === "dormant"
+    ) {
       // Only Enter does something in a terminal without a process: a
-      // start that failed is tried again as it was asked, and a session
-      // that ended is started from scratch.
+      // restored session is resumed, a start that failed is tried again
+      // as it was asked, and a session that ended is started from scratch.
       if (data.includes("\r")) {
-        this.start(this.status.kind === "failed" ? this.lastMode : "fresh");
+        const mode =
+          this.status.kind === "dormant"
+            ? "resume"
+            : this.status.kind === "failed"
+              ? this.lastMode
+              : "fresh";
+        this.start(mode);
       }
       return;
     }

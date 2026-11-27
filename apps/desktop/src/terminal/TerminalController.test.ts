@@ -164,6 +164,38 @@ describe("starting", () => {
     expect(fake.creates[0]?.options).toEqual({ mode: "resume", cols: 80, rows: 24 });
   });
 
+  it("leaves a restored session alone until Enter starts it", async () => {
+    const fake = fakeBackend();
+    const controller = new TerminalController({
+      sessionId: "s-restored",
+      autoStart: "dormant",
+      backend: fake.backend,
+      platform: "linux",
+    });
+
+    controller.attach(pane());
+
+    expect(fake.creates).toHaveLength(0);
+    expect(controller.getStatus()).toEqual({ kind: "dormant" });
+    expect(FakeTerminal.last.text).toContain(
+      "This session was restored and is not running. Press Enter to start it.",
+    );
+    // Typing is not sent anywhere, and only Enter starts it.
+    FakeTerminal.last.type("ls");
+    expect(fake.creates).toHaveLength(0);
+    // Shown again, it still waits.
+    controller.detach();
+    controller.attach(pane());
+    expect(fake.creates).toHaveLength(0);
+
+    FakeTerminal.last.type("\r");
+    expect(fake.creates.map((call) => call.options)).toEqual([
+      { mode: "resume", cols: 80, rows: 24 },
+    ]);
+    await fake.creates[0]?.started();
+    expect(controller.getStatus()).toEqual({ kind: "running", terminal: 1 });
+  });
+
   it("waits to be told when it must not start on its own", async () => {
     const fake = fakeBackend();
     const controller = new TerminalController({

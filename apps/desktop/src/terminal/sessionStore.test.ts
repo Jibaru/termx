@@ -13,7 +13,7 @@ import type { TerminalController } from "./TerminalController";
 function store(restored: WorkspaceSnapshot = workspace()) {
   const controllers: {
     sessionId: SessionId;
-    autoStart: LaunchMode;
+    autoStart: LaunchMode | "dormant";
     dispose: ReturnType<typeof vi.fn>;
   }[] = [];
   const created: NewSession[] = [];
@@ -61,7 +61,7 @@ describe("SessionStore", () => {
     expect(sessions.get("s-new-1")).toBe(controllers[0]);
   });
 
-  it("resumes the session termx last had on screen instead of creating one", async () => {
+  it("shows the session termx last had on screen, without starting it", async () => {
     const restored = workspace(
       [
         session("s-first", { state: { status: "dormant" } }),
@@ -75,7 +75,7 @@ describe("SessionStore", () => {
 
     expect(created).toEqual([]);
     expect(controllers).toHaveLength(1);
-    expect(controllers[0]).toMatchObject({ sessionId: "s-shown", autoStart: "resume" });
+    expect(controllers[0]).toMatchObject({ sessionId: "s-shown", autoStart: "dormant" });
     expect(sessions.getSnapshot().activeKey).toBe("s-shown");
   });
 
