@@ -1,4 +1,11 @@
-import { type KeyboardEvent, type SyntheticEvent, useMemo, useState } from "react";
+import {
+  type KeyboardEvent,
+  type SyntheticEvent,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import type { SessionKind } from "../lib/ipc";
 import { useWorkbench, useWorkspace } from "../workspace/context";
@@ -16,17 +23,34 @@ type Folder = string | null;
  * folders with the most recent one chosen and Claude Code as the kind, so
  * Enter alone starts Claude Code where the user last worked. Up and Down
  * choose another folder; "Choose folder…" opens the picker of the system.
- * A background command needs its command line, and may get a name.
+ * Delete, or the × of a folder, takes it off the recent folders, which can
+ * be undone until the dialog closes. A background command needs its
+ * command line, and may get a name.
  */
 export function NewSessionDialog() {
   const workbench = useWorkbench();
   const workspace = useWorkspace();
   const recent = useMemo(() => workspace?.recentFolders ?? [], [workspace]);
   const [picked, setPicked] = useState<string[]>([]);
+  // Taken off the list, and forgotten for good when the dialog closes.
+  const [removed, setRemoved] = useState<string[]>([]);
   const folders = useMemo<Folder[]>(() => {
-    const list = [...picked, ...recent.filter((folder) => !picked.includes(folder))];
+    const list = [...picked, ...recent.filter((folder) => !picked.includes(folder))].filter(
+      (folder) => !removed.includes(folder),
+    );
     return list.length > 0 ? list : [null];
-  }, [picked, recent]);
+  }, [picked, recent, removed]);
+  const pending = useRef({ removed, recent });
+  useEffect(() => {
+    pending.current = { removed, recent };
+  });
+  useEffect(
+    () => () => {
+      const { removed: gone, recent: known } = pending.current;
+      for (const path of gone) if (known.includes(path)) void workbench.forgetFolder(path);
+    },
+    [workbench],
+  );
   const [chosen, setChosen] = useState<Folder | undefined>(undefined);
   const folder = chosen !== undefined && folders.includes(chosen) ? chosen : folders[0];
   const [kind, setKind] = useState<SessionKind>("claude");
@@ -83,16 +107,22 @@ export function NewSessionDialog() {
     } else if (event.key === "Enter") {
       event.preventDefault();
       submit();
-    } else if ((event.key === "Delete" || event.key === "Backspace") && folder) {
+    } else if (event.key === "Delete" && folder) {
+      // Delete, never Backspace, which is too easy to press by mistake.
       event.preventDefault();
       forget(folder);
     }
   };
 
   const forget = (path: string) => {
-    setPicked((previous) => previous.filter((each) => each !== path));
-    if (recent.includes(path)) void workbench.forgetFolder(path);
+    setRemoved((previous) => [...previous.filter((each) => each !== path), path]);
   };
+
+  const undo = () => {
+    setRemoved((previous) => previous.slice(0, -1));
+  };
+
+  const lastRemoved = removed.at(-1);
 
   const optionId = (index: number) => `new-session-folder-${String(index)}`;
 
@@ -177,6 +207,21 @@ export function NewSessionDialog() {
               </li>
             ))}
           </ul>
+          {lastRemoved !== undefined && (
+            <p className="folder-removed" role="status" data-testid="folder-removed">
+              <span>
+                Removed <bdi>{folderName(lastRemoved)}</bdi> from the recent folders.
+              </span>
+              <button
+                type="button"
+                className="link-button"
+                data-testid="folder-undo"
+                onClick={undo}
+              >
+                Undo
+              </button>
+            </p>
+          )}
           <button type="button" className="button" data-testid="choose-folder" onClick={choose}>
             Choose folder…
           </button>
