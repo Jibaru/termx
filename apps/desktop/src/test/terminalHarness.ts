@@ -38,6 +38,8 @@ export interface CreateCall {
 /** The Rust side, as far as a controller can tell. */
 export function fakeBackend() {
   const creates: CreateCall[] = [];
+  /** Calls to `attachSession`, answered like those to `startSession`. */
+  const attaches: (Omit<CreateCall, "options"> & { size: { cols: number; rows: number } })[] = [];
   const writes: { id: number; data: string; binary: boolean; done: () => Promise<void> }[] = [];
   const resizes: { id: number; cols: number; rows: number }[] = [];
   const acks: { id: number; bytes: number }[] = [];
@@ -54,6 +56,29 @@ export function fakeBackend() {
       creates.push({
         session,
         options,
+        handlers,
+        started: async (overrides = {}) => {
+          call.resolve({
+            terminal,
+            ackBatchBytes: ACK_BATCH,
+            windowsBuildNumber: null,
+            ...overrides,
+          });
+          await settle();
+        },
+        failed: async (reason) => {
+          call.reject(reason);
+          await settle();
+        },
+      });
+      return call.promise;
+    },
+    attachSession: (session, size, handlers) => {
+      const call = deferred<StartedSession>();
+      const terminal = nextId++;
+      attaches.push({
+        session,
+        size,
         handlers,
         started: async (overrides = {}) => {
           call.resolve({
@@ -113,7 +138,7 @@ export function fakeBackend() {
       return Promise.resolve();
     },
   };
-  return { backend, creates, writes, resizes, acks, titles, folders, opened, clipboard };
+  return { backend, creates, attaches, writes, resizes, acks, titles, folders, opened, clipboard };
 }
 
 /** Lets the promise callbacks that are ready run. */

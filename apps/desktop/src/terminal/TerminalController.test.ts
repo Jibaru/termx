@@ -1088,6 +1088,96 @@ describe("moving between panes", () => {
   });
 });
 
+describe("a session that already runs (the page was reloaded)", () => {
+  function reattaching() {
+    const fake = fakeBackend();
+    const controller = new TerminalController({
+      sessionId: "s-live",
+      autoStart: "reattach",
+      backend: fake.backend,
+      platform: "linux",
+    });
+    return { ...fake, controller };
+  }
+
+  it("is attached to, never started again", async () => {
+    const { controller, attaches, creates, acks } = reattaching();
+
+    controller.attach(pane());
+
+    expect(creates).toHaveLength(0);
+    expect(attaches.map((call) => [call.session, call.size])).toEqual([
+      ["s-live", { cols: 80, rows: 24 }],
+    ]);
+    const attach = attaches[0];
+    if (!attach) throw new Error("not attached");
+    // The replay of its recent output repaints the terminal.
+    attach.handlers.onOutput(bytes("before the reload"));
+    await attach.started();
+    expect(controller.getStatus()).toEqual({ kind: "running", terminal: 1 });
+    expect(FakeTerminal.last.text).toContain("before the reload");
+    expect(FakeTerminal.last.text).not.toContain("restored");
+    attach.handlers.onOutput(new Uint8Array(ACK_BATCH));
+    FakeTerminal.last.parseWrites();
+    expect(acks.at(-1)?.id).toBe(1);
+  });
+
+  it("sends what is typed while it attaches once it is attached", async () => {
+    const { controller, attaches, writes } = reattaching();
+    controller.attach(pane());
+
+    FakeTerminal.last.type("y");
+    expect(writes).toEqual([]);
+    await attaches[0]?.started();
+
+    expect(writes.map((write) => write.data)).toEqual(["y"]);
+  });
+
+  it("says so when the session stopped meanwhile, and Enter resumes it", async () => {
+    const { controller, attaches, creates } = reattaching();
+    controller.attach(pane());
+
+    await attaches[0]?.failed({ command: "session_attach", kind: "notFound", message: "" });
+
+    expect(controller.getStatus()).toEqual({ kind: "dormant" });
+    expect(FakeTerminal.last.text).toContain(
+      "This session is not running. Press Enter to start it.",
+    );
+    FakeTerminal.last.type("\r");
+    expect(creates[0]?.options.mode).toBe("resume");
+  });
+
+  it("can be attached to before it is shown", () => {
+    const { controller, attaches } = reattaching();
+
+    controller.reattach();
+    controller.reattach();
+
+    expect(attaches).toHaveLength(1);
+  });
+});
+
+describe("a session whose process ended before its terminal existed", () => {
+  it("says how it ended, and Enter starts it again", () => {
+    const fake = fakeBackend();
+    const controller = new TerminalController({
+      sessionId: "s-ended",
+      autoStart: { exited: { code: 4, signal: null, failure: null } },
+      backend: fake.backend,
+      platform: "linux",
+    });
+
+    controller.attach(pane());
+
+    expect(fake.creates).toHaveLength(0);
+    expect(FakeTerminal.last.text).toContain(
+      "The process exited with code 4. Press Enter to restart.",
+    );
+    FakeTerminal.last.type("\r");
+    expect(fake.creates[0]?.options.mode).toBe("fresh");
+  });
+});
+
 describe("off the screen", () => {
   it("keeps parsing and acknowledging the output of a hidden terminal", async () => {
     const { controller, terminal, create, acks } = await attached();

@@ -38,3 +38,40 @@ export function ConfirmCloseDialog({ session: id }: { session: SessionId }) {
     </Modal>
   );
 }
+
+/** Asks before restarting a session whose process runs. */
+export function ConfirmRestartDialog({ session: id }: { session: SessionId }) {
+  const workbench = useWorkbench();
+  const workspace = useWorkspace();
+  const session = workspace?.sessions.find((each) => each.id === id);
+  if (!session) return null;
+  return (
+    <Modal
+      title={`Restart “${session.title}”?`}
+      role="alertdialog"
+      testId="confirm-restart-dialog"
+      onClose={workbench.closeDialog}
+      describedBy="confirm-restart-text"
+    >
+      <p className="modal-text" id="confirm-restart-text">
+        {KIND_LABELS[session.kind]} is running in it. Restarting stops it, and anything it is in the
+        middle of, and starts it again in the same folder.
+      </p>
+      <div className="modal-actions">
+        <button type="button" className="button" data-autofocus onClick={workbench.closeDialog}>
+          Cancel
+        </button>
+        <button
+          type="button"
+          className="button button-danger"
+          data-testid="confirm-restart"
+          onClick={() => {
+            workbench.confirmRestart(id);
+          }}
+        >
+          Restart
+        </button>
+      </div>
+    </Modal>
+  );
+}

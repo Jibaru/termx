@@ -680,6 +680,37 @@ export function startSession(
   options: StartSessionOptions,
   handlers: SessionHandlers,
 ): Promise<StartedSession> {
+  return call<StartedSession>("session_start", {
+    id,
+    request: options,
+    onEvent: sessionChannel(handlers),
+  });
+}
+
+/**
+ * Attaches to the terminal a session already runs in, as a page does after
+ * it was reloaded: nothing is started or restarted. `handlers.onOutput`
+ * first receives the recent output of the terminal (up to 256 KiB, with the
+ * modes its program set), then what follows. The terminal is resized to
+ * `size`, which makes a full-screen program redraw.
+ *
+ * Rejects with `notFound` when the session does not run.
+ */
+export function attachSession(
+  id: SessionId,
+  size: { cols: number; rows: number },
+  handlers: SessionHandlers,
+): Promise<StartedSession> {
+  return call<StartedSession>("session_attach", {
+    id,
+    cols: size.cols,
+    rows: size.rows,
+    onEvent: sessionChannel(handlers),
+  });
+}
+
+/** The channel a session streams to, decoded for `handlers`. */
+function sessionChannel(handlers: SessionHandlers): Channel<SessionMessage> {
   const onEvent = new Channel<SessionMessage>();
   onEvent.onmessage = (message) => {
     if (isSessionEvent(message)) {
@@ -694,7 +725,7 @@ export function startSession(
       );
     }
   };
-  return call<StartedSession>("session_start", { id, request: options, onEvent });
+  return onEvent;
 }
 
 /**

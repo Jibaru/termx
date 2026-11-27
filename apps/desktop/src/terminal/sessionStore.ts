@@ -51,14 +51,33 @@ export function sessionToRestore(workspace: WorkspaceSnapshot): Session | undefi
 }
 
 /**
- * How the terminal of `session` starts when it is first shown. A session
- * that was just created starts at once; one restored from the last run
- * (dormant), one that ended, or one that runs without this window having a
- * terminal for it (the page was reloaded) waits for the user: nothing is
- * started, or restarted, behind their back.
+ * How the terminal of `session` starts when it is first shown.
+ *
+ * - A session that was just created (`starting`, no terminal) starts at once.
+ * - One that runs in a terminal this page did not start, because the page
+ *   was reloaded or the webview came back from a crash, is attached to:
+ *   never shown as dormant, never restarted. A status this version does
+ *   not know counts as running.
+ * - One restored from the last run (dormant) waits for the user, and so
+ *   does one whose process ended: nothing is started behind their back.
  */
 export function autoStartFor(session: Session): AutoStart {
-  return session.state.status === "starting" ? "fresh" : "dormant";
+  switch (session.state.status) {
+    case "dormant":
+      return "dormant";
+    case "starting":
+      return session.terminalId === null ? "fresh" : "reattach";
+    case "exited":
+      return {
+        exited: {
+          code: session.state.code,
+          signal: session.state.signal,
+          failure: session.state.failure,
+        },
+      };
+    default:
+      return "reattach";
+  }
 }
 
 export class SessionStore {
@@ -90,6 +109,17 @@ export class SessionStore {
     this.controllers.set(session.id, controller);
     this.update({ ...this.snapshot, keys: [...this.snapshot.keys, session.id] });
     return controller;
+  }
+
+  /**
+   * Attaches to a session that runs in a terminal this page did not start,
+   * even if it is not on screen, so that its program is never held back
+   * and its output keeps reaching its scrollback. Does nothing for a
+   * session that has a terminal here already.
+   */
+  reattach(session: Session): void {
+    const controller = this.controllerFor(session);
+    if (controller.getStatus().kind === "idle") controller.reattach();
   }
 
   /**
