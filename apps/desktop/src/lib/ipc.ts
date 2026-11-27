@@ -204,14 +204,14 @@ export const LAUNCH_FAILURE_KINDS = [
 /**
  * Where the process of a session is in its life.
  *
- * - `dormant`: restored from the previous run; nothing runs. Offer to
- *   resume it.
+ * - `dormant`: nothing runs: restored from the previous run, or stopped.
+ *   Offer to resume it. A restored session is never started on its own.
  * - `starting`: created, or asked to start; no process yet.
  * - `running`: the process runs.
  * - `exited`: the process ended, or could not be started (`failure`).
  *
- * Later versions add statuses for what an agent is doing (working,
- * waiting, done). Treat a status you do not know as `running`.
+ * It is only about the process: what the agent does is `Session.agent`.
+ * Treat a status you do not know as `running`.
  */
 export type SessionState =
   | { status: "dormant" }
@@ -233,6 +233,29 @@ export const SESSION_STATUSES = [
   "running",
   "exited",
 ] as const satisfies readonly SessionState["status"][];
+
+/**
+ * What the agent of a session is doing, as the hooks of Claude Code will
+ * report it. Reserved: `Session.agent` is always `null` until termx
+ * installs those hooks. That version only fills it in, adding fields and
+ * statuses; `SessionState` stays about the process. Show nothing about
+ * the agent while it is `null`, and treat a status you do not know as
+ * `working`.
+ */
+export interface AgentState {
+  status: AgentStatus;
+  /** Since when it waits for the user, while it does. */
+  waitingSince: number | null;
+}
+
+/** What the agent does: works, waits for the user, or has finished. */
+export type AgentStatus = "working" | "waiting" | "idle";
+
+export const AGENT_STATUSES = [
+  "working",
+  "waiting",
+  "idle",
+] as const satisfies readonly AgentStatus[];
 
 /** What groups sessions in the sidebar. */
 export interface Project {
@@ -281,8 +304,11 @@ export interface Session {
   createdAt: number;
   /** When it last printed something, or was last started. */
   lastActivityAt: number;
-  /** Since when its agent waits for the user. Always `null` for now. */
-  waitingSince: number | null;
+  /**
+   * What the agent of a Claude Code session is doing. Always `null` for
+   * now: see `AgentState`.
+   */
+  agent: AgentState | null;
   /** The conversation Claude Code resumes, once known. */
   claudeSessionId: string | null;
   /**

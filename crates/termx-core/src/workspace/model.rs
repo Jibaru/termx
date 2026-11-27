@@ -106,10 +106,11 @@ pub enum SessionKind {
 
 /// Where the process of a session is in its life.
 ///
-/// This is serialized with a `status` tag. The enum is `#[non_exhaustive]`
-/// and a frontend must treat a status it does not know as
-/// [`Running`](Self::Running): later versions report what an agent is doing
-/// (working, waiting, done) as further statuses of a running session.
+/// This is serialized with a `status` tag. It is only ever about the
+/// process: what the agent in it is doing goes in [`Session::agent`], and
+/// is never added here. The enum is `#[non_exhaustive]` all the same, and a
+/// frontend treats a status it does not know as
+/// [`Running`](Self::Running).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "camelCase")]
 #[non_exhaustive]
@@ -189,12 +190,15 @@ pub struct Session {
     pub created_at: u64,
     /// When the session last printed something, or was last started.
     pub last_activity_at: u64,
-    /// Since when the agent of the session waits for the user. Always
-    /// `None` for now: set from the hooks of Claude Code in a later
-    /// version.
-    pub waiting_since: Option<u64>,
+    /// What the agent of a Claude Code session is doing, as its hooks
+    /// report it. Always `None` for now: see [`AgentState`].
+    pub agent: Option<AgentState>,
     /// The identifier Claude Code gave its conversation, to resume it with
     /// `claude --resume`. `None` until it is known.
+    ///
+    /// It stays here rather than in [`agent`](Self::agent): it belongs to
+    /// the session, is saved with it, and is needed to resume a dormant
+    /// session, which has no agent running.
     pub claude_session_id: Option<String>,
     /// Something the user should know about the session while it runs,
     /// with a message for them. For now only
@@ -202,6 +206,51 @@ pub struct Session {
     /// did not get to the command. Cleared when the command starts after
     /// all, and when the session starts again.
     pub warning: Option<LaunchFailure>,
+}
+
+/// What the agent of a session is doing.
+///
+/// Reserved for the version that installs hooks in Claude Code: until then
+/// [`Session::agent`] is always `None`. That version only sets it (and the
+/// conversation, with
+/// [`Workspace::set_claude_session_id`](super::Workspace::set_claude_session_id)):
+/// it adds fields and statuses, never changes these, and never touches
+/// [`SessionState`]. A frontend shows nothing about the agent while it is
+/// `null`, and treats a status it does not know as
+/// [`Working`](AgentStatus::Working).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct AgentState {
+    /// What the agent does.
+    pub status: AgentStatus,
+    /// Since when it waits for the user, while it does. Milliseconds since
+    /// 1970.
+    pub waiting_since: Option<u64>,
+}
+
+/// What the agent of a session does. See [`AgentState`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub enum AgentStatus {
+    /// It works on what it was asked.
+    Working,
+    /// It waits for the user: an answer, a permission.
+    Waiting,
+    /// It finished and has nothing to do.
+    Idle,
+}
+
+impl AgentState {
+    /// An agent in `status`, waiting since `waiting_since`.
+    #[must_use]
+    pub fn new(status: AgentStatus, waiting_since: Option<u64>) -> Self {
+        Self {
+            status,
+            waiting_since,
+        }
+    }
 }
 
 impl Session {

@@ -22,7 +22,7 @@ export function session(id: SessionId, overrides: Partial<Session> = {}): Sessio
     terminalId: null,
     createdAt: 1_000,
     lastActivityAt: 1_000,
-    waitingSince: null,
+    agent: null,
     claudeSessionId: null,
     warning: null,
     ...overrides,

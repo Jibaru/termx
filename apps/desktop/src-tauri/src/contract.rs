@@ -21,8 +21,9 @@ use serde_json::{Value, json};
 use termx_core::pty::ExitStatus;
 use termx_core::workspace::launch::CLAUDE_MISSING_EXIT_CODE;
 use termx_core::workspace::{
-    Delta, Direction, Edge, GitInfo, LaunchFailure, LaunchMode, Layout, PersistenceMode, Placement,
-    Project, ProjectKind, Session, SessionKey, SessionKind, SessionState, Snapshot,
+    AgentState, AgentStatus, Delta, Direction, Edge, GitInfo, LaunchFailure, LaunchMode, Layout,
+    PersistenceMode, Placement, Project, ProjectKind, Session, SessionKey, SessionKind,
+    SessionState, Snapshot,
 };
 
 use crate::commands::error::{CommandError, ErrorKind};
@@ -75,7 +76,11 @@ fn running_claude() -> Session {
         terminal_id: Some(7),
         created_at: 1_795_716_000_000,
         last_activity_at: 1_795_716_005_340,
-        waiting_since: None,
+        // What the hooks of Claude Code will report. Always null for now.
+        agent: Some(AgentState::new(
+            AgentStatus::Waiting,
+            Some(1_795_716_005_000),
+        )),
         claude_session_id: Some("0b9d6f7e-3c1a-4f3e-9a55-2f6f1f0f8a10".to_owned()),
         warning: None,
     }
@@ -98,7 +103,7 @@ fn dormant_shell() -> Session {
         terminal_id: None,
         created_at: 1_795_700_000_000,
         last_activity_at: 1_795_700_100_000,
-        waiting_since: None,
+        agent: None,
         claude_session_id: None,
         warning: None,
     }
@@ -283,6 +288,7 @@ fn contract() -> Value {
             "direction": [Direction::Row, Direction::Column],
             "placement": [Placement::Before, Placement::After],
             "edge": [Edge::Left, Edge::Right, Edge::Top, Edge::Bottom, Edge::Center],
+            "agentStatus": [AgentStatus::Working, AgentStatus::Waiting, AgentStatus::Idle],
         },
         // What the frontend sends. The test checks that the Rust side reads
         // each of them as intended.
