@@ -6,7 +6,8 @@ default: minor
 
 - A sidebar lists every session, grouped by project (a repository and its
   worktrees together), with background commands in a section of their own.
-  Each row shows the full title, the kind of session, the Git branch, whether
+  Each row shows the title (on up to two lines, the whole of it in a
+  tooltip), the kind of session, the Git branch, whether
   it runs (or why it failed, such as "Claude Code is not installed" or
   "Folder no longer exists") and when it last printed something. The
   sidebar can be resized and hidden.
