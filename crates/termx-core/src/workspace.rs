@@ -50,6 +50,25 @@
 //! a background command starts anew in the same folder) or
 //! [`LaunchMode::Fresh`].
 //!
+//! # Saving
+//!
+//! The state file is written on the thread of the workspace, never on a
+//! caller's. What the user does on purpose is saved at once: creating,
+//! closing, renaming or moving a session or a project, splitting, closing
+//! or moving a pane or showing a session in one, forgetting a recent
+//! folder, and the conversation of a session becoming known. What changes
+//! in bursts is saved once it has been left alone for [`SAVE_DEBOUNCE`],
+//! and never later than [`SAVE_MAX_WAIT`] after the first change of the
+//! burst: titles set by programs, activity, the Git state, the window, a
+//! divider being dragged and the focus. Everything is saved on
+//! [`Workspace::shutdown`].
+//!
+//! So a crash of termx loses at most: a change made on purpose in the
+//! milliseconds before the crash, while it was being written; and the
+//! changes of the last burst, from up to [`SAVE_MAX_WAIT`] before the
+//! crash. A save that fails is tried again, and the frontend is told
+//! ([`PersistenceMode::Failing`]).
+//!
 //! # Which folder counts
 //!
 //! A session is started in [`Session::cwd`], and restarted there. While it

@@ -38,7 +38,7 @@
 //! # A repository that cannot be trusted
 //!
 //! The metadata is read from folders the user chose, which can hold
-//! anything. Only regular files are read, and at most [`MAX_METADATA_BYTES`]
+//! anything. Only regular files are read, and at most 4 KiB
 //! of them: a named pipe or a device in place of `HEAD` or `commondir` is
 //! never opened for reading, since that could block for ever. Symbolic
 //! links are followed by the system, which gives up after a bounded number

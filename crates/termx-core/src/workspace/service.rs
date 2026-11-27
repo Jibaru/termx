@@ -31,8 +31,11 @@ use crate::pty::{ExitStatus, PtyCommand, lock};
 /// need to know more than once per second.
 pub const ACTIVITY_COALESCE: Duration = Duration::from_secs(1);
 
-/// How long the workspace must be left unchanged before it is saved, so
-/// that a burst of changes (dragging a divider) costs one write.
+/// How long the workspace must be left unchanged before a change that
+/// comes in bursts is saved, so that a burst costs one write: titles set by
+/// programs, activity, the Git state, the window geometry, a divider being
+/// dragged, the focus moving between panes. What the user does on purpose
+/// is saved at once instead: see [the module documentation](super#saving).
 pub const SAVE_DEBOUNCE: Duration = Duration::from_secs(1);
 
 /// Longest a change waits to be saved, however many changes follow it.
@@ -285,6 +288,8 @@ struct Signals {
     save: Mutex<Option<(Instant, Instant)>>,
     /// When to try saving again after a save failed.
     retry: Mutex<Option<Instant>>,
+    /// A save is due now. See [`Mutation::persist_now`].
+    urgent: AtomicBool,
     ticker: OnceLock<Thread>,
 }
 
@@ -300,6 +305,12 @@ impl Signals {
         let mut save = lock(&self.save);
         *save = Some((save.map_or(now, |(first, _)| first), now));
         drop(save);
+        self.wake();
+    }
+
+    /// Asks for a save as soon as the thread of the workspace wakes up.
+    fn request_save_now(&self) {
+        self.urgent.store(true, Ordering::Release);
         self.wake();
     }
 
@@ -423,8 +434,13 @@ impl State {
 #[derive(Default)]
 struct Mutation {
     changes: ChangeSet,
-    /// Whether something that is saved changed.
+    /// Whether something that is saved changed: it is saved after
+    /// [`SAVE_DEBOUNCE`], with what changes after it.
     persist: bool,
+    /// Whether something the user did on purpose changed, which is saved
+    /// at once: a session was created, closed, renamed or moved, the
+    /// layout changed, a conversation became known.
+    persist_now: bool,
 }
 
 struct Shared {
@@ -460,7 +476,9 @@ impl Shared {
             self.hub.publish(&mutation.changes);
         }
         drop(state);
-        if mutation.persist {
+        if mutation.persist_now {
+            self.signals.request_save_now();
+        } else if mutation.persist {
             self.signals.request_save();
         }
         result
@@ -565,6 +583,7 @@ impl Shared {
     /// Passes the activity on and writes the state file now.
     fn flush(&self) -> io::Result<bool> {
         *lock(&self.signals.save) = None;
+        self.signals.urgent.store(false, Ordering::Release);
         self.signals.activity.store(false, Ordering::Release);
         self.flush_activity();
         self.save()
@@ -665,10 +684,11 @@ fn run_ticker(shared: &Arc<Shared>) {
         let save_due = {
             let mut save = lock(&signals.save);
             let mut retry = lock(&signals.retry);
-            let due = save_at(*save)
-                .into_iter()
-                .chain(*retry)
-                .any(|deadline| deadline <= now);
+            let due = signals.urgent.swap(false, Ordering::AcqRel)
+                || save_at(*save)
+                    .into_iter()
+                    .chain(*retry)
+                    .any(|deadline| deadline <= now);
             if due {
                 *save = None;
                 *retry = None;
@@ -691,7 +711,10 @@ fn run_ticker(shared: &Arc<Shared>) {
         if let Some(deadline) = *lock(&signals.retry) {
             wake = wake.min(deadline);
         }
-        if signals.git.load(Ordering::Acquire) || signals.stop.load(Ordering::Acquire) {
+        if signals.git.load(Ordering::Acquire)
+            || signals.stop.load(Ordering::Acquire)
+            || signals.urgent.load(Ordering::Acquire)
+        {
             continue;
         }
         let sleep = wake.saturating_duration_since(Instant::now());
@@ -982,7 +1005,7 @@ impl Workspace {
             mutation.changes.recent_folders = true;
             mutation.changes.session(&session.id);
             mutation.changes.session_order = true;
-            mutation.persist = true;
+            mutation.persist_now = true;
             state.entries.push(Entry {
                 session: session.clone(),
                 activity: Arc::default(),
@@ -1026,7 +1049,7 @@ impl Workspace {
                 session.name = name;
                 session.refresh_title();
                 mutation.changes.session(key);
-                mutation.persist = true;
+                mutation.persist_now = true;
             }
             Ok(())
         })
@@ -1120,7 +1143,7 @@ impl Workspace {
             if session.claude_session_id.as_deref() != id {
                 session.claude_session_id = id.map(str::to_owned);
                 mutation.changes.session(key);
-                mutation.persist = true;
+                mutation.persist_now = true;
             }
             Ok(())
         })
@@ -1160,7 +1183,7 @@ impl Workspace {
                 .ne(order_before.iter())
             {
                 mutation.changes.session_order = true;
-                mutation.persist = true;
+                mutation.persist_now = true;
             }
             Ok(())
         })
@@ -1189,7 +1212,7 @@ impl Workspace {
                 .unwrap_or(state.project_order.len());
             state.project_order.insert(to, key.to_owned());
             // `mutate` notices whether the order of the projects changed.
-            mutation.persist = true;
+            mutation.persist_now = true;
             Ok(())
         })
     }
@@ -1210,7 +1233,7 @@ impl Workspace {
             }
             mutation.changes.removed.insert(key.clone());
             mutation.changes.session_order = true;
-            mutation.persist = true;
+            mutation.persist_now = true;
             Ok::<_, WorkspaceError>(entry.session.terminal_id)
         })?;
         info!(session = %key, "session removed");
@@ -1426,7 +1449,7 @@ impl Workspace {
         placement: Placement,
         session: Option<SessionKey>,
     ) -> Result<PaneId, WorkspaceError> {
-        self.change_layout(session.as_ref(), |layout| {
+        self.change_layout(session.as_ref(), false, |layout| {
             layout.split(pane, direction, placement, session.clone())
         })
     }
@@ -1437,7 +1460,7 @@ impl Workspace {
     ///
     /// The errors of [`Layout::close`].
     pub fn close_pane(&self, pane: PaneId) -> Result<(), WorkspaceError> {
-        self.change_layout(None, |layout| layout.close(pane))
+        self.change_layout(None, false, |layout| layout.close(pane))
     }
 
     /// Moves a pane. See [`Layout::move_pane`].
@@ -1451,7 +1474,7 @@ impl Workspace {
         target: PaneId,
         edge: Edge,
     ) -> Result<(), WorkspaceError> {
-        self.change_layout(None, |layout| layout.move_pane(pane, target, edge))
+        self.change_layout(None, false, |layout| layout.move_pane(pane, target, edge))
     }
 
     /// Resizes a split and returns the ratio that was set. See
@@ -1461,7 +1484,7 @@ impl Workspace {
     ///
     /// The errors of [`Layout::resize`].
     pub fn resize_split(&self, split: SplitId, ratio: f64) -> Result<f64, WorkspaceError> {
-        self.change_layout(None, |layout| layout.resize(split, ratio))
+        self.change_layout(None, true, |layout| layout.resize(split, ratio))
     }
 
     /// Gives the focus to a pane. See [`Layout::focus`].
@@ -1470,7 +1493,7 @@ impl Workspace {
     ///
     /// The errors of [`Layout::focus`].
     pub fn focus_pane(&self, pane: PaneId) -> Result<(), WorkspaceError> {
-        self.change_layout(None, |layout| layout.focus(pane))
+        self.change_layout(None, true, |layout| layout.focus(pane))
     }
 
     /// Shows a session in a pane, or empties the pane. See
@@ -1485,14 +1508,18 @@ impl Workspace {
         pane: PaneId,
         session: Option<SessionKey>,
     ) -> Result<(), WorkspaceError> {
-        self.change_layout(session.as_ref(), |layout| {
+        self.change_layout(session.as_ref(), false, |layout| {
             layout.show(pane, session.clone())
         })
     }
 
+    /// Changes the layout. `frequent` is for the changes that come in
+    /// bursts (dragging a divider, moving the focus around), which are
+    /// saved after [`SAVE_DEBOUNCE`]; the others are saved at once.
     fn change_layout<R>(
         &self,
         session: Option<&SessionKey>,
+        frequent: bool,
         change: impl FnOnce(&mut Layout) -> Result<R, LayoutError>,
     ) -> Result<R, WorkspaceError> {
         self.shared.mutate(|state, mutation| {
@@ -1504,6 +1531,7 @@ impl Workspace {
             if state.layout != before {
                 mutation.changes.layout = true;
                 mutation.persist = true;
+                mutation.persist_now = !frequent;
             }
             Ok(result)
         })
@@ -1524,7 +1552,7 @@ impl Workspace {
             let removed = state.recent_folders.len() != before;
             if removed {
                 mutation.changes.recent_folders = true;
-                mutation.persist = true;
+                mutation.persist_now = true;
             }
             removed
         })
@@ -1855,6 +1883,50 @@ mod tests {
         let text =
             std::fs::read_to_string(state_dir.join(super::super::store::STATE_FILE)).unwrap();
         assert!(text.contains("unsaved"));
+    }
+
+    #[test]
+    fn what_the_user_does_is_saved_at_once_and_titles_later() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = WorkspaceConfig::new(dir.path().join("state"));
+        // Without an immediate save, nothing would be written in this test.
+        config.save_debounce = Duration::from_secs(3600);
+        config.save_max_wait = Duration::from_secs(3600);
+        let workspace = Workspace::open(config);
+        let state = dir
+            .path()
+            .join("state")
+            .join(super::super::store::STATE_FILE);
+        let saved =
+            |needle: &str| std::fs::read_to_string(&state).is_ok_and(|text| text.contains(needle));
+        let wait_for = |needle: &str| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !saved(needle) {
+                assert!(Instant::now() < deadline, "{needle:?} was never saved");
+                thread::sleep(Duration::from_millis(5));
+            }
+        };
+
+        let session = workspace
+            .create_session(NewSession::new(SessionKind::Shell, dir.path()))
+            .unwrap();
+        wait_for(session.id.as_str());
+        workspace
+            .rename_session(&session.id, Some("by-hand"))
+            .unwrap();
+        wait_for("by-hand");
+        let pane = workspace.layout().focused();
+        workspace
+            .split_pane(pane, Direction::Column, Placement::After, None)
+            .unwrap();
+        wait_for("column");
+
+        // A title set by a program changes too often to be saved each time.
+        workspace.report_title(&session.id, "from-program").unwrap();
+        thread::sleep(Duration::from_millis(300));
+        assert!(!saved("from-program"));
+        workspace.flush().unwrap();
+        assert!(saved("from-program"));
     }
 
     #[test]
