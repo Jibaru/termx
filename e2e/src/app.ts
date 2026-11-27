@@ -97,6 +97,18 @@ function freePort(): Promise<number> {
 
 export interface LaunchOptions {
   /**
+   * The home directory of an earlier run, to start termx again on what it
+   * saved there (its state directory is inside). Made with `createHome`,
+   * and removed with `removeHome` by whoever passes it, not by the `App`.
+   */
+  home?: string;
+  /**
+   * The terminal on screen is a session restored from an earlier run: wait
+   * for it to be dormant, waiting for Enter, rather than for a shell at its
+   * prompt.
+   */
+  restored?: boolean;
+  /**
    * Windows only: start the application the way a process that ignores
    * Ctrl+C does, which the application inherits.
    */
@@ -179,6 +191,8 @@ export class App {
     readonly terminal: Terminal,
     /** The home directory the application and its shells run with. */
     readonly home: string,
+    /** Whether the home directory goes with this run (see `LaunchOptions.home`). */
+    private readonly ownsHome: boolean,
     /** Where the application writes its log files. */
     readonly logDir: string,
   ) {
@@ -242,6 +256,13 @@ export class App {
           what: "the application to put a terminal on screen",
           timeoutMs: STARTUP_TIMEOUT_MS,
         });
+        if (options.restored === true) {
+          await app.terminal.waitForState(
+            "the restored session to wait for Enter",
+            (state) => state.status.kind === "dormant",
+          );
+          return app;
+        }
         await app.terminal.waitForState(
           "the shell to be running",
           (state) => state.status.kind === "running",
@@ -261,7 +282,8 @@ export class App {
     rmSync(runDir, { recursive: true, force: true });
     const logDir = join(runDir, "logs");
     mkdirSync(logDir, { recursive: true });
-    const home = await mkdtemp(join(tmpdir(), "termx-e2e-home-"));
+    const ownsHome = options.home === undefined;
+    const home = options.home ?? (await createHome());
     const port = await freePort();
 
     // Everything the application prints, which in a debug build includes
@@ -322,14 +344,14 @@ export class App {
         }
         throw error;
       }
-      return new App(name, child, driver, new Terminal(driver), home, logDir);
+      return new App(name, child, driver, new Terminal(driver), home, ownsHome, logDir);
     } catch (error) {
       child.kill("SIGKILL");
       await waitFor(() => exited ?? spawnError, {
         what: "the application to exit after it was killed",
         timeoutMs: EXIT_TIMEOUT_MS,
       }).catch(() => undefined);
-      removeHome(home);
+      if (ownsHome) await removeHome(home);
       throw error;
     }
   }
@@ -384,7 +406,7 @@ export class App {
     });
   }
 
-  /** Ends the application whatever its state, and removes its home. */
+  /** Ends the application whatever its state, and removes its home if it made it. */
   async dispose(): Promise<void> {
     if (!this.exitInfo()) {
       await this.driver.closeWindow().catch(() => undefined);
@@ -392,7 +414,7 @@ export class App {
       while (!this.exitInfo() && Date.now() < deadline) await delay(50);
       if (!this.exitInfo()) this.child.kill("SIGKILL");
     }
-    removeHome(this.home);
+    if (this.ownsHome) await removeHome(this.home);
   }
 
   /** The text of every log file the application has written. */
@@ -445,15 +467,29 @@ function outputOfRun(outputPath: string, logDir: string): string {
   ].join("\n");
 }
 
+/** A new, empty home directory for a run of the application. */
+export function createHome(): Promise<string> {
+  return mkdtemp(join(tmpdir(), "termx-e2e-home-"));
+}
+
 /**
- * Removes a home directory of a run. A process of WebView2 can keep a file
- * open for a moment after the application is gone, so this tries a few
- * times, and only warns if it cannot.
+ * Removes a home directory of a run. The processes of WebView2 can keep
+ * files open, and even write new ones, for a few seconds after the
+ * application is gone, so this tries for a while, and only warns if it
+ * cannot.
  */
-function removeHome(home: string): void {
-  try {
-    rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
-  } catch (error) {
-    console.warn(`the home directory of a run could not be removed: ${String(error)}`);
+export async function removeHome(home: string): Promise<void> {
+  const deadline = Date.now() + 30_000;
+  for (;;) {
+    try {
+      rmSync(home, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
+      return;
+    } catch (error) {
+      if (Date.now() >= deadline) {
+        console.warn(`the home directory of a run could not be removed: ${String(error)}`);
+        return;
+      }
+      await delay(500);
+    }
   }
 }

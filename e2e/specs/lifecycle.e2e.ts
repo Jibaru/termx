@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+import { App, createHome, removeHome } from "../src/app.ts";
 import { useApp } from "../src/fixture.ts";
 import { enter } from "../src/keys.ts";
 import { isAlive } from "../src/processes.ts";
@@ -75,5 +76,46 @@ describe("quitting the application", () => {
       what: "the shell and its program to be gone",
       describe: () => ({ shell: isAlive(shellPid), program: isAlive(programPid) }),
     });
+  });
+});
+
+describe("starting termx again", () => {
+  let home: string | undefined;
+  const apps: App[] = [];
+
+  beforeAll(async () => {
+    home = await createHome();
+  });
+
+  afterAll(async () => {
+    for (const app of apps) await app.dispose();
+    if (home !== undefined) await removeHome(home);
+  }, 120_000);
+
+  it("brings the session back dormant, and Enter starts it", async () => {
+    if (home === undefined) throw new Error("no home directory");
+    const first = await App.launch("restore-first", { home });
+    apps.push(first);
+    const { session } = await first.terminal.state();
+    expect(await first.quit()).toEqual({ code: 0, signal: null });
+
+    // The same home, so the same state directory and the same folder.
+    const second = await App.launch("restore-second", { home, restored: true });
+    apps.push(second);
+    const { terminal } = second;
+    const restored = await terminal.state();
+    expect(restored.session).toBe(session);
+    expect(restored.status.kind).toBe("dormant");
+    await terminal.waitForLine("the notice of a restored session", (line) =>
+      line.includes("This session was restored and is not running. Press Enter to start it."),
+    );
+
+    await terminal.keys(enter());
+    const started = await terminal.waitForState(
+      "the restored session to be running",
+      (state) => state.status.kind === "running",
+    );
+    expect(started.session).toBe(session);
+    await terminal.waitForPrompt();
   });
 });
