@@ -39,6 +39,15 @@ If it contains a secret (a token passed as an argument), that secret is in
 the file: prefer an environment variable or a configuration file of the tool
 for such values.
 
+## Next to it
+
+- `claude-integration.json`: whether you accepted or declined the termx
+  plugin for Claude Code.
+- `claude-plugin/`: that plugin, when it is installed. See
+  [Claude Code in termx](claude-code.md).
+
+The state of each Claude Code agent (working, waiting...) is never saved.
+
 ## What is never in it
 
 - **Nothing that was printed in a terminal.** Scrollback is not stored.

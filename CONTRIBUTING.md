@@ -27,6 +27,8 @@ knope.toml                 Changelog and release configuration
 .changeset/                Change files waiting for the next release
 crates/
   termx-core/              Core library. Must not depend on Tauri or any UI code
+  termx-protocol/          Wire protocol of the local socket; kept small
+  termx-cli/               `termx-cli hook`, the hook sender of the plugin
     src/lib.rs             Public API and module declarations
     src/pty.rs             Pseudo-terminal handling
     src/session.rs         Terminal sessions: registry, output batching, flow control
@@ -60,7 +62,7 @@ e2e/                       End-to-end tests, which drive the real application
   src/                     The harness: starting the application, typing, reading the terminal
   helpers/                 The programs the tests run inside the terminal
 docs/                      User documentation
-plugin/                    Placeholder for the future Claude Code plugin
+plugin/                    The Claude Code plugin, as termx writes it (templates)
 ```
 
 ### Where things go
