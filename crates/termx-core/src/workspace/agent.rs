@@ -13,8 +13,9 @@
 //! | -------------------------------------------- | ------------------------------------------- |
 //! | `SessionStart` (`startup`, `resume`, `clear`, `fork`) | `unknown` (Claude waits at its prompt; nothing asked yet) |
 //! | `SessionStart` (`compact`)                   | unchanged                                   |
+//! | Enter, a digit or Escape typed in the terminal while it waits for permission | `working` |
 //! | `UserPromptSubmit`                           | `working`                                   |
-//! | `PreToolUse`                                 | `working`; `waitingForInput` for `AskUserQuestion` and `ExitPlanMode` |
+//! | `PreToolUse`                                 | `working` (but never ends a permission wait); `waitingForInput` for `AskUserQuestion` and `ExitPlanMode` |
 //! | `PostToolUse`, `PostToolUseFailure`, `PermissionDenied` | `working`                        |
 //! | `PermissionRequest`                          | `waitingForPermission`                      |
 //! | `Notification` `permission_prompt`           | `waitingForPermission`                      |
@@ -106,9 +107,11 @@ pub const WORKING_SILENCE_LIMIT: Duration = Duration::from_secs(60);
 pub const AGENT_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 
 /// How far in the future a report may be dated, in microseconds. A report
-/// dated later is taken as dated now: the clock of a hook is the clock of
-/// this machine, so that only happens when the clock moved.
-const MAX_FUTURE_US: u64 = 60 * 1_000_000;
+/// dated later is taken as dated that much after it arrived: the clock of a
+/// hook is the clock of this machine, so that only happens when the clock
+/// moved, and a report from the future must not shut out the next ones
+/// for long.
+pub const MAX_FUTURE: Duration = Duration::from_secs(2);
 
 /// The sources of `SessionStart` that replace the conversation on purpose.
 const REPLACING_SOURCES: &[&str] = &["clear", "resume", "fork", "compact"];
@@ -160,9 +163,11 @@ impl Tracker {
 
     /// Applies a report that arrived at `now_ms`.
     pub fn apply(&mut self, event: &HookEvent, now_ms: u64) -> Applied {
-        let at = event
-            .at
-            .min(now_ms.saturating_mul(1000).saturating_add(MAX_FUTURE_US));
+        let at = event.at.min(
+            now_ms
+                .saturating_mul(1000)
+                .saturating_add(u64::try_from(MAX_FUTURE.as_micros()).unwrap_or(u64::MAX)),
+        );
         if at < self.last_at {
             return Applied::default();
         }
@@ -224,6 +229,18 @@ impl Tracker {
         }
         applied.changed = self.state != before;
         applied
+    }
+
+    /// The user answered a permission prompt in the terminal (see
+    /// [`is_answer`]): the agent works again. Its next report says what it
+    /// does exactly. Returns whether the state changed; only a permission
+    /// wait is ended this way.
+    pub fn user_answered(&mut self, now_ms: u64) -> bool {
+        if self.status() != Some(AgentStatus::WaitingForPermission) {
+            return false;
+        }
+        self.enter(AgentStatus::Working, None, now_ms);
+        true
     }
 
     /// Degrades a state termx can no longer vouch for. `last_output_ms` is
@@ -312,6 +329,11 @@ impl Tracker {
             "UserPromptSubmit" => Working,
             "PreToolUse" => match event.tool.as_deref() {
                 Some("AskUserQuestion" | "ExitPlanMode") => WaitingForInput,
+                // The hooks are asynchronous: the PreToolUse of a tool can
+                // be dated after the PermissionRequest it led to. A prompt
+                // that is open stays open until the tool ran or failed,
+                // the user acted on it in the terminal, or the turn ended.
+                _ if current == Some(WaitingForPermission) => return None,
                 _ => Working,
             },
             "PostToolUse" | "PostToolUseFailure" | "PermissionDenied" | "ElicitationResult" => {
@@ -388,6 +410,18 @@ impl Tracker {
             stale: true,
         });
     }
+}
+
+/// Whether what was typed in a terminal answers a permission prompt of
+/// Claude Code: Enter (to choose the highlighted option), a digit (to
+/// choose by number), or Escape alone (to refuse). Moving through the
+/// options with the arrows does not.
+#[must_use]
+pub fn is_answer(input: &[u8]) -> bool {
+    input.contains(&b'\r')
+        || input.contains(&b'\n')
+        || input == b"\x1b"
+        || matches!(input, [digit] if digit.is_ascii_digit())
 }
 
 /// Whether the agent waits for the user in `status`.
@@ -647,9 +681,47 @@ mod tests {
     #[test]
     fn a_report_dated_in_the_future_does_not_shut_out_the_next_ones() {
         let mut tracker = Tracker::default();
-        // Dated a day ahead, received at 1 s.
+        // Dated a day ahead, received at 1 s: taken as made at most
+        // MAX_FUTURE after it arrived.
         tracker.apply(&event("UserPromptSubmit", 86_400_000), 1_000);
-        tracker.apply(&event("Stop", 70_000), 70_000);
+        tracker.apply(&event("Stop", 3_500), 3_500);
+        assert_eq!(status(&tracker), Some(Done));
+    }
+
+    #[test]
+    fn a_tool_that_starts_while_permission_is_asked_does_not_hide_the_prompt() {
+        let mut tracker = Tracker::default();
+        // The PreToolUse hook started after the PermissionRequest hook.
+        run(
+            &mut tracker,
+            &[event("UserPromptSubmit", 1), event("PermissionRequest", 2)],
+        );
+        tracker.apply(&event("PreToolUse", 3), 3);
+        assert_eq!(status(&tracker), Some(WaitingForPermission));
+        // The tool ran: the prompt was answered.
+        tracker.apply(&event("PostToolUse", 4), 4);
+        assert_eq!(status(&tracker), Some(Working));
+    }
+
+    #[test]
+    fn input_in_the_terminal_ends_a_permission_wait() {
+        let mut tracker = Tracker::default();
+        run(
+            &mut tracker,
+            &[event("UserPromptSubmit", 1), event("PermissionRequest", 2)],
+        );
+
+        assert!(tracker.user_answered(10));
+
+        let state = tracker.state().unwrap();
+        assert_eq!(
+            (state.status, state.waiting_since, state.since),
+            (Working, None, 10)
+        );
+        // Only a permission wait: input elsewhere changes nothing.
+        assert!(!tracker.user_answered(11));
+        run(&mut tracker, &[event("Stop", 12)]);
+        assert!(!tracker.user_answered(13));
         assert_eq!(status(&tracker), Some(Done));
     }
 
@@ -881,6 +953,16 @@ mod tests {
         // The next report, even an older one, is welcome.
         let applied = tracker.apply(&start("resume", ID, 1), 1);
         assert_eq!(applied.conversation.as_deref(), Some(ID));
+    }
+
+    #[test]
+    fn answers_to_a_prompt_are_told_from_moving_through_it() {
+        for answer in [&b"\r"[..], b"1", b"3", b"\x1b", b"y\r"] {
+            assert!(is_answer(answer), "{answer:?}");
+        }
+        for other in [&b"\x1b[A"[..], b"\x1b[B", b"a", b"", b"12"] {
+            assert!(!is_answer(other), "{other:?}");
+        }
     }
 
     #[test]

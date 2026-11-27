@@ -314,3 +314,31 @@ fn sessions_are_told_where_to_report_once_there_is_a_channel() {
         );
     }
 }
+
+#[test]
+fn answering_a_permission_prompt_in_the_terminal_ends_the_wait() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = Workspace::open(WorkspaceConfig::in_memory());
+    let (session, _) = running(&workspace, SessionKind::Claude, dir.path());
+    let t = now();
+    workspace
+        .report_hook(&session.id, &event("UserPromptSubmit", t))
+        .unwrap();
+    workspace
+        .report_hook(&session.id, &event("PermissionRequest", t + 1))
+        .unwrap();
+
+    // Moving through the options does not answer.
+    workspace.report_input(&session.id, b"\x1b[B");
+    assert_eq!(
+        agent_status(&workspace, &session.id),
+        Some(AgentStatus::WaitingForPermission)
+    );
+    // Enter does, long before the approved tool has run.
+    workspace.report_input(&session.id, b"\r");
+    assert_eq!(
+        agent_status(&workspace, &session.id),
+        Some(AgentStatus::Working)
+    );
+    workspace.report_input(&SessionKey::from_raw("s-nobody").unwrap(), b"\r");
+}
