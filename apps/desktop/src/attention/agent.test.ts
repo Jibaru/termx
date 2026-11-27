@@ -42,7 +42,8 @@ describe("what an agent state shows", () => {
     expect(view("waitingForInput")).toMatchObject({ tone: "attention", waiting: true });
     expect(view("done")).toMatchObject({ icon: "done", tone: "ok", waiting: false });
     // Anything this version does not know, the contract's "unknown" included.
-    for (const status of ["unknown", "brandNew"]) {
+    // Names of properties every object has are statuses like any other.
+    for (const status of ["unknown", "brandNew", "constructor", "toString", "__proto__"]) {
       expect(view(status)).toMatchObject({ icon: "unknown", tone: "neutral", waiting: false });
     }
     expect(viewAgent(null)).toBeNull();
