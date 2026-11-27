@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { App, createHome, removeHome } from "../src/app.ts";
-import { inFront, newShell, stepTimer } from "../src/sessions.ts";
+import { inFront, newShell, shellReady, stepTimer } from "../src/sessions.ts";
 import { Sidebar } from "../src/sidebar.ts";
 
 describe("resuming restored sessions", () => {
@@ -53,7 +53,7 @@ describe("resuming restored sessions", () => {
       "the session in front to run again",
       (state) => state.session === original && state.status.kind === "running",
     );
-    await terminal.waitForPrompt();
+    await shellReady(terminal);
     const rows = await sidebar.waitForRows("one running, one not", (list) =>
       list.some((row) => row.id === original && row.status === "running"),
     );
