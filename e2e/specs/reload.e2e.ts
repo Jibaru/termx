@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { useApp } from "../src/fixture.ts";
 import { isAlive } from "../src/processes.ts";
 import { inFront, stepTimer, ticksOf, upTo } from "../src/sessions.ts";
+import { waitFor } from "../src/wait.ts";
 
 /**
  * How many ticks the program prints, one every `TICK_MS`: 12 s, long
@@ -30,7 +31,20 @@ describe("reloading the page", () => {
     // timer, so that the script returns before its page goes away: a
     // script that reloads its own page gets no answer to WebDriver, which
     // then waits for its own timeout.
-    await app.driver.execute("setTimeout(() => location.reload(), 50); return true;");
+    await app.driver.execute(
+      "window.__TERMX_OLD_PAGE__ = true; setTimeout(() => location.reload(), 50); return true;",
+    );
+    // The old page is gone once its mark is: only then is what is in front
+    // the new page's.
+    await waitFor(
+      () =>
+        app.driver
+          .execute<boolean>(
+            "return document.readyState === 'complete' && !window.__TERMX_OLD_PAGE__;",
+          )
+          .catch(() => false),
+      { what: "the page to load again" },
+    );
 
     const after = await inFront(
       terminal,
