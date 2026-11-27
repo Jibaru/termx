@@ -44,6 +44,7 @@ same folder.
 | Go to session 1 to 9                   | Cmd+1 to 9        | Ctrl+Shift+1 to 9  |
 | Show or hide the sidebar               | Cmd+B             | Ctrl+Shift+B       |
 | Go to the sidebar                      | Cmd+0             | Ctrl+Shift+0       |
+| Go to the session waiting longest      | Shift+Cmd+A       | Ctrl+Shift+A       |
 | Rename the session (in the sidebar)    | F2                | F2                 |
 
 On macOS the same actions are in the menu bar. Cmd+W closes the focused
@@ -63,6 +64,33 @@ waiting for your permission or your answer, or done. termx learns it from
 a Claude Code plugin of its own, installed only if you agree; see
 [Claude Code in termx](docs/claude-code.md) for exactly what that changes
 and what the plugin sends.
+
+### Which session needs you
+
+termx can show what the agent of each Claude Code session is doing: working,
+waiting for your permission, waiting for your answer, or done. For that it
+installs a small plugin in Claude Code, once you agree: the first time termx
+finds Claude Code it asks, with the exact list of files the plugin adds.
+Your own hooks and settings are not changed, and **Remove**, at the bottom of
+the sidebar, takes the plugin out again. If you said not now, **Enable Claude
+Code status** in the same place asks again.
+
+- A session that waits for you is marked on its row (a magenta bar and
+  icon, a bold title) and in the header of its pane. A collapsed project
+  says how many of its sessions wait.
+- **Needs you**, at the top of the sidebar, lists them, the one that has
+  waited longest first. Shift+Cmd+A (Ctrl+Shift+A on Windows and Linux)
+  goes to that one; pressed again, to the next. **Next Session That Needs
+  You**, in the View menu, goes through them in the order of the sidebar.
+- When a session starts to wait and you are not looking at it (the window
+  is in the background, or no pane shows it), termx sends one notification,
+  after a couple of seconds, so that a permission granted at once does not
+  notify. Several at once are one notification. Click it to go to the
+  session. The icon of termx shows how many sessions wait. "Notify me when a
+  session needs me", at the bottom of the sidebar, turns notifications off;
+  "Also when a session is done" turns them on for finished sessions.
+- A session that stopped reporting is shown dimmed, with when it last
+  reported, and never as waiting.
 
 ## Using the terminal
 
