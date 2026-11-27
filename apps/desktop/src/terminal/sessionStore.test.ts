@@ -27,14 +27,23 @@ describe("SessionStore", () => {
   it("starts a new session at once and leaves a restored one waiting for the user", () => {
     expect(autoStartFor(session("s", { state: { status: "starting" } }))).toBe("fresh");
     expect(autoStartFor(session("s", { state: { status: "dormant" } }))).toBe("dormant");
-    // A session that runs without a terminal here is not restarted behind
-    // the user's back (the page was reloaded).
-    expect(autoStartFor(session("s", { state: { status: "running" } }))).toBe("dormant");
+    // A session that runs in a terminal this page did not start (the page
+    // was reloaded) is attached to: never shown dormant, never restarted.
+    expect(autoStartFor(session("s", { state: { status: "running" }, terminalId: 4 }))).toBe(
+      "reattach",
+    );
+    expect(autoStartFor(session("s", { state: { status: "starting" }, terminalId: 4 }))).toBe(
+      "reattach",
+    );
+    expect(autoStartFor(session("s", { state: { status: "hibernating" } as never }))).toBe(
+      "reattach",
+    );
+    // One that ended says how, and waits for Enter.
     expect(
       autoStartFor(
-        session("s", { state: { status: "exited", code: 0, signal: null, failure: null } }),
+        session("s", { state: { status: "exited", code: 2, signal: null, failure: null } }),
       ),
-    ).toBe("dormant");
+    ).toEqual({ exited: { code: 2, signal: null, failure: null } });
   });
 
   it("resumes a session that is not on screen, at the size of the focused terminal", () => {
@@ -49,6 +58,18 @@ describe("SessionStore", () => {
     // Resuming again while it starts does nothing.
     store.resume(session("s-hidden", { state: { status: "dormant" } }));
     expect(of("s-hidden")?.startDetached).toHaveBeenCalledTimes(1);
+  });
+
+  it("attaches to a running session that is not on screen, once", () => {
+    const { store, of } = fakeTerminals();
+    const live = session("s-live", { state: { status: "running" }, terminalId: 3 });
+
+    store.reattach(live);
+    store.reattach(live);
+
+    expect(of("s-live")?.autoStart).toBe("reattach");
+    expect(of("s-live")?.reattach).toHaveBeenCalledTimes(1);
+    expect(of("s-live")?.startDetached).not.toHaveBeenCalled();
   });
 
   it("lets go of the terminals of sessions that left the workspace", () => {

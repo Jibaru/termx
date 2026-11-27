@@ -7,6 +7,7 @@ import { type ITerminalOptions, Terminal } from "@xterm/xterm";
 import { reportError } from "../lib/errorReporting";
 import {
   ackSession,
+  attachSession,
   describeError,
   type LaunchMode,
   logFrontendEvent,
@@ -108,13 +109,18 @@ export type TerminalStatus =
   | { kind: "failed"; message: string };
 
 /** See `TerminalControllerOptions.autoStart`. */
-export type AutoStart = LaunchMode | "dormant" | false;
+export type AutoStart = LaunchMode | "dormant" | "reattach" | { exited: SessionExit } | false;
 
 /** What a controller needs from the outside. Tests replace it. */
 export interface TerminalBackend {
   startSession: (
     id: SessionId,
     options: StartSessionOptions,
+    handlers: SessionHandlers,
+  ) => Promise<StartedSession>;
+  attachSession: (
+    id: SessionId,
+    size: { cols: number; rows: number },
     handlers: SessionHandlers,
   ) => Promise<StartedSession>;
   writeSession: (terminal: number, data: string, binary?: boolean) => Promise<void>;
@@ -129,6 +135,7 @@ export interface TerminalBackend {
 
 const TAURI_BACKEND: TerminalBackend = {
   startSession,
+  attachSession,
   writeSession,
   resizeSession,
   ackSession,
@@ -146,8 +153,11 @@ export interface TerminalControllerOptions {
    * How the session is started when the terminal is first shown: from
    * scratch by default, `resume` to carry on, `dormant` for a session
    * restored from the previous run (a notice says so, and Enter resumes
-   * it: nothing starts on its own), or `false` to wait for `start` to be
-   * called.
+   * it: nothing starts on its own), `reattach` for a session that already
+   * runs in a terminal this page did not start (the page was reloaded):
+   * it is attached to, never restarted; `{ exited }` for a session whose
+   * process ended before this terminal existed (Enter starts it again), or
+   * `false` to wait for `start` to be called.
    */
   autoStart?: AutoStart;
   config?: TerminalConfig;
@@ -186,6 +196,11 @@ export function exitNotice(exit: SessionExit): string {
 /** The message shown in the terminal of a session restored from the last run. */
 export function dormantNotice(): string {
   return notice("This session was restored and is not running. Press Enter to start it.");
+}
+
+/** The message shown in the terminal of a session that stopped running meanwhile. */
+export function notRunningNotice(): string {
+  return notice("This session is not running. Press Enter to start it.");
 }
 
 /** The message shown in the terminal when its session could not be started. */
@@ -379,6 +394,11 @@ export class TerminalController {
       // background command or an agent is never started behind their back.
       this.setStatus({ kind: "dormant" });
       this.terminal.write(dormantNotice());
+    } else if (this.autoStart === "reattach") {
+      this.reattach();
+    } else if (typeof this.autoStart === "object") {
+      this.setStatus({ kind: "exited", exit: this.autoStart.exited });
+      this.terminal.write(exitNotice(this.autoStart.exited));
     } else if (this.autoStart !== false) {
       this.start(this.autoStart);
     }
@@ -456,6 +476,66 @@ export class TerminalController {
     this.launch(mode);
   }
 
+  /**
+   * Attaches to the terminal the session already runs in: its recent
+   * output arrives first and repaints this terminal, then what follows.
+   * Nothing is started. Works whether or not the terminal is shown, and
+   * does nothing unless the terminal has no session yet. If the session
+   * stopped running meanwhile, the terminal says so and Enter starts it.
+   */
+  reattach(): void {
+    if (this.disposed || this.status.kind !== "idle") return;
+    const generation = ++this.generation;
+    this.terminalId = null;
+    this.unacknowledged = 0;
+    const size = { cols: this.terminal.cols, rows: this.terminal.rows };
+    this.sessionSize = size;
+    this.setStatus({ kind: "starting" });
+
+    this.backend
+      .attachSession(this.sessionId, size, {
+        onOutput: (bytes) => {
+          this.handleOutput(generation, bytes);
+        },
+        onExit: (exit) => {
+          this.handleExit(generation, exit);
+        },
+      })
+      .then((attached) => {
+        if (generation !== this.generation) return;
+        this.connected(attached);
+      })
+      .catch(() => {
+        if (generation !== this.generation) return;
+        // It ended between the snapshot and now: resuming is the user's
+        // choice, as for a restored session.
+        this.lastMode = "resume";
+        this.setStatus({ kind: "dormant" });
+        this.terminal.write(notRunningNotice());
+      });
+  }
+
+  /** The session runs in `started`: talk to it. */
+  private connected(started: StartedSession): void {
+    if (started.windowsBuildNumber !== null) {
+      this.terminal.options.windowsPty = {
+        backend: "conpty",
+        buildNumber: started.windowsBuildNumber,
+      };
+    }
+    this.ackBatchBytes = started.ackBatchBytes;
+    // A process that ended at once has reported its exit already: there
+    // is no session left to talk to.
+    if (this.status.kind !== "starting") return;
+
+    this.terminalId = started.terminal;
+    this.setStatus({ kind: "running", terminal: started.terminal });
+    // Whatever happened while the session was starting.
+    this.acknowledge();
+    this.syncSessionSize();
+    this.flushInput();
+  }
+
   private launch(mode: LaunchMode): void {
     const generation = ++this.generation;
     this.lastMode = mode;
@@ -482,23 +562,7 @@ export class TerminalController {
       .then((started) => {
         // The terminal was disposed of, or started again, in the meantime.
         if (generation !== this.generation) return;
-        if (started.windowsBuildNumber !== null) {
-          this.terminal.options.windowsPty = {
-            backend: "conpty",
-            buildNumber: started.windowsBuildNumber,
-          };
-        }
-        this.ackBatchBytes = started.ackBatchBytes;
-        // A process that ended at once has reported its exit already: there
-        // is no session left to talk to.
-        if (this.status.kind !== "starting") return;
-
-        this.terminalId = started.terminal;
-        this.setStatus({ kind: "running", terminal: started.terminal });
-        // Whatever happened while the session was starting.
-        this.acknowledge();
-        this.syncSessionSize();
-        this.flushInput();
+        this.connected(started);
       })
       .catch((error: unknown) => {
         if (generation !== this.generation) return;

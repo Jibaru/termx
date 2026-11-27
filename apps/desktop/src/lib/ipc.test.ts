@@ -38,6 +38,7 @@ import {
   type SessionExit,
   showSession,
   splitPane,
+  attachSession,
   startSession,
   subscribeWorkspace,
   type WorkspaceDelta,
@@ -134,6 +135,29 @@ describe("session commands", () => {
       { code: 113, signal: null, failure },
     ]);
     expect(output).toEqual([]);
+  });
+
+  it("attaches to a running session with a channel, by the arguments of the command", async () => {
+    const ipc = recordIPC(() => ({ terminal: 7, ackBatchBytes: 8192, windowsBuildNumber: null }));
+    const output: Uint8Array[] = [];
+
+    const attached = await attachSession(
+      "s-abc",
+      { cols: 100, rows: 30 },
+      { onOutput: (bytes) => output.push(bytes), onExit: () => undefined },
+    );
+    const args = ipc.calls[0]?.args as {
+      id: unknown;
+      cols: unknown;
+      rows: unknown;
+      onEvent: { onmessage: (message: unknown) => void };
+    };
+    args.onEvent.onmessage(Uint8Array.from([104, 105]).buffer);
+
+    expect(attached.terminal).toBe(7);
+    expect(ipc.calls[0]?.command).toBe("session_attach");
+    expect([args.id, args.cols, args.rows]).toEqual(["s-abc", 100, 30]);
+    expect(Array.from(output[0] ?? [])).toEqual([104, 105]);
   });
 
   it("writes, resizes and acknowledges by the number of the terminal", async () => {

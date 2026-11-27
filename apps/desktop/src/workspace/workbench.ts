@@ -31,7 +31,10 @@ export interface Notice {
 }
 
 export type DialogState =
-  { kind: "none" } | { kind: "newSession" } | { kind: "confirmClose"; session: SessionId };
+  | { kind: "none" }
+  | { kind: "newSession" }
+  | { kind: "confirmClose"; session: SessionId }
+  | { kind: "confirmRestart"; session: SessionId };
 
 export interface UiState {
   dialog: DialogState;
@@ -182,6 +185,11 @@ export class Workbench {
         .filter((session) => session.state.status === "dormant")
         .map((session) => session.id),
     });
+    // Sessions that run already: this page was reloaded. Each is attached
+    // to again, on screen or not, so that none is held back or restarted.
+    for (const session of workspace.sessions) {
+      if (isLive(session) && session.terminalId !== null) this.terminals.reattach(session);
+    }
     if (workspace.sessions.length === 0) {
       await this.run("bootstrap", () => this.backend.createSession({ kind: "shell" }));
       return;
@@ -294,11 +302,27 @@ export class Workbench {
   /** Starts a session that does not run, carrying on where it was. */
   resume = (id: SessionId): void => {
     const session = this.session(id);
-    if (session) this.terminals.resume(session);
+    // One that runs is left alone: resuming it would restart it.
+    if (session && !isLive(session)) this.terminals.resume(session);
   };
 
-  /** Starts a session again from scratch. */
+  /**
+   * Starts a session again from scratch, after asking when it runs: its
+   * process, and whatever Claude Code is in the middle of, would be killed.
+   */
   restart = (id: SessionId): void => {
+    const session = this.session(id);
+    if (!session) return;
+    if (isLive(session)) {
+      this.setUi({ dialog: { kind: "confirmRestart", session: id } });
+      return;
+    }
+    this.terminals.restart(session);
+  };
+
+  /** Restarts a session the user confirmed restarting. */
+  confirmRestart = (id: SessionId): void => {
+    this.setUi({ dialog: { kind: "none" } });
     const session = this.session(id);
     if (session) this.terminals.restart(session);
   };

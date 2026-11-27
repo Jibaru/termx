@@ -661,6 +661,40 @@ describe("restored sessions", () => {
   });
 });
 
+describe("after the page was reloaded", () => {
+  it("attaches to every running session, shown or not, and calls none dormant", async () => {
+    const view = await renderApp(
+      workspace([running("s-shown", { terminalId: 3 }), running("s-hidden", { terminalId: 4 })]),
+    );
+
+    expect(view.of("s-shown")?.autoStart).toBe("reattach");
+    expect(view.of("s-hidden")?.reattach).toHaveBeenCalledTimes(1);
+    for (const id of ["s-shown", "s-hidden"]) {
+      expect(view.of(id)?.startDetached).not.toHaveBeenCalled();
+    }
+    expect(screen.queryByTestId("pane-notice")).toBeNull();
+    expect(screen.queryByTestId("restore-banner")).toBeNull();
+    expect(within(row("s-shown")).getByTestId("session-status")).toHaveTextContent("Running");
+  });
+
+  it("never restarts a running session without asking", async () => {
+    const view = await renderApp(workspace([running("s-1", { terminalId: 3, title: "Agent" })]));
+
+    // Resuming a running session does nothing.
+    view.workbench.resume("s-1");
+    expect(view.of("s-1")?.startDetached).not.toHaveBeenCalled();
+
+    fireEvent.contextMenu(row("s-1"));
+    fireEvent.click(screen.getByTestId("menu-restart-running"));
+    expect(screen.getByTestId("confirm-restart-dialog")).toHaveTextContent("Restart “Agent”?");
+    expect(view.of("s-1")?.startDetached).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByTestId("confirm-restart"));
+
+    expect(view.of("s-1")?.startDetached).toHaveBeenCalledExactlyOnceWith("fresh");
+    expect(screen.queryByTestId("confirm-restart-dialog")).toBeNull();
+  });
+});
+
 describe("saving", () => {
   it("warns, for as long as it lasts, that changes are not being saved", async () => {
     const view = await renderApp(workspace([running("s-1")]));

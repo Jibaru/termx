@@ -330,6 +330,13 @@ export function SessionTree({ workspace }: { workspace: WorkspaceSnapshot }) {
     }
     if (isLive(session)) {
       items.push({
+        label: "Restart…",
+        onSelect: () => {
+          workbench.restart(id);
+        },
+        testId: "menu-restart-running",
+      });
+      items.push({
         label: "Stop",
         onSelect: () => void workbench.stop(id),
         testId: "menu-stop",

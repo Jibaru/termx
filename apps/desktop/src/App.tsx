@@ -1,7 +1,7 @@
 import { type CSSProperties, useCallback, useEffect, useMemo, useState } from "react";
 
 import { Notices, PersistenceBanner, RestoreBanner } from "./components/Banners";
-import { ConfirmCloseDialog } from "./components/ConfirmCloseDialog";
+import { ConfirmCloseDialog, ConfirmRestartDialog } from "./components/ConfirmCloseDialog";
 import { PlusIcon, SidebarIcon } from "./components/icons";
 import { LayoutView } from "./components/LayoutView";
 import { NewSessionDialog } from "./components/NewSessionDialog";
@@ -249,6 +249,7 @@ function Window() {
       </main>
       {ui.dialog.kind === "newSession" && <NewSessionDialog />}
       {ui.dialog.kind === "confirmClose" && <ConfirmCloseDialog session={ui.dialog.session} />}
+      {ui.dialog.kind === "confirmRestart" && <ConfirmRestartDialog session={ui.dialog.session} />}
     </div>
   );
 }

@@ -105,6 +105,7 @@ export interface FakeController {
   focus: ReturnType<typeof vi.fn>;
   dispose: ReturnType<typeof vi.fn>;
   startDetached: ReturnType<typeof vi.fn>;
+  reattach: ReturnType<typeof vi.fn>;
   getStatus: () => TerminalStatus;
 }
 
@@ -123,6 +124,9 @@ export function fakeTerminals() {
       startDetached: vi.fn((mode: string) => {
         controller.status = { kind: "starting" };
         return mode;
+      }),
+      reattach: vi.fn(() => {
+        controller.status = { kind: "running", terminal: 99 };
       }),
       getStatus: () => controller.status,
     };
