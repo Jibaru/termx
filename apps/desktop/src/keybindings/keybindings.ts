@@ -141,9 +141,13 @@ export function defaultBindings(platform: Platform): Binding[] {
   ];
 }
 
-/** Cmd+Option+arrow on macOS, Ctrl+Alt+arrow elsewhere. */
+/**
+ * Cmd+Option+arrow on macOS, Ctrl+Shift+arrow elsewhere. Not Ctrl+Alt+arrow:
+ * GNOME switches workspaces with it, and Intel graphics drivers on Windows
+ * rotate the screen, before termx ever sees the key.
+ */
 function focusChord(mac: boolean, code: string): KeyChord {
-  return mac ? { code, meta: true, alt: true } : { code, ctrl: true, alt: true };
+  return mac ? { code, meta: true, alt: true } : { code, ctrl: true, shift: true };
 }
 
 /**

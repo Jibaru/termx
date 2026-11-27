@@ -71,7 +71,11 @@ describe("default key bindings", () => {
       ctrl: true,
       shift: true,
     });
-    expect(chordOf(bindings, "focusPaneUp")).toEqual({ code: "ArrowUp", ctrl: true, alt: true });
+    // Not Ctrl+Alt+arrows, which GNOME and Intel graphics drivers take.
+    expect(chordOf(bindings, "focusPaneUp")).toEqual({ code: "ArrowUp", ctrl: true, shift: true });
+    for (const binding of bindings) {
+      expect(Boolean(binding.chord.ctrl && binding.chord.alt && !binding.chord.shift)).toBe(false);
+    }
   });
 
   it.each(PLATFORMS)(
