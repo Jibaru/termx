@@ -513,13 +513,13 @@ describe("panes", () => {
     await flush();
     expect(view.callsOf("focusPane")).toEqual([[2]]);
 
-    key(window, { code: "ArrowRight", ctrlKey: true, altKey: true });
+    key(window, { code: "ArrowRight", ctrlKey: true, shiftKey: true });
     await flush();
     expect(view.callsOf("focusPane")).toEqual([[2], [2]]);
 
     view.push({ layout: { ...twoPanes, focused: 2 } });
     expect(view.of("s-2")?.focus).toHaveBeenCalled();
-    key(window, { code: "ArrowLeft", ctrlKey: true, altKey: true });
+    key(window, { code: "ArrowLeft", ctrlKey: true, shiftKey: true });
     await flush();
     expect(view.callsOf("focusPane").at(-1)).toEqual([1]);
   });

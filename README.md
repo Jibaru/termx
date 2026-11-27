@@ -39,7 +39,7 @@ same folder.
 | Split right                            | Cmd+D             | Ctrl+Shift+D       |
 | Split down                             | Shift+Cmd+D       | Ctrl+Shift+E       |
 | Close pane (the session keeps running) | Option+Cmd+W      | Ctrl+Shift+Alt+W   |
-| Focus the pane in a direction          | Option+Cmd+arrow  | Ctrl+Alt+arrow     |
+| Focus the pane in a direction          | Option+Cmd+arrow  | Ctrl+Shift+arrow   |
 | Next and previous session              | Shift+Cmd+] and [ | Ctrl+Shift+] and [ |
 | Go to session 1 to 9                   | Cmd+1 to 9        | Ctrl+Shift+1 to 9  |
 | Show or hide the sidebar               | Cmd+B             | Ctrl+Shift+B       |
