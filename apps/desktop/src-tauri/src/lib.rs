@@ -30,6 +30,8 @@ macro_rules! command_handlers {
     () => {
         tauri::generate_handler![
             crate::commands::app::core_version,
+            crate::commands::app::app_quit,
+            crate::commands::app::app_quit_cancel,
             crate::commands::diagnostics::log_frontend_event,
             crate::commands::diagnostics::open_log_folder,
             crate::commands::diagnostics::export_diagnostics,
@@ -71,6 +73,7 @@ mod e2e;
 #[cfg(test)]
 mod ipc_tests;
 pub mod logging;
+pub mod quit;
 pub mod terminal;
 #[cfg(test)]
 mod test_support;
@@ -97,6 +100,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(state)
         .manage(terminal::TerminalState::start())
+        .manage(quit::QuitState::default())
         .manage(workspace::WorkspaceState::start())
         .invoke_handler(command_handlers!())
         .setup(|app| {
@@ -107,8 +111,13 @@ pub fn run() {
             ) {
                 workspace::restore_window(&window, state.workspace());
             }
+            // The menu bar of a Mac application, without the Close Window
+            // item that would bind Cmd+W to ending every session.
+            #[cfg(target_os = "macos")]
+            app.set_menu(quit::build_menu(app.handle())?)?;
             Ok(())
         })
+        .on_menu_event(|app, event| quit::on_menu_event(app, event.id().as_ref()))
         // A page that loads has no terminal yet: terminals that are still
         // running for this window belong to a page that was reloaded (or a
         // webview that crashed). They keep running, and the new page
@@ -120,6 +129,13 @@ pub fn run() {
             }
         })
         .on_window_event(|window, event| match event {
+            // Closing the window ends every session: asked first when some
+            // run (see `quit`).
+            WindowEvent::CloseRequested { api, .. } => {
+                if quit::ask_before_quitting(window.app_handle()) {
+                    api.prevent_close();
+                }
+            }
             WindowEvent::Destroyed => release_window(window.app_handle(), window.label()),
             WindowEvent::Moved(_) | WindowEvent::Resized(_) if window.label() == MAIN_WINDOW => {
                 if let Some(state) = window.try_state::<workspace::WorkspaceState>() {
@@ -144,6 +160,15 @@ pub fn run() {
     };
 
     app.run(|app, event| {
+        // Quitting from the Dock, or with the last window gone: asked first
+        // when sessions run. An exit termx asked for itself has a code.
+        if let tauri::RunEvent::ExitRequested {
+            code: None, api, ..
+        } = &event
+            && quit::ask_before_quitting(app)
+        {
+            api.prevent_exit();
+        }
         if matches!(event, tauri::RunEvent::Exit) {
             // Sessions first: no shell may outlive the application, and
             // killing them is worth a record in the log.

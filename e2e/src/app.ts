@@ -395,15 +395,35 @@ export class App {
 
   /**
    * Closes the window, which is how a person quits: the application exits
-   * with its last window. Returns how the process ended.
+   * with its last window. While sessions run, termx asks first, and the
+   * answer is yes, as a person who closes the window means it. Returns how
+   * the process ended.
    */
   async quit(): Promise<ExitInfo> {
     // The answer is lost when the server goes away with the application.
     await this.driver.closeWindow().catch(() => undefined);
-    return waitFor(() => this.exit, {
-      what: "the application to exit after its window was closed",
-      timeoutMs: EXIT_TIMEOUT_MS,
-    });
+    return waitFor(
+      async () => {
+        if (this.exit) return this.exit;
+        await this.confirmQuit();
+        return undefined;
+      },
+      {
+        what: "the application to exit after its window was closed",
+        timeoutMs: EXIT_TIMEOUT_MS,
+      },
+    );
+  }
+
+  /** Says yes to the confirmation before quitting, if it is shown. */
+  private async confirmQuit(): Promise<void> {
+    await this.driver
+      .execute(
+        `const button = document.querySelector('[data-testid="confirm-quit"]');
+         if (button) button.click();
+         return button !== null;`,
+      )
+      .catch(() => undefined);
   }
 
   /** Ends the application whatever its state, and removes its home if it made it. */
@@ -411,7 +431,10 @@ export class App {
     if (!this.exitInfo()) {
       await this.driver.closeWindow().catch(() => undefined);
       const deadline = Date.now() + 5_000;
-      while (!this.exitInfo() && Date.now() < deadline) await delay(50);
+      while (!this.exitInfo() && Date.now() < deadline) {
+        await this.confirmQuit();
+        await delay(50);
+      }
       if (!this.exitInfo()) this.child.kill("SIGKILL");
     }
     if (this.ownsHome) await removeHome(this.home);

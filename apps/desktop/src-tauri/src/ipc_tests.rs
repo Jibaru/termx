@@ -46,6 +46,7 @@ impl Harness {
         let app = mock_builder()
             .manage(DiagnosticsState::new())
             .manage(TerminalState::start())
+            .manage(crate::quit::QuitState::default())
             .manage(state)
             .invoke_handler(command_handlers!())
             .build(mock_context(noop_assets()))
@@ -315,6 +316,15 @@ fn a_session_is_started_driven_and_closed() {
     app.ok("session_close", json!({ "id": id }));
     app.ok("session_write", json!({ "id": terminal, "data": "x" }));
     app.ok("session_ack", json!({ "id": terminal, "bytes": 1 }));
+}
+
+#[test]
+fn saying_no_to_quitting_is_heard() {
+    let home = tempfile::tempdir().unwrap();
+    let app = Harness::new(home.path());
+
+    // `app_quit` itself is not called: it would end the test.
+    assert_eq!(app.ok("app_quit_cancel", json!({})), Value::Null);
 }
 
 #[test]

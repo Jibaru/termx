@@ -30,6 +30,8 @@ type Responders = Partial<{
 
 export function fakeWorkspace(initial: WorkspaceSnapshot, responders: Responders = {}) {
   const calls: BackendCall[] = [];
+  /** What the Rust side would emit: the menu bar and quitting. */
+  const events: { menu?: (command: string) => void; quit?: (running: number) => void } = {};
   let listener: ((delta: WorkspaceDelta) => void) | null = null;
 
   const record =
@@ -69,6 +71,16 @@ export function fakeWorkspace(initial: WorkspaceSnapshot, responders: Responders
     resizeSplit: record("resizeSplit", 0.5),
     focusPane: record("focusPane"),
     showSession: record("showSession"),
+    quitApp: record("quitApp"),
+    cancelQuit: record("cancelQuit"),
+    onQuitRequested: (handler) => {
+      events.quit = handler;
+      return Promise.resolve(() => undefined);
+    },
+    onMenuCommand: (handler) => {
+      events.menu = handler;
+      return Promise.resolve(() => undefined);
+    },
   };
 
   /** Sends a delta, as the Rust side does after a change. */
@@ -91,7 +103,7 @@ export function fakeWorkspace(initial: WorkspaceSnapshot, responders: Responders
   const callsOf = (command: keyof WorkspaceBackend) =>
     calls.filter((call) => call.command === command).map((call) => call.args);
 
-  return { backend, calls, push, callsOf };
+  return { backend, calls, push, callsOf, events };
 }
 
 /** A stand-in for the terminal of a session. */
