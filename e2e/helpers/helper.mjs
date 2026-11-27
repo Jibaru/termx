@@ -142,6 +142,22 @@ const commands = {
     await writeAll(`BURST-${id}:lines=${String(count)}\r\n`);
   },
 
+  /**
+   * Prints its process identifier, `TICKS-<id>:self=<pid>`, then
+   * `TICK-<id>:<n>` for n from 1 to the count given, one every so many
+   * milliseconds, then `TICKS-DONE-<id>`. A count of 0 ticks until Ctrl+C.
+   */
+  async ticks() {
+    const count = Number(rest[0] ?? "10");
+    const every = Number(rest[1] ?? "50");
+    line(`TICKS-${id}:self=${String(process.pid)}`);
+    for (let tick = 1; count === 0 || tick <= count; tick += 1) {
+      await new Promise((resolve) => setTimeout(resolve, every));
+      await writeAll(`TICK-${id}:${String(tick)}\r\n`);
+    }
+    line(`TICKS-DONE-${id}`);
+  },
+
   /** Prints numbered lines for ever: `flood-<id> 12345`. Ctrl+C ends it. */
   async flood() {
     for (let count = 0; ; count += 500) {
