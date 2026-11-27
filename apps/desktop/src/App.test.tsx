@@ -191,7 +191,14 @@ describe("the sidebar", () => {
     expect(within(row("s-1")).getByTestId("agent-slot")).toBeEmptyDOMElement();
 
     view.update(
-      running("s-1", { agent: { status: "waitingForPermission", waitingSince: Date.now() } }),
+      running("s-1", {
+        agent: {
+          status: "waitingForPermission",
+          waitingSince: Date.now(),
+          since: Date.now(),
+          stale: false,
+        },
+      }),
       running("s-2", { agent: { status: "brandNewStatus", waitingSince: null } as never }),
     );
 

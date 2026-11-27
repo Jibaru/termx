@@ -69,6 +69,11 @@ pub const DEFAULT_LOCALE: &str = if cfg!(target_os = "macos") {
 ///   bundle of the launching application, and `GPG_TTY`, which names the
 ///   terminal device of the launching shell and would send passphrase
 ///   prompts there).
+/// - **termx itself** (`TERMX_SESSION_ID`, `TERMX_SOCKET`,
+///   `TERMX_TICKET`): a termx started from a terminal of another termx
+///   must not tell its programs that they run in a session of the other
+///   one. Each session gets its own values explicitly, which win over the
+///   list.
 ///
 /// # What is deliberately kept
 ///
@@ -137,6 +142,10 @@ pub const DEFAULT_ENV_DENYLIST: &[&str] = &[
     // Launch context.
     "__CFBundleIdentifier",
     "GPG_TTY",
+    // termx itself: see `termx_protocol::ENV_VARIABLES`.
+    "TERMX_SESSION_ID",
+    "TERMX_SOCKET",
+    "TERMX_TICKET",
 ];
 
 /// A program to run inside a PTY: what to execute, where, and with which
@@ -356,6 +365,16 @@ impl PtyCommand {
     #[must_use]
     pub fn program(&self) -> &OsStr {
         &self.program
+    }
+
+    /// The value [`env`](Self::env) set for `key`, if any: the last one.
+    #[must_use]
+    pub fn env_value(&self, key: impl AsRef<OsStr>) -> Option<&OsStr> {
+        self.env
+            .iter()
+            .rev()
+            .find(|(name, _)| name == key.as_ref())
+            .map(|(_, value)| value.as_os_str())
     }
 
     /// Whether the program is started as a login shell. Always `false` on
@@ -585,6 +604,9 @@ mod tests {
             ("ITERM_PROFILE", "Default"),
             ("WEZTERM_PANE", "0"),
             ("ALACRITTY_SOCKET", "/tmp/alacritty.sock"),
+            ("TERMX_SESSION_ID", "s-of-the-outer-termx"),
+            ("TERMX_SOCKET", "/tmp/termx-501/1.sock"),
+            ("TERMX_TICKET", "0123456789abcdef0123456789abcdef"),
         ];
         let mut builder = builder_with_env(&inherited);
         builder.env("PATH", "/usr/bin");

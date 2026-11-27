@@ -76,10 +76,11 @@ fn running_claude() -> Session {
         terminal_id: Some(7),
         created_at: 1_795_716_000_000,
         last_activity_at: 1_795_716_005_340,
-        // What the hooks of Claude Code will report. Always null for now.
+        // What the hooks of Claude Code report.
         agent: Some(AgentState::new(
             AgentStatus::WaitingForPermission,
             Some(1_795_716_005_000),
+            1_795_716_005_000,
         )),
         claude_session_id: Some("0b9d6f7e-3c1a-4f3e-9a55-2f6f1f0f8a10".to_owned()),
         warning: None,
@@ -293,6 +294,7 @@ fn contract() -> Value {
                 AgentStatus::WaitingForPermission,
                 AgentStatus::WaitingForInput,
                 AgentStatus::Done,
+                AgentStatus::Unknown,
             ],
         },
         // What the frontend sends. The test checks that the Rust side reads

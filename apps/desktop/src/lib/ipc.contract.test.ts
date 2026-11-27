@@ -156,6 +156,8 @@ const EXIT_KEYS = {
 const AGENT_KEYS = {
   status: true,
   waitingSince: true,
+  since: true,
+  stale: true,
 } satisfies Record<keyof AgentState, true>;
 
 const COMMAND_ERROR_KEYS = {

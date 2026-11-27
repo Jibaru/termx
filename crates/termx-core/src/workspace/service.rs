@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
+use super::agent::{self, AGENT_CHECK_INTERVAL, Tracker, WORKING_SILENCE_LIMIT};
 use super::launch::{
     LaunchFailure, LaunchMarker, LaunchMode, LaunchRequest, LaunchToken, Launcher, MarkerFilter,
 };
@@ -26,6 +27,7 @@ use super::store::{
 };
 use crate::diagnostics::tracing::{debug, info, warn};
 use crate::pty::{ExitStatus, PtyCommand, lock};
+use termx_protocol::HookEvent;
 
 /// How often, at most, the output of a session updates its
 /// [`last_activity_at`](Session::last_activity_at) and notifies the
@@ -101,6 +103,13 @@ pub struct WorkspaceConfig {
     pub shutdown_wait: Duration,
     /// See [`LAUNCH_CONFIRM_TIMEOUT`].
     pub launch_confirm_timeout: Duration,
+    /// See [`WORKING_SILENCE_LIMIT`].
+    pub working_silence_limit: Duration,
+    /// See [`AGENT_CHECK_INTERVAL`].
+    pub agent_check_interval: Duration,
+    /// Whether a process runs: [`agent::process_is_running`], replaced by
+    /// tests.
+    pub(crate) process_running: fn(u32) -> bool,
     /// Finds the project of a folder: [`project::detect`], replaced by
     /// tests that need a detection that hangs.
     pub(crate) detector: fn(&Path) -> Detected,
@@ -130,6 +139,9 @@ impl WorkspaceConfig {
             git_detect_budget: GIT_DETECT_BUDGET,
             shutdown_wait: SHUTDOWN_WAIT,
             launch_confirm_timeout: LAUNCH_CONFIRM_TIMEOUT,
+            working_silence_limit: WORKING_SILENCE_LIMIT,
+            agent_check_interval: AGENT_CHECK_INTERVAL,
+            process_running: agent::process_is_running,
             detector: project::detect,
         }
     }
@@ -350,6 +362,27 @@ struct Entry {
     /// What the script of the current start has said, while it has a
     /// process.
     launch: Option<Tracked>,
+    /// What the agent of Claude Code in the session does. Mirrored in
+    /// [`Session::agent`].
+    agent: Tracker,
+}
+
+impl Entry {
+    fn new(session: Session) -> Self {
+        Self {
+            session,
+            activity: Arc::default(),
+            generation: 0,
+            launch: None,
+            agent: Tracker::default(),
+        }
+    }
+
+    /// Forgets the agent: the terminal started again or went away.
+    fn reset_agent(&mut self) {
+        self.agent.reset();
+        self.session.agent = None;
+    }
 }
 
 /// What is known of the start of a session whose script prints markers.
@@ -515,6 +548,37 @@ struct Shared {
     /// drive that does not answer costs one waiting thread, not one more
     /// every time it is looked at.
     detecting: Mutex<HashSet<PathBuf>>,
+    /// Where the hooks of Claude Code report to, given to every session
+    /// started from then on. See [`Workspace::set_agent_channel`].
+    channel: Mutex<Option<AgentChannel>>,
+}
+
+/// Where the hooks of Claude Code report: the address and the ticket of
+/// the socket of termx ([`crate::socket`]).
+#[derive(Clone, PartialEq, Eq)]
+pub struct AgentChannel {
+    /// [`termx_protocol::ENV_SOCKET`].
+    pub socket: String,
+    /// [`termx_protocol::ENV_TICKET`].
+    pub ticket: String,
+}
+
+impl std::fmt::Debug for AgentChannel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The ticket is a secret of this run.
+        f.debug_struct("AgentChannel").finish_non_exhaustive()
+    }
+}
+
+/// What became of a report of a hook. See [`Workspace::report_hook`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HookOutcome {
+    /// It changed the state of the agent, or the conversation.
+    Applied,
+    /// It changed nothing: a repeat, a report that came late, another
+    /// conversation than the one followed, a session that does not run.
+    Ignored,
 }
 
 impl Shared {
@@ -706,6 +770,40 @@ impl Shared {
         })
     }
 
+    /// Degrades the agent states termx can no longer vouch for. Returns
+    /// whether some agent is still to be watched.
+    fn check_agents(&self) -> bool {
+        let watched = lock(&self.state)
+            .entries
+            .iter()
+            .any(|entry| entry.agent.needs_checks());
+        if !watched {
+            return false;
+        }
+        let now = now_ms();
+        let running = self.config.process_running;
+        let limit = self.config.working_silence_limit;
+        self.mutate(|state, mutation| {
+            let mut watched = false;
+            for entry in &mut state.entries {
+                if !entry.agent.needs_checks() {
+                    continue;
+                }
+                // The output not passed on yet counts too.
+                let output = entry
+                    .session
+                    .last_activity_at
+                    .max(entry.activity.load(Ordering::Relaxed));
+                if entry.agent.check(now, output, limit, running) {
+                    entry.session.agent = entry.agent.state().cloned();
+                    mutation.changes.session(&entry.session.id);
+                }
+                watched |= entry.agent.needs_checks();
+            }
+            watched
+        })
+    }
+
     /// Passes the activity on and writes the state file now.
     fn flush(&self) -> io::Result<bool> {
         *lock(&self.signals.save) = None;
@@ -778,6 +876,8 @@ fn run_ticker(shared: &Arc<Shared>) {
     let config = &shared.config;
     let mut last_activity: Option<Instant> = None;
     let mut last_git: Option<Instant> = None;
+    let mut last_agents: Option<Instant> = None;
+    let mut agents_watched = false;
     let due = |last: Option<Instant>, every: Duration, now: Instant| {
         last.is_none_or(|last| now.saturating_duration_since(last) >= every)
     };
@@ -827,6 +927,12 @@ fn run_ticker(shared: &Arc<Shared>) {
 
         let unconfirmed = shared.flag_unconfirmed(now);
 
+        // Cheap when no agent needs watching: one pass under the lock.
+        if due(last_agents, config.agent_check_interval, now) {
+            agents_watched = shared.check_agents();
+            last_agents = Some(now);
+        }
+
         // Sleep until the earliest thing that is due, or until woken.
         let mut wake = last_git.map_or(now, |last| after(last, config.git_poll_interval));
         if signals.activity.load(Ordering::Acquire) {
@@ -841,6 +947,17 @@ fn run_ticker(shared: &Arc<Shared>) {
         }
         if let Some(deadline) = unconfirmed {
             wake = wake.min(deadline);
+        }
+        // A report that needs watching wakes the thread (`report_hook`),
+        // which then sees whether to come back.
+        if agents_watched
+            || lock(&shared.state)
+                .entries
+                .iter()
+                .any(|e| e.agent.needs_checks())
+        {
+            wake =
+                wake.min(last_agents.map_or(now, |last| after(last, config.agent_check_interval)));
         }
         if signals.git.load(Ordering::Acquire)
             || signals.stop.load(Ordering::Acquire)
@@ -912,12 +1029,7 @@ impl Workspace {
                         .filter(|id| is_valid_claude_session_id(id)),
                 };
                 session.refresh_title();
-                Entry {
-                    session,
-                    activity: Arc::default(),
-                    generation: 0,
-                    launch: None,
-                }
+                Entry::new(session)
             })
             .collect();
 
@@ -949,6 +1061,7 @@ impl Workspace {
             config,
             signals,
             detecting: Mutex::default(),
+            channel: Mutex::default(),
         });
 
         let ticker = thread::Builder::new()
@@ -1140,12 +1253,7 @@ impl Workspace {
             mutation.changes.session(&session.id);
             mutation.changes.session_order = true;
             mutation.persist_now = true;
-            state.entries.push(Entry {
-                session: session.clone(),
-                activity: Arc::default(),
-                generation: 0,
-                launch: None,
-            });
+            state.entries.push(Entry::new(session.clone()));
             session
         }))
     }
@@ -1284,6 +1392,60 @@ impl Workspace {
         })
     }
 
+    /// Gives every session started from now on the address and the ticket
+    /// of the socket the hooks of Claude Code report to
+    /// ([`termx_protocol::ENV_VARIABLES`]), or stops doing so. Sessions
+    /// that run already keep what they were started with.
+    pub fn set_agent_channel(&self, channel: Option<AgentChannel>) {
+        *lock(&self.shared.channel) = channel;
+    }
+
+    /// Applies what a hook of Claude Code reported for the session `key`:
+    /// see [`agent`](super::agent). The identifier of a conversation that
+    /// becomes the one the session follows is saved at once, so that the
+    /// session resumes it.
+    ///
+    /// A report for a session that does not run is ignored: it comes from
+    /// a process of a terminal that is gone.
+    ///
+    /// # Errors
+    ///
+    /// [`WorkspaceError::UnknownSession`] when no session has this key.
+    pub fn report_hook(
+        &self,
+        key: &SessionKey,
+        event: &HookEvent,
+    ) -> Result<HookOutcome, WorkspaceError> {
+        let now = now_ms();
+        let outcome = self.shared.mutate(|state, mutation| {
+            let entry = state.entry(key)?;
+            if !entry.session.state.is_active() {
+                return Ok::<_, WorkspaceError>(HookOutcome::Ignored);
+            }
+            let applied = entry.agent.apply(event, now);
+            let mut outcome = HookOutcome::Ignored;
+            if applied.changed {
+                entry.session.agent = entry.agent.state().cloned();
+                mutation.changes.session(key);
+                outcome = HookOutcome::Applied;
+            }
+            if let Some(id) = applied
+                .conversation
+                .filter(|id| is_valid_claude_session_id(id))
+                && entry.session.claude_session_id.as_deref() != Some(id.as_str())
+            {
+                entry.session.claude_session_id = Some(id);
+                mutation.changes.session(key);
+                mutation.persist_now = true;
+                outcome = HookOutcome::Applied;
+            }
+            Ok(outcome)
+        })?;
+        // The thread of the workspace watches the agents that need it.
+        self.shared.signals.wake();
+        Ok(outcome)
+    }
+
     /// Moves a session just before the session `before` in the order of
     /// the sessions, or to the end.
     ///
@@ -1370,6 +1532,7 @@ impl Workspace {
             // Whatever the old terminal still reports is not news.
             entry.generation += 1;
             entry.launch = None;
+            entry.reset_agent();
             entry.session.warning = None;
             entry.session.state = SessionState::Dormant;
             let terminal = entry.session.terminal_id.take();
@@ -1467,14 +1630,17 @@ impl Workspace {
             .uses_markers(session.kind)
             .then(LaunchToken::generate);
         // Checks that the folder exists: outside the lock.
-        let command = launcher.command(&LaunchRequest {
-            kind: session.kind,
-            cwd: &session.cwd,
-            command: session.command.as_deref(),
-            claude_session_id: session.claude_session_id.as_deref(),
-            mode,
-            token: token.as_ref(),
-        });
+        let channel = lock(&self.shared.channel).clone();
+        let command = launcher
+            .command(&LaunchRequest {
+                kind: session.kind,
+                cwd: &session.cwd,
+                command: session.command.as_deref(),
+                claude_session_id: session.claude_session_id.as_deref(),
+                mode,
+                token: token.as_ref(),
+            })
+            .map(|command| with_agent_channel(command, key, channel.as_ref()));
 
         let launch = self.shared.mutate(|state, mutation| {
             let entry = state.entry(key)?;
@@ -1486,6 +1652,7 @@ impl Workspace {
                     entry.session.state = SessionState::Starting;
                     entry.session.warning = None;
                     entry.session.last_activity_at = now_ms();
+                    entry.reset_agent();
                     entry.launch = token.as_ref().map(|_| Tracked {
                         started: Instant::now(),
                         confirmed: false,
@@ -1503,6 +1670,7 @@ impl Workspace {
                     if entry.session.terminal_id.is_none() {
                         entry.generation += 1;
                         entry.launch = None;
+                        entry.reset_agent();
                         entry.session.warning = None;
                         entry.session.state = SessionState::Exited {
                             code: None,
@@ -1568,6 +1736,7 @@ impl Workspace {
                 _ => None,
             };
             entry.session.warning = None;
+            entry.reset_agent();
             entry.session.state = SessionState::Exited {
                 code: status.code(),
                 signal: status.signal().map(str::to_owned),
@@ -1602,6 +1771,7 @@ impl Workspace {
             entry.session.terminal_id = None;
             entry.session.warning = None;
             entry.launch = None;
+            entry.reset_agent();
             mutation.changes.session(key);
         });
     }
@@ -1624,6 +1794,7 @@ impl Workspace {
             entry.session.terminal_id = None;
             entry.session.warning = None;
             entry.launch = None;
+            entry.reset_agent();
             mutation.changes.session(key);
             (true, entry.session.live_cwd.take().is_some())
         });
@@ -1913,6 +2084,22 @@ impl std::fmt::Debug for Workspace {
     }
 }
 
+/// Gives `command` the variables that tell the hooks of Claude Code which
+/// session of termx they run in, and where to report.
+fn with_agent_channel(
+    command: PtyCommand,
+    key: &SessionKey,
+    channel: Option<&AgentChannel>,
+) -> PtyCommand {
+    let Some(channel) = channel else {
+        return command;
+    };
+    command
+        .env(termx_protocol::ENV_SESSION_ID, key.as_str())
+        .env(termx_protocol::ENV_SOCKET, &channel.socket)
+        .env(termx_protocol::ENV_TICKET, &channel.ticket)
+}
+
 /// The folder named by what a program reported with OSC 7: a
 /// `file://host/path` URL, percent-encoded, or a plain absolute path.
 /// `None` for anything else.
@@ -2168,6 +2355,107 @@ mod tests {
         assert!(!saved("from-program"));
         workspace.flush().unwrap();
         assert!(saved("from-program"));
+    }
+
+    /// A running session of a workspace whose agents are checked often,
+    /// where only the process 7 runs.
+    fn watched_workspace(silence: Duration) -> (Workspace, SessionKey, tempfile::TempDir) {
+        fn only_seven(pid: u32) -> bool {
+            pid == 7
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = WorkspaceConfig::in_memory();
+        config.working_silence_limit = silence;
+        config.agent_check_interval = Duration::from_millis(10);
+        config.process_running = only_seven;
+        let workspace = Workspace::open(config);
+        let session = workspace
+            .create_session(NewSession::new(SessionKind::Claude, dir.path()))
+            .unwrap();
+        let launch = workspace
+            .begin_launch(&session.id, LaunchMode::Fresh)
+            .unwrap();
+        assert!(workspace.terminal_started(&session.id, launch.generation, 1));
+        (workspace, session.id, dir)
+    }
+
+    fn hook(name: &str, pid: Option<u32>) -> HookEvent {
+        HookEvent {
+            name: name.to_owned(),
+            claude_session_id: Some("c".to_owned()),
+            notification_type: None,
+            tool: None,
+            source: None,
+            reason: None,
+            agent: None,
+            pid,
+            at: now_ms() * 1000,
+        }
+    }
+
+    fn wait_for_stale(workspace: &Workspace, key: &SessionKey) -> super::super::AgentState {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let agent = workspace.session(key).unwrap().agent.unwrap();
+            if agent.stale {
+                return agent;
+            }
+            assert!(Instant::now() < deadline, "never went stale: {agent:?}");
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn a_working_agent_that_goes_silent_is_no_longer_shown_working() {
+        let (workspace, key, _dir) = watched_workspace(Duration::from_millis(150));
+        workspace
+            .report_hook(&key, &hook("UserPromptSubmit", None))
+            .unwrap();
+        assert_eq!(
+            workspace.session(&key).unwrap().agent.unwrap().status,
+            super::super::AgentStatus::Working
+        );
+
+        let agent = wait_for_stale(&workspace, &key);
+
+        assert_eq!(agent.status, super::super::AgentStatus::Unknown);
+        assert_eq!(agent.waiting_since, None);
+    }
+
+    #[test]
+    fn an_agent_whose_claude_is_gone_is_no_longer_shown_waiting() {
+        let (workspace, key, _dir) = watched_workspace(Duration::from_secs(3600));
+        // Process 8 does not run; two reports agree on it.
+        workspace
+            .report_hook(&key, &hook("UserPromptSubmit", Some(8)))
+            .unwrap();
+        workspace
+            .report_hook(&key, &hook("PermissionRequest", Some(8)))
+            .unwrap();
+
+        let agent = wait_for_stale(&workspace, &key);
+
+        assert_eq!(agent.status, super::super::AgentStatus::Unknown);
+    }
+
+    #[test]
+    fn an_agent_whose_claude_runs_stays_as_it_is() {
+        let (workspace, key, _dir) = watched_workspace(Duration::from_secs(3600));
+        workspace
+            .report_hook(&key, &hook("UserPromptSubmit", Some(7)))
+            .unwrap();
+        workspace
+            .report_hook(&key, &hook("PermissionRequest", Some(7)))
+            .unwrap();
+
+        thread::sleep(Duration::from_millis(200));
+
+        let agent = workspace.session(&key).unwrap().agent.unwrap();
+        assert_eq!(
+            agent.status,
+            super::super::AgentStatus::WaitingForPermission
+        );
+        assert!(!agent.stale);
     }
 
     #[test]

@@ -190,8 +190,9 @@ pub struct Session {
     pub created_at: u64,
     /// When the session last printed something, or was last started.
     pub last_activity_at: u64,
-    /// What the agent of a Claude Code session is doing, as its hooks
-    /// report it. Always `None` for now: see [`AgentState`].
+    /// What the agent of Claude Code in the session is doing, as its
+    /// hooks report it. `None` when nothing reported anything: see
+    /// [`AgentState`]. Never saved.
     pub agent: Option<AgentState>,
     /// The identifier Claude Code gave its conversation, to resume it with
     /// `claude --resume`. `None` until it is known.
@@ -208,25 +209,35 @@ pub struct Session {
     pub warning: Option<LaunchFailure>,
 }
 
-/// What the agent of a session is doing.
+/// What the agent of a session is doing, as the hooks of Claude Code
+/// report it: see [`agent`](super::agent) for where it comes from and when
+/// termx stops vouching for it.
 ///
-/// Reserved for the version that installs hooks in Claude Code: until then
-/// [`Session::agent`] is always `None`. That version only sets it (and the
-/// conversation, with
-/// [`Workspace::set_claude_session_id`](super::Workspace::set_claude_session_id)):
-/// it adds fields and statuses, never changes these, and never touches
-/// [`SessionState`]. A frontend shows nothing about the agent while it is
-/// `null`. A status it does not know is shown as unknown: neutral, neither
-/// busy nor asking for attention, since guessing either way misleads.
+/// [`Session::agent`] is `None` while no Claude Code in the session has
+/// reported anything: no Claude Code runs, the termx plugin of Claude Code
+/// is not installed, or the session was just restored. It is never saved.
+///
+/// A frontend shows nothing about the agent while it is `null`. A status it
+/// does not know is shown as unknown: neutral, neither busy nor asking for
+/// attention, since guessing either way misleads. New versions only add
+/// fields and statuses.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct AgentState {
     /// What the agent does.
     pub status: AgentStatus,
-    /// Since when it waits for the user, while its status is one of the
-    /// `WaitingFor...` ones. Milliseconds since 1970.
+    /// Since when it waits for the user, while its status is
+    /// `WaitingForPermission`, `WaitingForInput` or `Done`. Kept while it
+    /// goes from one of them to another; `None` otherwise. Milliseconds
+    /// since 1970.
     pub waiting_since: Option<u64>,
+    /// Since when it has this status. Milliseconds since 1970.
+    pub since: u64,
+    /// termx can no longer vouch for what the agent does: its process is
+    /// gone without saying so, or it was working and has been silent for
+    /// too long. The status is then `Unknown`.
+    pub stale: bool,
 }
 
 /// What the agent of a session does. See [`AgentState`].
@@ -243,19 +254,36 @@ pub enum AgentStatus {
     /// It waits for the user to allow something it wants to do (a
     /// command, an edit). The session cannot go on without them.
     WaitingForPermission,
-    /// It waits for the user's next message or answer to a question.
+    /// It needs the user to go on: an answer to a question, a plan to
+    /// approve, a turn that failed (a rate limit, an error of the API).
     WaitingForInput,
-    /// It finished what it was asked and has nothing to do.
+    /// It finished what it was asked (its turn ended) and waits for the
+    /// next message.
     Done,
+    /// Claude Code runs, and termx does not know what it does: it has not
+    /// been asked anything yet, or termx lost track
+    /// ([`stale`](AgentState::stale)). Shown as neutral.
+    Unknown,
 }
 
 impl AgentState {
-    /// An agent in `status`, waiting since `waiting_since`.
+    /// An agent in `status` since `since`, waiting since `waiting_since`.
     #[must_use]
-    pub fn new(status: AgentStatus, waiting_since: Option<u64>) -> Self {
+    pub fn new(status: AgentStatus, waiting_since: Option<u64>, since: u64) -> Self {
         Self {
             status,
             waiting_since,
+            since,
+            stale: false,
+        }
+    }
+
+    /// The same state, marked [`stale`](Self::stale).
+    #[must_use]
+    pub fn stale(self) -> Self {
+        Self {
+            stale: true,
+            ..self
         }
     }
 }
@@ -462,12 +490,13 @@ mod tests {
 
     #[test]
     fn an_agent_says_what_it_waits_for() {
-        let json = |status| serde_json::to_value(AgentState::new(status, Some(5))).unwrap();
+        let json = |status| serde_json::to_value(AgentState::new(status, Some(5), 4)).unwrap();
 
         assert_eq!(
             json(AgentStatus::WaitingForPermission),
-            serde_json::json!({ "status": "waitingForPermission", "waitingSince": 5 })
+            serde_json::json!({ "status": "waitingForPermission", "waitingSince": 5, "since": 4, "stale": false })
         );
+        assert_eq!(json(AgentStatus::Unknown)["status"], "unknown");
         assert_eq!(
             json(AgentStatus::WaitingForInput)["status"],
             "waitingForInput"

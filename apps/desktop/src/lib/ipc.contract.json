@@ -98,13 +98,22 @@
           "root": "/work/app"
         }
       ],
-      "recentFolders": ["/work/app"],
-      "removed": ["s-killed"],
+      "recentFolders": [
+        "/work/app"
+      ],
+      "removed": [
+        "s-killed"
+      ],
       "revision": 43,
-      "sessionOrder": ["s-claude", "s-shell"],
+      "sessionOrder": [
+        "s-claude",
+        "s-shell"
+      ],
       "sessions": [
         {
           "agent": {
+            "since": 1795716005000,
+            "stale": false,
             "status": "waitingForPermission",
             "waitingSince": 1795716005000
           },
@@ -150,14 +159,47 @@
     }
   ],
   "enums": {
-    "agentStatus": ["working", "waitingForPermission", "waitingForInput", "done"],
-    "direction": ["row", "column"],
-    "edge": ["left", "right", "top", "bottom", "center"],
-    "launchMode": ["fresh", "resume"],
-    "placement": ["before", "after"],
-    "projectKind": ["git", "folder"],
-    "sessionKind": ["claude", "shell", "background"],
-    "sessionStatus": ["dormant", "starting", "running", "exited"]
+    "agentStatus": [
+      "working",
+      "waitingForPermission",
+      "waitingForInput",
+      "done",
+      "unknown"
+    ],
+    "direction": [
+      "row",
+      "column"
+    ],
+    "edge": [
+      "left",
+      "right",
+      "top",
+      "bottom",
+      "center"
+    ],
+    "launchMode": [
+      "fresh",
+      "resume"
+    ],
+    "placement": [
+      "before",
+      "after"
+    ],
+    "projectKind": [
+      "git",
+      "folder"
+    ],
+    "sessionKind": [
+      "claude",
+      "shell",
+      "background"
+    ],
+    "sessionStatus": [
+      "dormant",
+      "starting",
+      "running",
+      "exited"
+    ]
   },
   "exitEvents": [
     {
@@ -291,11 +333,16 @@
         "root": "/work/notes"
       }
     ],
-    "recentFolders": ["/work/app", "/work/notes"],
+    "recentFolders": [
+      "/work/app",
+      "/work/notes"
+    ],
     "revision": 42,
     "sessions": [
       {
         "agent": {
+          "since": 1795716005000,
+          "stale": false,
           "status": "waitingForPermission",
           "waitingSince": 1795716005000
         },
