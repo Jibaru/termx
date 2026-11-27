@@ -89,13 +89,23 @@ fn raw(server: &Server) -> std::os::unix::net::UnixStream {
     stream
 }
 
+/// Opens the pipe, waiting while every instance is taken for a moment
+/// (`ERROR_PIPE_BUSY`), as `termx_protocol::client` does.
 #[cfg(windows)]
 fn raw(server: &Server) -> std::fs::File {
-    std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(server.address())
-        .unwrap()
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(server.address())
+        {
+            Err(error) if error.raw_os_error() == Some(231) && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            other => return other.unwrap(),
+        }
+    }
 }
 
 #[test]
