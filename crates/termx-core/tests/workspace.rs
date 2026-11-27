@@ -947,14 +947,16 @@ fn a_stream_of_changes_is_still_saved_within_the_longest_wait() {
     let path = workspace.state_file().unwrap();
     let id = create(&workspace, SessionKind::Shell, &folders.make("app")).id;
 
+    // Creating the session was saved at once; titles set by a program
+    // are what comes in streams.
+    wait_until("the session to be saved", || path.exists());
+    let saved = |title: &str| std::fs::read_to_string(&path).is_ok_and(|text| text.contains(title));
     let deadline = Instant::now() + TIMEOUT;
     let mut n = 0;
-    while !path.exists() {
-        assert!(Instant::now() < deadline, "the state was never saved");
+    while !saved("title ") {
+        assert!(Instant::now() < deadline, "the titles were never saved");
         n += 1;
-        workspace
-            .rename_session(&id, Some(&format!("name {n}")))
-            .unwrap();
+        workspace.report_title(&id, &format!("title {n}")).unwrap();
         std::thread::sleep(Duration::from_millis(5));
     }
 }
@@ -965,7 +967,9 @@ fn nothing_is_written_while_nothing_changes() {
     let workspace = Workspace::open(quiet(Some(&folders.state_dir())));
     let id = create(&workspace, SessionKind::Shell, &folders.make("app")).id;
 
-    assert!(workspace.flush().unwrap(), "the first save writes the file");
+    // Creating a session is saved at once; flushing makes sure of it.
+    workspace.flush().unwrap();
+    assert!(workspace.state_file().unwrap().exists());
     assert!(!workspace.flush().unwrap(), "nothing changed since");
 
     // Operations that change nothing do not cause a write...
@@ -1111,8 +1115,10 @@ fn a_corrupt_state_file_never_stops_the_workspace_from_opening() {
         .collect();
     assert_eq!(backups.len(), 1);
     // And it works from there.
-    create(&workspace, SessionKind::Shell, &folders.make("app"));
-    assert!(workspace.flush().unwrap());
+    let id = create(&workspace, SessionKind::Shell, &folders.make("app")).id;
+    workspace.flush().unwrap();
+    let saved = std::fs::read_to_string(workspace.state_file().unwrap()).unwrap();
+    assert!(saved.contains(id.as_str()));
 }
 
 #[test]
@@ -1143,7 +1149,9 @@ fn intervals_that_never_end_do_not_stop_the_workspace_from_working() {
             .as_deref()
             == Some("still-working")
     });
-    assert!(workspace.flush().unwrap());
+    workspace.flush().unwrap();
+    let saved = std::fs::read_to_string(workspace.state_file().unwrap()).unwrap();
+    assert!(saved.contains("still-working"));
 }
 
 // --- Change notifications --------------------------------------------------
