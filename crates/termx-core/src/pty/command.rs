@@ -187,6 +187,7 @@ pub struct PtyCommand {
     env_remove: Vec<String>,
     login_shell: bool,
     kill_grace: std::time::Duration,
+    end_leftovers_on_exit: bool,
 }
 
 impl PtyCommand {
@@ -203,6 +204,7 @@ impl PtyCommand {
             env_remove: Vec::new(),
             login_shell: false,
             kill_grace: DEFAULT_KILL_GRACE,
+            end_leftovers_on_exit: false,
         }
     }
 
@@ -320,6 +322,21 @@ impl PtyCommand {
         self
     }
 
+    /// Whether what the process leaves behind when it exits on its own is
+    /// ended as if it had been killed: `SIGHUP`, then `SIGKILL` after the
+    /// grace period (Unix only). Off by default, which is what terminals
+    /// do: jobs a shell leaves running keep running. They are ended when
+    /// the handle is killed or dropped, and by
+    /// [`end_leftover_processes`](super::end_leftover_processes).
+    ///
+    /// On Windows everything is ended when the job of the terminal is
+    /// closed, with the handle, whatever this says.
+    #[must_use]
+    pub fn end_leftovers_on_exit(mut self, end: bool) -> Self {
+        self.end_leftovers_on_exit = end;
+        self
+    }
+
     /// The program this command runs.
     #[must_use]
     pub fn program(&self) -> &OsStr {
@@ -336,6 +353,11 @@ impl PtyCommand {
     /// The grace period set with [`kill_grace`](Self::kill_grace).
     pub(super) fn kill_grace_period(&self) -> std::time::Duration {
         self.kill_grace
+    }
+
+    /// See [`end_leftovers_on_exit`](Self::end_leftovers_on_exit).
+    pub(super) fn ends_leftovers_on_exit(&self) -> bool {
+        self.end_leftovers_on_exit
     }
 
     /// Validates the command and converts it to a portable-pty builder.
