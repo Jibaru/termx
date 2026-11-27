@@ -52,6 +52,7 @@ impl Setup {
             sender,
             home: Some(root.clone()),
             search_path: None,
+            managed_settings: Vec::new(),
         });
         Self {
             _home: home,
@@ -193,8 +194,9 @@ fn a_user_without_settings_gets_a_file_with_only_the_plugin() {
     );
     // Nothing to back up.
     assert!(!setup.backup().exists());
+    // There was no file: there is none again.
     setup.integration.uninstall().unwrap();
-    assert_eq!(setup.settings_value(), json!({}));
+    assert!(!setup.settings().exists());
 }
 
 #[test]
@@ -513,4 +515,218 @@ fn the_configuration_directory_follows_claude_config_dir() {
         termx_core::claude::config_dir_from(Some("".into()), Some(home)),
         home.join(".claude")
     );
+}
+
+#[test]
+fn a_marketplace_named_termx_that_is_not_ours_is_never_touched() {
+    // The user's own marketplace "termx", with its plugin enabled.
+    let theirs = r#"{
+  "extraKnownMarketplaces": {"termx": {"source": {"source": "github", "repo": "someone/termx"}}},
+  "enabledPlugins": {"termx@termx": true}
+}
+"#;
+    let setup = Setup::with_settings(theirs);
+    let state = setup.integration.paths().config_dir.join("plugins");
+    let cached = state
+        .join("cache")
+        .join("termx")
+        .join("termx")
+        .join("1.0.0");
+    fs::create_dir_all(cached.join(".claude-plugin")).unwrap();
+    // Even a copy whose manifest looks like ours.
+    fs::write(
+        cached.join(".claude-plugin").join("plugin.json"),
+        r#"{"name": "termx", "homepage": "https://github.com/Jibaru/termx"}"#,
+    )
+    .unwrap();
+    let known = r#"{"termx": {"source": {"source": "github", "repo": "someone/termx"}}}"#;
+    fs::write(state.join("known_marketplaces.json"), known).unwrap();
+
+    let status = setup.integration.status();
+    assert_eq!(status.plugin, PluginStatus::Conflict);
+    assert_eq!(status.error.unwrap().kind, IntegrationErrorKind::Conflict);
+    assert_eq!(
+        setup.integration.install().unwrap_err().kind,
+        IntegrationErrorKind::Conflict
+    );
+    assert!(!setup.integration.upgrade().unwrap());
+
+    setup.integration.uninstall().unwrap();
+
+    assert_eq!(setup.settings_text(), theirs);
+    assert!(cached.exists());
+    assert_eq!(
+        fs::read_to_string(state.join("known_marketplaces.json")).unwrap(),
+        known
+    );
+}
+
+#[test]
+fn a_plugin_the_user_turned_off_is_their_choice() {
+    let off = r#"{"enabledPlugins": {"termx@termx": false}}"#;
+    let setup = Setup::with_settings(off);
+
+    assert_eq!(setup.integration.status().plugin, PluginStatus::Conflict);
+    let refused = setup.integration.install().unwrap_err();
+    assert_eq!(refused.kind, IntegrationErrorKind::Conflict);
+    assert!(refused.message.contains("false"), "{}", refused.message);
+    setup.integration.uninstall().unwrap();
+    assert_eq!(setup.settings_text(), off);
+    assert!(!setup.backup().exists());
+}
+
+#[test]
+fn objects_that_were_there_empty_come_back_exactly() {
+    for original in [
+        "{\n  \"model\": \"opus\",\n  \"enabledPlugins\": {}\n}\n",
+        "{\"enabledPlugins\": { }, \"extraKnownMarketplaces\": {}}",
+        "{\"enabledPlugins\":{\"other@x\":true}}",
+    ] {
+        let setup = Setup::with_settings(original);
+        setup.integration.install().unwrap();
+        setup.integration.uninstall().unwrap();
+        assert_eq!(setup.settings_text(), original);
+    }
+}
+
+#[test]
+fn edits_made_after_installing_are_kept_and_only_the_two_members_go() {
+    let original = "{\n  \"model\": \"opus\",\n  \"enabledPlugins\": {}\n}\n";
+    let setup = Setup::with_settings(original);
+    setup.integration.install().unwrap();
+    // The user changes something else afterwards.
+    let edited = setup.settings_text().replace("\"opus\"", "\"sonnet\"");
+    fs::write(setup.settings(), &edited).unwrap();
+
+    setup.integration.uninstall().unwrap();
+
+    // The object that was there stays, the one termx created goes.
+    assert_eq!(
+        setup.settings_value(),
+        json!({"model": "sonnet", "enabledPlugins": {}})
+    );
+}
+
+#[test]
+fn a_minified_file_is_changed_once_and_not_again() {
+    let minified =
+        r#"{"model":"opus","hooks":{"Stop":[{"hooks":[{"type":"command","command":"mascot"}]}]}}"#;
+    let setup = Setup::with_settings(minified);
+    setup.integration.install().unwrap();
+    let once = setup.settings_text();
+    assert!(once.starts_with(
+        r#"{"model":"opus","hooks":{"Stop":[{"hooks":[{"type":"command","command":"mascot"}]}]}"#
+    ));
+
+    setup.integration.install().unwrap();
+
+    assert_eq!(setup.settings_text(), once);
+    setup.integration.uninstall().unwrap();
+    assert_eq!(setup.settings_text(), minified);
+}
+
+#[test]
+fn a_read_only_settings_file_is_refused_and_left_alone() {
+    let setup = Setup::with_settings(MASCOT_SETTINGS);
+    let mut permissions = fs::metadata(setup.settings()).unwrap().permissions();
+    permissions.set_readonly(true);
+    fs::set_permissions(setup.settings(), permissions.clone()).unwrap();
+
+    let refused = setup.integration.install().unwrap_err();
+
+    assert_eq!(refused.kind, IntegrationErrorKind::PermissionDenied);
+    assert_eq!(setup.settings_text(), MASCOT_SETTINGS);
+    assert!(
+        fs::metadata(setup.settings())
+            .unwrap()
+            .permissions()
+            .readonly()
+    );
+    #[allow(clippy::permissions_set_readonly_false)]
+    permissions.set_readonly(false);
+    fs::set_permissions(setup.settings(), permissions).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_link_to_nothing_is_not_replaced_by_a_file() {
+    let setup = Setup::new();
+    fs::create_dir_all(&setup.integration.paths().config_dir).unwrap();
+    std::os::unix::fs::symlink(setup.home.join("gone.json"), setup.settings()).unwrap();
+
+    let refused = setup.integration.install().unwrap_err();
+
+    assert_eq!(refused.kind, IntegrationErrorKind::NotFound);
+    assert!(
+        fs::symlink_metadata(setup.settings())
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(!setup.home.join("gone.json").exists());
+    assert_eq!(setup.integration.status().plugin, PluginStatus::Error);
+}
+
+#[test]
+fn the_first_backup_is_kept_across_installs() {
+    let setup = Setup::with_settings(MASCOT_SETTINGS);
+    setup.integration.install().unwrap();
+    setup.integration.uninstall().unwrap();
+    fs::write(setup.settings(), "{\"model\": \"later\"}").unwrap();
+
+    setup.integration.install().unwrap();
+
+    assert_eq!(fs::read_to_string(setup.backup()).unwrap(), MASCOT_SETTINGS);
+}
+
+#[test]
+fn hooks_blocked_by_policy_are_reported() {
+    let setup = Setup::with_settings(MASCOT_SETTINGS);
+    setup.integration.install().unwrap();
+    let managed = setup.home.join("managed-settings.json");
+    let mut paths = setup.integration.paths().clone();
+    paths.managed_settings = vec![managed.clone()];
+    let integration = Integration::new(paths);
+
+    fs::write(&managed, r#"{"allowManagedHooksOnly": true}"#).unwrap();
+    let status = integration.status();
+    assert_eq!(status.plugin, PluginStatus::Blocked);
+    assert_eq!(status.error.unwrap().kind, IntegrationErrorKind::Blocked);
+    assert!(status.version.is_some());
+
+    // Force-enabled by the managed settings: its hooks run.
+    fs::write(
+        &managed,
+        r#"{"allowManagedHooksOnly": true, "enabledPlugins": {"termx@termx": true}}"#,
+    )
+    .unwrap();
+    assert_eq!(integration.status().plugin, PluginStatus::Installed);
+
+    // disableAllHooks in managed settings stops even those.
+    fs::write(
+        &managed,
+        r#"{"disableAllHooks": true, "enabledPlugins": {"termx@termx": true}}"#,
+    )
+    .unwrap();
+    assert_eq!(integration.status().plugin, PluginStatus::Blocked);
+}
+
+#[test]
+fn the_record_of_what_was_there_is_private_and_goes_with_the_plugin() {
+    let setup = Setup::with_settings(MASCOT_SETTINGS);
+    setup.integration.install().unwrap();
+    let record = setup.integration.paths().record();
+    assert!(record.exists());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&record).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    setup.integration.uninstall().unwrap();
+
+    assert!(!record.exists());
 }
