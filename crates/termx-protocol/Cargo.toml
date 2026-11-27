@@ -1,0 +1,27 @@
+[package]
+name = "termx-protocol"
+description = "Wire protocol between termx and the programs that talk to it: the hooks of Claude Code, and later its command line"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+# Kept small on purpose: the hook sender links this crate, and it must start
+# in a few milliseconds.
+[dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.154"
+
+# The parent processes of a hook, to find the Claude Code process it runs
+# for (`parent`). Already part of the dependency tree.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2.191"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_System_Diagnostics_ToolHelp",
+] }

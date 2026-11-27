@@ -10,6 +10,7 @@ repository = "https://github.com/Jibaru/termx"
 
 [workspace.dependencies]
 termx-core = { path = "crates/termx-core", version = "0.0.0" }
+termx-protocol = { path = "crates/termx-protocol", version = "0.0.0" }
 
 [workspace.lints.rust]
 unsafe_code = "warn"
