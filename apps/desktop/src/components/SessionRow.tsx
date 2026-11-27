@@ -7,10 +7,10 @@ import {
   useRef,
 } from "react";
 
+import { agentTooltip, isWaiting, viewAgent } from "../attention/agent";
 import type { Session, SessionId } from "../lib/ipc";
 import { useNow } from "../workspace/clock";
 import {
-  describeAgent,
   describeState,
   KIND_LABELS,
   relativeTime,
@@ -37,6 +37,11 @@ export interface SessionRowProps {
   dropAt: "before" | "after" | null;
   /** Shows the project name: in the background section, rows mix projects. */
   showProject?: boolean;
+  /**
+   * The plugin of Claude Code reports: show what the agent does. Without
+   * it nothing is shown, rather than a state that may not be true.
+   */
+  agentsShown?: boolean;
   /** What the row does, the same object for every row and every render. */
   actions: RowActions;
 }
@@ -72,19 +77,22 @@ export const SessionRow = memo(function SessionRow(props: SessionRowProps) {
   const { session, actions } = props;
   const now = useNow();
   const status = describeState(session);
-  const agent = describeAgent(session.agent);
+  const agentState = props.agentsShown === false ? null : session.agent;
+  const agent = viewAgent(agentState);
   const branch = session.git ? (session.git.branch ?? session.git.commit) : null;
   const dormant = session.state.status === "dormant";
-  const attention = agent?.tone === "attention";
+  // Loud only for a fresh wait of a session that runs.
+  const attention = agentState !== null && isWaiting(session);
 
   const label = [
     session.title,
+    attention ? "needs you" : null,
     KIND_LABELS[session.kind],
     status.label,
     branch ? `branch ${branch}` : null,
     session.git?.worktree ? `worktree ${session.git.worktree}` : null,
     props.showProject ? `project ${session.project.name}` : null,
-    agent ? `agent: ${agent.label}` : null,
+    agent ? `agent: ${agentTooltip(agent, now)}` : null,
     `active ${relativeTimeLong(now, session.lastActivityAt)}`,
   ]
     .filter((part) => part !== null)
@@ -105,6 +113,7 @@ export const SessionRow = memo(function SessionRow(props: SessionRowProps) {
       data-active={props.active || undefined}
       data-visible={props.visible || undefined}
       data-attention={attention || undefined}
+      data-agent-stale={agent?.stale === true || undefined}
       data-drop={props.dropAt ?? undefined}
       draggable={!props.renaming}
       onClick={(event) => {
@@ -148,7 +157,7 @@ export const SessionRow = memo(function SessionRow(props: SessionRowProps) {
             {session.title}
           </span>
         )}
-        <AgentSlot agent={session.agent} />
+        <AgentSlot agent={agentState} />
       </div>
       <div className="row-line row-meta">
         {props.showProject && <span className="row-project">{session.project.name}</span>}

@@ -54,6 +54,8 @@ export interface Palette {
   attention: string;
   /** Text on `attention`. */
   attentionText: string;
+  /** Behind a row that waits for the user: a tint of `attention`. */
+  attentionBg: string;
   /** Nothing to report: dormant, unknown. */
   muted: string;
 
@@ -96,6 +98,7 @@ export const DEFAULT_PALETTE: Palette = {
   // xterm 207: no other state uses it, so that nothing is mistaken for it.
   attention: "#ff5fff",
   attentionText: "#0a0a0a",
+  attentionBg: "#2a0f2a",
   // xterm 245.
   muted: "#8a8a8a",
 
@@ -164,4 +167,10 @@ export const ICON_ROLES: readonly PaletteRole[] = [
 ];
 
 /** The backgrounds icons are drawn on. */
-export const ICON_BACKGROUNDS: readonly PaletteRole[] = ["surface", "selected", "hover", "bg"];
+export const ICON_BACKGROUNDS: readonly PaletteRole[] = [
+  "surface",
+  "selected",
+  "hover",
+  "bg",
+  "attentionBg",
+];

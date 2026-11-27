@@ -1,7 +1,7 @@
 [
   {
     "command": "newSession",
-    "label": "New Session…",
+    "label": "New Session\u2026",
     "menu": "File",
     "section": 1
   },
@@ -37,7 +37,7 @@
   },
   {
     "command": "closeSession",
-    "label": "Close Session…",
+    "label": "Close Session\u2026",
     "menu": "File",
     "section": 3
   },
@@ -64,5 +64,17 @@
     "label": "Previous Session",
     "menu": "View",
     "section": 2
+  },
+  {
+    "command": "jumpToWaitingSession",
+    "label": "Go to the Session Waiting Longest",
+    "menu": "View",
+    "section": 3
+  },
+  {
+    "command": "nextWaitingSession",
+    "label": "Next Session That Needs You",
+    "menu": "View",
+    "section": 3
   }
 ]

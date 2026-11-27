@@ -1,35 +1,46 @@
+import { agentTooltip, viewAgent } from "../attention/agent";
 import type { AgentState } from "../lib/ipc";
 import { useNow } from "../workspace/clock";
 import { StatusIcon } from "../icons/StatusIcon";
-import { agentStatusOf, describeAgent, relativeTime } from "../workspace/describe";
+import { relativeTime } from "../workspace/describe";
 
 /**
  * What the agent of a session does: working, waiting for the user, done.
- * Empty while the session reports nothing (`agent` is `null`), which is
- * always the case until termx installs the hooks of Claude Code. A status
- * this version does not know shows as unknown: neutral, never loud.
+ * Empty while the session reports nothing (`agent` is `null`), and while
+ * the plugin of termx is not installed in Claude Code. A status this
+ * version does not know shows as unknown, and a stale report dimmed: both
+ * neutral, never loud.
  */
-export function AgentSlot({ agent }: { agent: AgentState | null }) {
+export function AgentSlot({
+  agent,
+  testId = "agent-slot",
+}: {
+  agent: AgentState | null;
+  testId?: string;
+}) {
   const now = useNow();
-  const text = describeAgent(agent);
-  if (!text || !agent) {
-    return <span className="agent-slot" data-testid="agent-slot" data-status="none" />;
+  const view = viewAgent(agent);
+  if (!view) {
+    return <span className="agent-slot" data-testid={testId} data-status="none" />;
   }
-  const waiting =
-    text.tone === "attention" && agent.waitingSince !== null
-      ? ` · ${relativeTime(now, agent.waitingSince)}`
-      : "";
+  const since = view.waiting ? (view.waitingSince ?? view.since) : null;
+  const tooltip = agentTooltip(view, now);
   return (
     <span
       className="agent-slot"
-      data-testid="agent-slot"
-      data-status={text.unknown ? "unknown" : agent.status}
-      data-tone={text.tone}
-      title={`Agent: ${text.label}`}
+      data-testid={testId}
+      data-status={view.icon}
+      data-tone={view.tone}
+      data-stale={view.stale || undefined}
+      title={tooltip}
+      aria-label={tooltip}
+      role="img"
     >
-      <StatusIcon status={agentStatusOf(agent)} size={12} decorative />
-      {text.label}
-      {waiting}
+      <StatusIcon status={view.icon} size={12} decorative />
+      <span aria-hidden="true">
+        {view.label}
+        {since !== null && ` · ${relativeTime(now, since)}`}
+      </span>
     </span>
   );
 }

@@ -1,3 +1,6 @@
+import { attentionQueue } from "../attention/agent";
+import { type ClaudeBackend, NO_CLAUDE } from "../claude/backend";
+import { ClaudeIntegrationStore } from "../claude/integration";
 import { reportError } from "../lib/errorReporting";
 import {
   isCommandError,
@@ -53,6 +56,12 @@ export type DialogState =
       asked: number;
     };
 
+/** Something said once: `id` tells two equal texts apart. */
+export interface Message {
+  id: number;
+  text: string;
+}
+
 export interface UiState {
   dialog: DialogState;
   /** The session whose name is being edited in the sidebar. */
@@ -64,6 +73,10 @@ export interface UiState {
   restored: readonly SessionId[];
   /** The restore banner was dismissed. */
   restoreDismissed: boolean;
+  /** The last thing said to screen readers (a live region). */
+  announcement: Message | null;
+  /** A short hint on screen, such as "No session needs you right now". */
+  hint: Message | null;
 }
 
 const INITIAL_UI: UiState = {
@@ -73,18 +86,31 @@ const INITIAL_UI: UiState = {
   dragging: null,
   restored: [],
   restoreDismissed: false,
+  announcement: null,
+  hint: null,
 };
+
+export interface WorkbenchOptions {
+  /** The commands of the Claude Code integration; none when omitted. */
+  claude?: ClaudeBackend;
+}
 
 export class Workbench {
   private ui: UiState = INITIAL_UI;
   private readonly listeners = new Set<() => void>();
   private nextNotice = 1;
+  private nextMessage = 1;
   private bootstrapped: Promise<void> | null = null;
+  /** The Claude Code integration: whether agents report, and its setup. */
+  readonly claude: ClaudeIntegrationStore;
 
   constructor(
     readonly workspace: WorkspaceStore,
     readonly terminals: SessionStore,
-  ) {}
+    options: WorkbenchOptions = {},
+  ) {
+    this.claude = new ClaudeIntegrationStore(options.claude ?? NO_CLAUDE);
+  }
 
   private get backend() {
     return this.workspace.backend;
@@ -144,6 +170,22 @@ export class Workbench {
     this.setUi({ notices: this.ui.notices.filter((notice) => notice.id !== id) });
   };
 
+  /** Says `text` to screen readers, politely. */
+  announce = (text: string): void => {
+    if (text === "") return;
+    this.setUi({ announcement: { id: this.nextMessage++, text } });
+  };
+
+  /** Shows a short hint, which is also announced. */
+  hint = (text: string): void => {
+    const message = { id: this.nextMessage++, text };
+    this.setUi({ hint: message, announcement: message });
+  };
+
+  dismissHint = (id: number): void => {
+    if (this.ui.hint?.id === id) this.setUi({ hint: null });
+  };
+
   /** Runs a command, telling the user if it fails. Never rejects. */
   private async run<T>(source: string, action: () => Promise<T>): Promise<T | undefined> {
     try {
@@ -196,6 +238,7 @@ export class Workbench {
   }
 
   private async bootstrapOnce(): Promise<void> {
+    void this.claude.load();
     const workspace = await this.workspace.start();
     if (!workspace) {
       this.bootstrapped = null;
@@ -395,6 +438,55 @@ export class Workbench {
     if (!workspace) return;
     const id = buildSidebar(workspace).order[n - 1];
     if (id !== undefined) await this.activate(id);
+  };
+
+  // --- Attention ---------------------------------------------------------------
+
+  /**
+   * The sessions that need the user, the one waiting longest first. Empty
+   * while the plugin of Claude Code does not report.
+   */
+  waitingSessions(): Session[] {
+    const workspace = this.current;
+    if (!workspace || !this.claude.reporting) return [];
+    return attentionQueue(workspace);
+  }
+
+  /**
+   * Shows the session that has waited longest for the user. From a session
+   * that waits, goes on to the next one in that order: pressed again, the
+   * shortcut goes through all of them.
+   */
+  jumpToWaiting = async (): Promise<void> => {
+    const queue = this.waitingSessions();
+    if (queue.length === 0) {
+      this.hint("No session needs you right now.");
+      return;
+    }
+    const current = this.focusedSession()?.id;
+    const index = queue.findIndex((session) => session.id === current);
+    const next = queue[(index + 1) % queue.length];
+    if (next) await this.activate(next.id);
+  };
+
+  /** Shows the next session that needs the user, in the order of the sidebar. */
+  nextWaiting = async (): Promise<void> => {
+    const workspace = this.current;
+    const waiting = new Set(this.waitingSessions().map((session) => session.id));
+    if (!workspace || waiting.size === 0) {
+      this.hint("No session needs you right now.");
+      return;
+    }
+    const order = buildSidebar(workspace).order;
+    const current = this.focusedSession()?.id;
+    const start = current === undefined ? -1 : order.indexOf(current);
+    for (let step = 1; step <= order.length; step++) {
+      const id = order[(start + step + order.length) % order.length];
+      if (id !== undefined && waiting.has(id)) {
+        await this.activate(id);
+        return;
+      }
+    }
   };
 
   /** Moves a session up or down among the sessions of its group. */

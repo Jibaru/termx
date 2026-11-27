@@ -36,7 +36,7 @@ describe("the palette", () => {
     }
   });
 
-  it.each(["surface", "selected", "hover", "surfaceRaised"] as const)(
+  it.each(["surface", "selected", "hover", "surfaceRaised", "attentionBg"] as const)(
     "draws text at 4.5:1 or more against --color-%s",
     (background) => {
       for (const role of ["text", "textMuted"] as const) {

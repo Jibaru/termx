@@ -8,9 +8,10 @@ import {
   useState,
 } from "react";
 
+import { isWaiting } from "../attention/agent";
 import type { Session, SessionId, WorkspaceSnapshot } from "../lib/ipc";
 import { isStringArray, readPref, writePref } from "../lib/prefs";
-import { useShortcut, useUi, useWorkbench } from "../workspace/context";
+import { useAgentsReported, useShortcut, useUi, useWorkbench } from "../workspace/context";
 import { isLive } from "../workspace/describe";
 import { buildSidebar, dropIndex } from "../workspace/grouping";
 import { sessionOfPane, visibleSessions } from "../workspace/layoutTree";
@@ -55,6 +56,7 @@ interface DropMark {
 export function SessionTree({ workspace }: { workspace: WorkspaceSnapshot }) {
   const workbench = useWorkbench();
   const ui = useUi();
+  const agentsShown = useAgentsReported();
   const model = useMemo(() => buildSidebar(workspace), [workspace]);
   const [collapsed, setCollapsed] = useState<Set<string>>(
     () => new Set(readPref(COLLAPSED_PREF, [], isStringArray)),
@@ -465,6 +467,7 @@ export function SessionTree({ workspace }: { workspace: WorkspaceSnapshot }) {
         renaming={ui.renaming === session.id}
         dropAt={drop?.target === key ? drop.position : null}
         showProject={showProject}
+        agentsShown={agentsShown}
         actions={rowActions}
       />
     );
@@ -485,6 +488,10 @@ export function SessionTree({ workspace }: { workspace: WorkspaceSnapshot }) {
           const key = `g:${section.key}`;
           const isBackground = section.key === BACKGROUND;
           const first = section.sessions[0];
+          const waiting = agentsShown ? section.sessions.filter(isWaiting).length : 0;
+          const sessionCount = `${String(section.sessions.length)} session${
+            section.sessions.length === 1 ? "" : "s"
+          }`;
           return (
             <li
               key={section.key}
@@ -492,14 +499,19 @@ export function SessionTree({ workspace }: { workspace: WorkspaceSnapshot }) {
               role="treeitem"
               aria-level={1}
               aria-expanded={open}
-              aria-label={`${section.name}, ${String(section.sessions.length)} session${
-                section.sessions.length === 1 ? "" : "s"
-              }`}
+              aria-label={[
+                section.name,
+                sessionCount,
+                waiting > 0 ? `${String(waiting)} need${waiting === 1 ? "s" : ""} you` : null,
+              ]
+                .filter((part) => part !== null)
+                .join(", ")}
               tabIndex={tabbable !== undefined && itemKey(tabbable) === key ? 0 : -1}
               className="session-group"
               data-testid={isBackground ? "background-group" : "project-group"}
               data-project-key={isBackground ? undefined : section.key}
               data-drop={drop?.target === key ? drop.position : undefined}
+              data-attention={(!open && waiting > 0) || undefined}
               onFocus={(event) => {
                 if (event.target === event.currentTarget) setCursor(key);
               }}
@@ -526,6 +538,18 @@ export function SessionTree({ workspace }: { workspace: WorkspaceSnapshot }) {
                 <span className="group-name" dir="auto" title={section.title}>
                   {section.name}
                 </span>
+                {!open && waiting > 0 && (
+                  <span
+                    className="group-attention"
+                    data-testid="group-attention"
+                    aria-hidden="true"
+                    title={`${String(waiting)} session${waiting === 1 ? "" : "s"} need${
+                      waiting === 1 ? "s" : ""
+                    } you`}
+                  >
+                    {waiting}
+                  </span>
+                )}
                 <span className="group-count" aria-hidden="true">
                   {section.sessions.length}
                 </span>

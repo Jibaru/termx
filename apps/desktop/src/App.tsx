@@ -1,6 +1,6 @@
 import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { Notices, PersistenceBanner, RestoreBanner } from "./components/Banners";
+import { Hint, LiveRegion, Notices, PersistenceBanner, RestoreBanner } from "./components/Banners";
 import {
   ConfirmCloseDialog,
   ConfirmQuitDialog,
@@ -165,6 +165,12 @@ function Window() {
         case "focusSidebar":
           focusSidebar();
           return;
+        case "jumpToWaitingSession":
+          void workbench.jumpToWaiting();
+          return;
+        case "nextWaitingSession":
+          void workbench.nextWaiting();
+          return;
         case "renameSession": {
           const row =
             target instanceof Element
@@ -303,7 +309,9 @@ function Window() {
           )}
         </div>
         <Notices />
+        <Hint />
       </main>
+      <LiveRegion />
       {ui.dialog.kind === "newSession" && <NewSessionDialog />}
       {ui.dialog.kind === "confirmClose" && <ConfirmCloseDialog session={ui.dialog.session} />}
       {ui.dialog.kind === "confirmRestart" && <ConfirmRestartDialog session={ui.dialog.session} />}

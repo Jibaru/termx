@@ -1,5 +1,6 @@
 import { type CoreVersionState, useCoreVersion } from "../lib/useCoreVersion";
 import { useShortcut, useWorkbench, useWorkspaceState, withShortcut } from "../workspace/context";
+import { AttentionQueue } from "./AttentionQueue";
 import { DiagnosticsActions } from "./DiagnosticsActions";
 import { PlusIcon, SidebarIcon } from "../icons/glyphs";
 import { SessionTree } from "./SessionTree";
@@ -55,6 +56,7 @@ export function Sidebar({ onHide }: SidebarProps) {
           <SidebarIcon />
         </button>
       </header>
+      {state.status === "ready" && <AttentionQueue workspace={state.workspace} />}
       <div className="sidebar-sessions">
         {state.status === "ready" && state.workspace.sessions.length > 0 && (
           <SessionTree workspace={state.workspace} />

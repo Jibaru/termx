@@ -47,7 +47,9 @@ export type CommandId =
   | "jumpToSession9"
   | "toggleSidebar"
   | "focusSidebar"
-  | "renameSession";
+  | "renameSession"
+  | "jumpToWaitingSession"
+  | "nextWaitingSession";
 
 /** Where a binding applies. */
 export type BindingScope = "global" | "outside-terminal";
@@ -97,6 +99,8 @@ export const COMMAND_LABELS: Record<CommandId, string> = {
   toggleSidebar: "Show or hide the sidebar",
   focusSidebar: "Go to the sidebar",
   renameSession: "Rename session",
+  jumpToWaitingSession: "Go to the session waiting longest",
+  nextWaitingSession: "Next session that needs you",
 };
 
 const JUMPS = [1, 2, 3, 4, 5, 6, 7, 8, 9] as const;
@@ -139,6 +143,12 @@ export function defaultBindings(platform: Platform): Binding[] {
     // Ctrl+B is the readline and tmux key: elsewhere it is Ctrl+Shift+B.
     global("toggleSidebar", chord("KeyB")),
     global("focusSidebar", chord("Digit0")),
+    // A for attention, Cmd+Shift+A or Ctrl+Shift+A. Not U: Ctrl+Shift+U
+    // starts the Unicode input of GTK and IBus on Linux, which keeps the key.
+    // Pressed again, it goes on to the next session that waits.
+    global("jumpToWaitingSession", chord("KeyA", mac ? { shift: true } : {})),
+    // `nextWaitingSession` has no key of its own: it is in the menu, and a
+    // key can be given to it in the configuration.
     { command: "renameSession", chord: { code: "F2" }, scope: "outside-terminal" },
   ];
 }
