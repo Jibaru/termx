@@ -34,6 +34,21 @@
 //!
 //! A folder that does not exist or cannot be read is not an error: the
 //! search simply finds nothing there and goes on with its parents.
+//!
+//! # A repository that cannot be trusted
+//!
+//! The metadata is read from folders the user chose, which can hold
+//! anything. Only regular files are read, and at most [`MAX_METADATA_BYTES`]
+//! of them: a named pipe or a device in place of `HEAD` or `commondir` is
+//! never opened for reading, since that could block for ever. Symbolic
+//! links are followed by the system, which gives up after a bounded number
+//! of them. The folders named by a `.git` file (`gitdir:`) and by
+//! `commondir` are only used when they are Git directories, so the project
+//! shown is always the folder of a real repository or the folder itself.
+//!
+//! Reading the disk can still take long, on a network drive that does not
+//! answer for instance: the workspace never calls [`detect`] on a thread
+//! that must stay responsive, and gives up waiting for it after a while.
 
 use std::fs;
 use std::io::Read;
@@ -283,7 +298,12 @@ fn discover(start: &Path) -> Option<Repository> {
 /// Whether `dir` looks like the Git directory of a repository, by the same
 /// signs `git` checks.
 fn is_git_dir(dir: &Path) -> bool {
-    dir.join("HEAD").is_file() && dir.join("objects").is_dir() && dir.join("refs").is_dir()
+    is_regular_file(&dir.join("HEAD")) && dir.join("objects").is_dir() && dir.join("refs").is_dir()
+}
+
+/// Whether `path` is a regular file, after following symbolic links.
+fn is_regular_file(path: &Path) -> bool {
+    fs::metadata(path).is_ok_and(|metadata| metadata.file_type().is_file())
 }
 
 /// Follows a `.git` file (`gitdir: <path>`), as found in a linked worktree
@@ -295,15 +315,19 @@ fn follow_git_file(work_tree: &Path, dot_git: &Path) -> Option<Repository> {
         return None;
     }
     let git_dir = resolve(work_tree, Path::new(target));
-    if !git_dir.join("HEAD").is_file() {
+    // A worktree's Git directory has no `objects` of its own: only `HEAD`
+    // is required of it.
+    if !git_dir.is_dir() || !is_regular_file(&git_dir.join("HEAD")) {
         return None;
     }
     // Only a linked worktree has a `commondir` file, naming the Git
-    // directory of the repository it belongs to.
+    // directory of the repository it belongs to. One that names anything
+    // else is ignored.
     let common_dir = read_small(&git_dir.join("commondir"))
         .map(|content| content.trim().to_owned())
-        .filter(|content| !content.is_empty())
-        .map(|content| resolve(&git_dir, Path::new(&content)));
+        .filter(|content| !content.is_empty() && !content.contains('\0'))
+        .map(|content| resolve(&git_dir, Path::new(&content)))
+        .filter(|common| is_git_dir(common));
     Some(Repository {
         work_tree: Some(work_tree.to_owned()),
         git_dir,
@@ -322,9 +346,28 @@ fn resolve(base: &Path, path: &Path) -> PathBuf {
     normalize(&joined)
 }
 
-/// Reads a small text file. `None` if it cannot be read or is not text.
+/// Reads a small text file. `None` if it cannot be read, is not a regular
+/// file, is larger than [`MAX_METADATA_BYTES`] or is not text.
+///
+/// The file is opened without waiting (`O_NONBLOCK` on Unix), so that a
+/// named pipe put in its place cannot block the opening, and what was
+/// opened is checked to be a regular file before anything is read.
 fn read_small(path: &Path) -> Option<String> {
-    let file = fs::File::open(path).ok()?;
+    if !is_regular_file(path) {
+        return None;
+    }
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(rustix::fs::OFlags::NONBLOCK.bits().cast_signed());
+    }
+    let file = options.open(path).ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.file_type().is_file() || metadata.len() > MAX_METADATA_BYTES {
+        return None;
+    }
     let mut content = String::new();
     file.take(MAX_METADATA_BYTES)
         .read_to_string(&mut content)
@@ -524,6 +567,112 @@ mod tests {
             assert_eq!(detected.git, None);
         }
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// Runs `detect` on another thread and fails if it does not answer in
+    /// time: a detection that blocks must fail the test, not hang it.
+    #[cfg(unix)]
+    fn detect_in_time(folder: &Path) -> Detected {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let folder = folder.to_owned();
+        std::thread::spawn(move || {
+            let _ = sender.send(detect(&folder));
+        });
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("detecting the project blocked")
+    }
+
+    #[cfg(unix)]
+    fn mkfifo(path: &Path) {
+        let status = std::process::Command::new("mkfifo")
+            .arg(path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn named_pipes_in_a_repository_are_never_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = normalize(dir.path());
+
+        // A worktree whose `commondir` is a pipe nobody writes to.
+        let main = root.join("main");
+        fake_repository(&main.join(".git"), "ref: refs/heads/main\n");
+        let admin = main.join(".git").join("worktrees").join("wt");
+        fs::create_dir_all(&admin).unwrap();
+        fs::write(admin.join("HEAD"), "ref: refs/heads/topic\n").unwrap();
+        mkfifo(&admin.join("commondir"));
+        let worktree = root.join("wt");
+        fs::create_dir_all(&worktree).unwrap();
+        fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", admin.display()),
+        )
+        .unwrap();
+
+        let detected = detect_in_time(&worktree);
+        assert_eq!(detected.project.root, worktree);
+        assert_eq!(detected.git.unwrap().branch.as_deref(), Some("topic"));
+
+        // A `HEAD` that is a pipe.
+        let piped = root.join("piped");
+        fs::create_dir_all(piped.join(".git").join("objects")).unwrap();
+        fs::create_dir_all(piped.join(".git").join("refs")).unwrap();
+        mkfifo(&piped.join(".git").join("HEAD"));
+        assert_eq!(detect_in_time(&piped).project.kind, ProjectKind::Folder);
+
+        // A `.git` that is a pipe.
+        let odd = root.join("odd");
+        fs::create_dir_all(&odd).unwrap();
+        mkfifo(&odd.join(".git"));
+        assert_eq!(detect_in_time(&odd).project.kind, ProjectKind::Folder);
+    }
+
+    #[test]
+    fn metadata_larger_than_a_line_is_not_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = normalize(dir.path());
+        let mut head = "ref: refs/heads/main\n".to_owned();
+        head.push_str(&" ".repeat(usize::try_from(MAX_METADATA_BYTES).unwrap()));
+        fake_repository(&root.join(".git"), &head);
+
+        assert_eq!(detect(&root).git, Some(GitInfo::default()));
+    }
+
+    #[test]
+    fn a_commondir_that_names_no_repository_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = normalize(dir.path());
+        let admin = root.join("admin");
+        fs::create_dir_all(&admin).unwrap();
+        fs::write(admin.join("HEAD"), "ref: refs/heads/topic\n").unwrap();
+        let worktree = root.join("wt");
+        fs::create_dir_all(&worktree).unwrap();
+        fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", admin.display()),
+        )
+        .unwrap();
+
+        for common in ["/", "../../../../../../..", "does-not-exist", "x\0y"] {
+            fs::write(admin.join("commondir"), common).unwrap();
+
+            let detected = detect(&worktree);
+
+            assert_eq!(detected.project.root, worktree, "{common:?}");
+            assert_eq!(detected.project.name, "wt", "{common:?}");
+            assert_eq!(detected.git.unwrap().worktree, None, "{common:?}");
+        }
+        // A `gitdir:` that names a file is no repository either.
+        fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", admin.join("HEAD").display()),
+        )
+        .unwrap();
+        assert_eq!(detect(&worktree).project.kind, ProjectKind::Folder);
     }
 
     #[cfg(windows)]
