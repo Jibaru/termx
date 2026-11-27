@@ -104,6 +104,17 @@ const commands = {
     line(`COPY-${id}`);
   },
 
+  /**
+   * Prints, as JSON, the variables of its environment whose name starts
+   * with `TERMX_`: `ENV-<id>:{"TERMX_LOG":"debug"}`.
+   */
+  env() {
+    const entries = Object.entries(process.env).filter(([name]) =>
+      name.toUpperCase().startsWith("TERMX_"),
+    );
+    line(`ENV-${id}:${JSON.stringify(Object.fromEntries(entries))}`);
+  },
+
   /** Prints solid blocks (reverse video), then `PAINT-<id>`. */
   paint() {
     for (let row = 0; row < 6; row += 1) line(`\x1b[7m${" ".repeat(40)}\x1b[0m`);
