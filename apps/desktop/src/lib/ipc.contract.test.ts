@@ -131,6 +131,7 @@ const DELTA_KEYS = {
   projects: true,
   layout: true,
   recentFolders: true,
+  persistence: true,
 } satisfies Record<keyof WorkspaceDelta, true>;
 
 const STARTED_KEYS = {
@@ -155,6 +156,7 @@ const PERSISTENCE_MODES = [
   "secondary",
   "disabled",
   "memory",
+  "failing",
 ] as const satisfies readonly PersistenceMode["mode"][];
 
 // Each list names every member of its union, or this does not compile.
@@ -256,6 +258,7 @@ describe("the contract with the Rust side", () => {
       projects: null,
       layout: null,
       recentFolders: null,
+      persistence: null,
     });
   });
 
@@ -269,6 +272,7 @@ describe("the contract with the Rust side", () => {
     expect(after.revision).toBe(full.revision);
     expect(after.sessions.map((session) => session.id)).toEqual(full.sessionOrder);
     expect(after.layout).toEqual(full.layout);
+    expect(after.persistence).toEqual(full.persistence);
     expect(applyWorkspaceDelta(after, empty).sessions).toEqual(after.sessions);
   });
 
@@ -288,6 +292,7 @@ describe("the contract with the Rust side", () => {
       ["mode"],
       ["mode", "reason"],
       ["mode"],
+      ["mode", "reason", "since"],
     ]);
     contract.launchFailures.forEach(expectFailure);
     expect(contract.launchFailures.map((failure) => failure.kind)).toEqual(LAUNCH_FAILURE_KINDS);

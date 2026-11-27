@@ -38,6 +38,10 @@ pub const SAVE_DEBOUNCE: Duration = Duration::from_secs(1);
 /// Longest a change waits to be saved, however many changes follow it.
 pub const SAVE_MAX_WAIT: Duration = Duration::from_secs(5);
 
+/// How long after a save failed it is tried again, for as long as it
+/// fails. See [`PersistenceMode::Failing`].
+pub const SAVE_RETRY: Duration = Duration::from_secs(5);
+
 /// How often the Git state of every session is read again, to catch what
 /// changed outside termx. See the [module documentation](super).
 pub const GIT_POLL_INTERVAL: Duration = Duration::from_secs(10);
@@ -75,6 +79,8 @@ pub struct WorkspaceConfig {
     pub save_debounce: Duration,
     /// See [`SAVE_MAX_WAIT`].
     pub save_max_wait: Duration,
+    /// See [`SAVE_RETRY`].
+    pub save_retry: Duration,
     /// See [`GIT_POLL_INTERVAL`].
     pub git_poll_interval: Duration,
     /// See [`GIT_DETECT_BUDGET`].
@@ -105,6 +111,7 @@ impl WorkspaceConfig {
             activity_coalesce: ACTIVITY_COALESCE,
             save_debounce: SAVE_DEBOUNCE,
             save_max_wait: SAVE_MAX_WAIT,
+            save_retry: SAVE_RETRY,
             git_poll_interval: GIT_POLL_INTERVAL,
             git_detect_budget: GIT_DETECT_BUDGET,
             shutdown_wait: SHUTDOWN_WAIT,
@@ -206,7 +213,9 @@ pub struct Snapshot {
     /// The folders sessions were created in, most recent first.
     #[serde(serialize_with = "super::lossy_paths")]
     pub recent_folders: Vec<PathBuf>,
-    /// Whether the workspace is saved.
+    /// Whether the workspace is saved, and why not when it is not. A
+    /// frontend warns the user while it is
+    /// [`Failing`](PersistenceMode::Failing).
     pub persistence: PersistenceMode,
 }
 
@@ -234,6 +243,8 @@ pub struct Delta {
     /// The recent folders, when they changed.
     #[serde(serialize_with = "super::lossy_paths_option")]
     pub recent_folders: Option<Vec<PathBuf>>,
+    /// Whether the workspace is saved, when that changed.
+    pub persistence: Option<PersistenceMode>,
 }
 
 /// Records that a session printed something. Cheap enough to call for
@@ -272,6 +283,8 @@ struct Signals {
     stop: AtomicBool,
     /// When a save was first and last asked for, while one is due.
     save: Mutex<Option<(Instant, Instant)>>,
+    /// When to try saving again after a save failed.
+    retry: Mutex<Option<Instant>>,
     ticker: OnceLock<Thread>,
 }
 
@@ -287,6 +300,12 @@ impl Signals {
         let mut save = lock(&self.save);
         *save = Some((save.map_or(now, |(first, _)| first), now));
         drop(save);
+        self.wake();
+    }
+
+    /// Asks for a save `delay` from now, to try again after one failed.
+    fn request_save_after(&self, delay: Duration) {
+        *lock(&self.retry) = Some(after(Instant::now(), delay));
         self.wake();
     }
 }
@@ -306,6 +325,8 @@ struct State {
     recent_folders: Vec<PathBuf>,
     window: Option<WindowGeometry>,
     revision: u64,
+    /// Starts as the mode of the store, and follows whether saving fails.
+    persistence: PersistenceMode,
 }
 
 impl State {
@@ -549,17 +570,49 @@ impl Shared {
         self.save()
     }
 
-    /// Writes the state file now.
+    /// Writes the state file now, and records whether that worked: see
+    /// [`PersistenceMode::Failing`]. A save that fails is tried again after
+    /// [`SAVE_RETRY`].
     fn save(&self) -> io::Result<bool> {
         let persisted = lock(&self.state).persisted();
-        self.store.save(&persisted)
+        let result = self.store.save(&persisted);
+        let failing = result.as_ref().err().map(ToString::to_string);
+        let started_failing = self.mutate(|state, mutation| {
+            let next = match (&state.persistence, &failing) {
+                (PersistenceMode::Primary, Some(reason)) => PersistenceMode::Failing {
+                    reason: reason.clone(),
+                    since: now_ms(),
+                },
+                (PersistenceMode::Failing { since, .. }, Some(reason)) => {
+                    PersistenceMode::Failing {
+                        reason: reason.clone(),
+                        since: *since,
+                    }
+                }
+                (PersistenceMode::Failing { .. }, None) => PersistenceMode::Primary,
+                (other, _) => other.clone(),
+            };
+            let started = matches!(state.persistence, PersistenceMode::Primary)
+                && matches!(next, PersistenceMode::Failing { .. });
+            if next != state.persistence {
+                state.persistence = next;
+                mutation.changes.persistence = true;
+            }
+            started
+        });
+        if let Err(error) = &result {
+            // Once per episode: the retries that follow are the same event.
+            if started_failing {
+                warn!(error = %error, "the workspace could not be saved; trying again");
+            }
+            self.signals.request_save_after(self.config.save_retry);
+        }
+        result
     }
 
     fn save_logged(&self) {
-        match self.save() {
-            Ok(true) => debug!("workspace saved"),
-            Ok(false) => {}
-            Err(error) => warn!(error = %error, "the workspace could not be saved"),
+        if let Ok(true) = self.save() {
+            debug!("workspace saved");
         }
     }
 }
@@ -611,13 +664,16 @@ fn run_ticker(shared: &Arc<Shared>) {
         };
         let save_due = {
             let mut save = lock(&signals.save);
-            match save_at(*save) {
-                Some(deadline) if deadline <= now => {
-                    *save = None;
-                    true
-                }
-                _ => false,
+            let mut retry = lock(&signals.retry);
+            let due = save_at(*save)
+                .into_iter()
+                .chain(*retry)
+                .any(|deadline| deadline <= now);
+            if due {
+                *save = None;
+                *retry = None;
             }
+            due
         };
         if save_due {
             shared.save_logged();
@@ -630,6 +686,9 @@ fn run_ticker(shared: &Arc<Shared>) {
                 wake.min(last_activity.map_or(now, |last| after(last, config.activity_coalesce)));
         }
         if let Some(deadline) = save_at(*lock(&signals.save)) {
+            wake = wake.min(deadline);
+        }
+        if let Some(deadline) = *lock(&signals.retry) {
             wake = wake.min(deadline);
         }
         if signals.git.load(Ordering::Acquire) || signals.stop.load(Ordering::Acquire) {
@@ -715,6 +774,7 @@ impl Workspace {
             recent_folders: persisted.recent_folders,
             window: persisted.window,
             revision: 0,
+            persistence: store.mode().clone(),
         };
         state.rank_new_projects();
         info!(
@@ -762,7 +822,7 @@ impl Workspace {
     /// Whether the workspace is saved, and why not when it is not.
     #[must_use]
     pub fn persistence(&self) -> PersistenceMode {
-        self.shared.store.mode().clone()
+        lock(&self.shared.state).persistence.clone()
     }
 
     /// The path of the state file, when the workspace has a directory.
@@ -791,7 +851,7 @@ impl Workspace {
             projects: state.projects(),
             layout: state.layout.clone(),
             recent_folders: state.recent_folders.clone(),
-            persistence: self.shared.store.mode().clone(),
+            persistence: state.persistence.clone(),
         }
     }
 
@@ -824,6 +884,7 @@ impl Workspace {
             projects: changes.projects.then(|| state.projects()),
             layout: changes.layout.then(|| state.layout.clone()),
             recent_folders: changes.recent_folders.then(|| state.recent_folders.clone()),
+            persistence: changes.persistence.then(|| state.persistence.clone()),
         }
     }
 
@@ -1578,7 +1639,7 @@ impl std::fmt::Debug for Workspace {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Workspace")
             .field("sessions", &lock(&self.shared.state).entries.len())
-            .field("persistence", self.shared.store.mode())
+            .field("persistence", &lock(&self.shared.state).persistence)
             .finish_non_exhaustive()
     }
 }
@@ -1740,6 +1801,60 @@ mod tests {
             "{:?}",
             started.elapsed()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saves_that_fail_are_reported_and_retried_until_they_work() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = dir.path().join("state");
+        let mut config = WorkspaceConfig::new(&state_dir);
+        config.save_retry = Duration::from_millis(20);
+        let workspace = Workspace::open(config);
+        let subscription = workspace.subscribe();
+        let session = workspace
+            .create_session(NewSession::new(SessionKind::Shell, dir.path()))
+            .unwrap();
+        workspace.flush().unwrap();
+        assert_eq!(workspace.persistence(), PersistenceMode::Primary);
+
+        // The directory can no longer be written, as on a full disk.
+        let mode =
+            |bits| std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(bits));
+        mode(0o500).unwrap();
+        workspace
+            .rename_session(&session.id, Some("unsaved"))
+            .unwrap();
+        let failed = workspace.flush();
+        if failed.is_ok() {
+            // Running as the administrator, who may write anyway.
+            mode(0o700).unwrap();
+            return;
+        }
+        let PersistenceMode::Failing { reason, since } = workspace.persistence() else {
+            panic!("not failing: {:?}", workspace.persistence());
+        };
+        assert!(!reason.is_empty());
+        assert!(since > 0);
+        assert_eq!(workspace.snapshot().persistence, workspace.persistence());
+        let mut told = false;
+        while let Some(changes) = subscription.try_recv() {
+            told |= workspace.delta(&changes).persistence.is_some();
+        }
+        assert!(told, "the subscribers were not told");
+
+        // Once the disk takes writes again, the next attempt saves.
+        mode(0o700).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while workspace.persistence() != PersistenceMode::Primary {
+            assert!(Instant::now() < deadline, "saving never recovered");
+            thread::sleep(Duration::from_millis(10));
+        }
+        let text =
+            std::fs::read_to_string(state_dir.join(super::super::store::STATE_FILE)).unwrap();
+        assert!(text.contains("unsaved"));
     }
 
     #[test]

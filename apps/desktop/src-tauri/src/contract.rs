@@ -196,6 +196,10 @@ fn contract() -> Value {
         projects: Some(vec![git_project()]),
         layout: Some(layout()),
         recent_folders: Some(vec![PathBuf::from("/work/app")]),
+        persistence: Some(PersistenceMode::Failing {
+            reason: "No space left on device (os error 28)".to_owned(),
+            since: 1_795_716_005_000,
+        }),
     };
     let empty_delta = Delta {
         revision: 44,
@@ -205,6 +209,7 @@ fn contract() -> Value {
         projects: None,
         layout: None,
         recent_folders: None,
+        persistence: None,
     };
     let mut missing_claude = SessionEvent::from(&ExitStatus::from_code(CLAUDE_NOT_FOUND_EXIT_CODE));
     let SessionEvent::Exit { failure, .. } = &mut missing_claude;
@@ -221,6 +226,10 @@ fn contract() -> Value {
             PersistenceMode::Secondary,
             PersistenceMode::Disabled { reason: "the state file cannot be read".to_owned() },
             PersistenceMode::Memory,
+            PersistenceMode::Failing {
+                reason: "No space left on device (os error 28)".to_owned(),
+                since: 1_795_716_005_000,
+            },
         ],
         "launchFailures": [
             LaunchFailure::claude_not_found("claude"),

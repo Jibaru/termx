@@ -472,6 +472,7 @@ function emptyDelta(overrides: Partial<WorkspaceDelta> = {}): WorkspaceDelta {
     projects: null,
     layout: null,
     recentFolders: null,
+    persistence: null,
     ...overrides,
   };
 }

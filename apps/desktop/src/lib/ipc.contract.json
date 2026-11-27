@@ -33,6 +33,11 @@
           "type": "split"
         }
       },
+      "persistence": {
+        "mode": "failing",
+        "reason": "No space left on device (os error 28)",
+        "since": 1795716005000
+      },
       "projects": [
         {
           "key": "/work/app",
@@ -86,6 +91,7 @@
     },
     {
       "layout": null,
+      "persistence": null,
       "projects": null,
       "recentFolders": null,
       "removed": [],
@@ -177,6 +183,11 @@
     },
     {
       "mode": "memory"
+    },
+    {
+      "mode": "failing",
+      "reason": "No space left on device (os error 28)",
+      "since": 1795716005000
     }
   ],
   "requests": {

@@ -104,8 +104,8 @@ pub use notify::{ChangeSet, Subscription};
 pub use project::{GitInfo, Project, ProjectKind};
 pub use service::{
     ACTIVITY_COALESCE, ActivityHandle, Delta, GIT_DETECT_BUDGET, GIT_POLL_INTERVAL, Launch,
-    NewSession, SAVE_DEBOUNCE, SAVE_MAX_WAIT, SHUTDOWN_WAIT, Snapshot, Workspace, WorkspaceConfig,
-    WorkspaceError, parse_reported_cwd,
+    NewSession, SAVE_DEBOUNCE, SAVE_MAX_WAIT, SAVE_RETRY, SHUTDOWN_WAIT, Snapshot, Workspace,
+    WorkspaceConfig, WorkspaceError, parse_reported_cwd,
 };
 pub use store::{PersistenceMode, WindowGeometry};
 
