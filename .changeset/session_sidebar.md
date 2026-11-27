@@ -25,3 +25,9 @@ default: minor
   by one, or all at once from the banner.
 - termx says so when your changes are not being saved, for instance on a
   full disk or in a second termx window.
+- Reloading the window, or the window coming back after a crash, no longer
+  stops anything: running sessions carry on and their terminals are
+  repainted. Restarting a session that runs asks first.
+- On macOS, termx has a menu bar with the main actions and their
+  shortcuts. Cmd+W closes the focused pane, never the window, and closing
+  the window or quitting while sessions run asks first.
