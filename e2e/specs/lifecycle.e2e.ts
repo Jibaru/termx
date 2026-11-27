@@ -23,8 +23,21 @@ describe("the end of a shell", () => {
       line.includes("The process exited with code 3. Press Enter to restart."),
     );
 
-    // Any other key does nothing; Enter starts a new shell.
+    // Any other key does nothing: no new session, nothing written.
+    const beforeKey = await terminal.state();
+    const linesBefore = await terminal.lines();
     await terminal.type("x");
+    // The key is handled as it is delivered; a turn of the event loop of
+    // the page lets anything it would have started happen.
+    await terminal.ping();
+    const afterKey = await terminal.state();
+    // An exited terminal has no session: the same status means that none
+    // was started.
+    expect(afterKey.status).toEqual(exited.status);
+    expect(afterKey.bufferLength).toBe(beforeKey.bufferLength);
+    expect(await terminal.lines()).toEqual(linesBefore);
+
+    // Enter starts a new shell, which the `x` never reaches.
     await terminal.keys(enter());
     const restarted = await terminal.waitForState(
       "a new shell to be running",
@@ -32,6 +45,8 @@ describe("the end of a shell", () => {
     );
     expect(restarted.status.sessionId).not.toBe(before.status.sessionId);
     await terminal.waitForPrompt();
+    const typedAtPrompt = (await terminal.lines()).filter((line) => /^termx-e2e[$>] x/.test(line));
+    expect(typedAtPrompt).toEqual([]);
   });
 });
 
