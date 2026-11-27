@@ -8,7 +8,13 @@
 // with Ctrl+C handled, so that is what the suite starts from; the test in
 // `specs/ctrl-c.e2e.ts` covers the other case on purpose.
 import { spawnSync } from "node:child_process";
+import { rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+
+// The starts repeated in this run, and only those (see src/app.ts).
+rmSync(fileURLToPath(new URL("./artifacts/startup-retries.log", import.meta.url)), {
+  force: true,
+});
 
 const vitest = [fileURLToPath(new URL("./node_modules/vitest/vitest.mjs", import.meta.url)), "run"];
 const args = process.argv.slice(2);
