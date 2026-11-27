@@ -29,8 +29,20 @@
 //!   exit after the last output, and can never miss it by subscribing too
 //!   late, which a separate event could not guarantee.
 //!
+//! # Surviving a reload
+//!
+//! A page that reloads (or a webview that crashes and comes back) does not
+//! end the terminals of its window: they keep running, and their output
+//! keeps being recorded in a bounded [`ReplayBuffer`] while nothing shows
+//! it. The new page attaches to each one again ([`TerminalState::attach`]):
+//! it gets a new channel, which first receives the replay, then the output
+//! that follows, with nothing lost or repeated in between, and the
+//! terminal is resized so that a full-screen program redraws. Only closing
+//! the window ends its terminals.
+//!
 //! Nothing here logs what a session runs beyond the path of its shell:
-//! never a command line, an argument or an environment value.
+//! never a command line, an argument or an environment value. The output
+//! kept for a replay is never logged either.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -39,7 +51,9 @@ use serde::Serialize;
 use tauri::ipc::{Channel, InvokeResponseBody, IpcResponse};
 use termx_core::diagnostics::tracing::{error, info, warn};
 use termx_core::pty::{ExitStatus, PtyError, PtySize};
-use termx_core::session::{OutputFilter, SessionId, SessionManager, SessionOptions, SessionSink};
+use termx_core::session::{
+    OutputFilter, ReplayBuffer, SessionId, SessionManager, SessionOptions, SessionSink,
+};
 use termx_core::workspace::{
     ActivityHandle, LaunchFailure, LaunchMode, SessionKey, SessionState, Workspace,
 };
@@ -89,12 +103,38 @@ struct SessionLink {
     generation: u64,
 }
 
+/// Where the output of a terminal goes, and what it keeps for the next
+/// frontend that attaches to it. Shared by its sink, which sends, and the
+/// commands, which attach and acknowledge: one lock orders the two, so that
+/// a new channel gets the replay and then exactly what follows it.
+struct Attachment {
+    /// The channel of the page that shows the terminal; `None` between a
+    /// reload and the new page attaching.
+    channel: Option<Channel<InvokeResponseBody>>,
+    /// A failed delivery was logged already: once per channel is enough.
+    delivery_failed: bool,
+    /// The recent output, raw. Never logged.
+    replay: ReplayBuffer,
+    /// How many bytes the frontend acknowledges for the replay it was sent.
+    /// The session never counted them, so they are not passed on.
+    replay_acks: u64,
+    /// The size the terminal was last given.
+    size: PtySize,
+}
+
+type SharedAttachment = Arc<Mutex<Attachment>>;
+
+fn lock_attachment(attachment: &SharedAttachment) -> MutexGuard<'_, Attachment> {
+    attachment.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// What is remembered of a running terminal.
 struct Owner {
     /// The label of the window the terminal belongs to.
     window: String,
     /// The session it runs for, unless it is a bare terminal.
     session: Option<SessionLink>,
+    attachment: SharedAttachment,
 }
 
 /// The running terminals.
@@ -227,10 +267,16 @@ impl TerminalState {
         let activity = session
             .as_ref()
             .and_then(|link| link.workspace.activity_handle(&link.key));
-        let sink = ChannelSink {
-            channel,
-            owners: Arc::clone(&self.owners),
+        let attachment = Arc::new(Mutex::new(Attachment {
+            channel: Some(channel),
             delivery_failed: false,
+            replay: ReplayBuffer::default(),
+            replay_acks: 0,
+            size: options.size,
+        }));
+        let sink = ChannelSink {
+            attachment: Arc::clone(&attachment),
+            owners: Arc::clone(&self.owners),
             session: session.clone(),
             activity,
         };
@@ -246,9 +292,123 @@ impl TerminalState {
             Owner {
                 window: owner.to_owned(),
                 session,
+                attachment,
             },
         );
         Ok(id)
+    }
+
+    /// Lets go of the page of the window `owner`, which is reloading,
+    /// without ending its terminals: they keep running, and keep their
+    /// recent output for the new page to [`attach`](Self::attach) to.
+    /// Returns how many there were. Never blocks on a process.
+    pub fn release_page(&self, owner: &str) -> usize {
+        let owners = lock(&self.owners);
+        let mut released = 0;
+        for terminal in owners.values().filter(|terminal| terminal.window == owner) {
+            let mut attachment = lock_attachment(&terminal.attachment);
+            attachment.channel = None;
+            attachment.delivery_failed = false;
+            released += 1;
+        }
+        if released > 0 {
+            info!(released, "kept the sessions of a page that reloaded");
+        }
+        released
+    }
+
+    /// Gives the running terminal `id` a new channel, for the window
+    /// `owner`, and makes it repaint: the channel first receives the recent
+    /// output of the terminal, then everything that follows, with nothing
+    /// lost or repeated in between. Output the previous page never
+    /// acknowledged is written off, so that the terminal is not held back
+    /// for it. Finally the terminal is resized to `size`, through another
+    /// size if it has that one already, so that its program is told the
+    /// size changed (`SIGWINCH`) and a full-screen program redraws.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the terminal does not run any more.
+    pub fn attach(
+        &self,
+        owner: &str,
+        id: SessionId,
+        size: PtySize,
+        channel: Channel<InvokeResponseBody>,
+    ) -> Result<(), Failure> {
+        let manager = self.manager()?;
+        let attachment = {
+            let mut owners = lock(&self.owners);
+            let terminal = owners.get_mut(&id).ok_or_else(|| {
+                Failure::new(ErrorKind::NotFound, "the session does not run any more")
+            })?;
+            terminal.window = owner.to_owned();
+            Arc::clone(&terminal.attachment)
+        };
+        let previous_size = {
+            let mut attachment = lock_attachment(&attachment);
+            let replay = attachment.replay.replay();
+            attachment.replay_acks = replay.len() as u64;
+            if !replay.is_empty()
+                && let Err(source) = channel.send(InvokeResponseBody::Raw(replay))
+            {
+                warn!(session_id = id.as_u64(), error = %source, "could not send the replay of a session");
+            }
+            attachment.channel = Some(channel);
+            attachment.delivery_failed = false;
+            attachment.size
+        };
+        // Nobody will acknowledge what the previous page was sent.
+        manager.acknowledge(id, u64::MAX);
+        if previous_size == size {
+            let nudge = PtySize::new(size.cols, size.rows.saturating_sub(1).max(1));
+            let nudge = if nudge == size {
+                PtySize::new(size.cols.saturating_add(1), size.rows)
+            } else {
+                nudge
+            };
+            self.resize(id, nudge)
+                .map_err(|source| source.to_string())?;
+        }
+        self.resize(id, size).map_err(|source| source.to_string())?;
+        info!(session_id = id.as_u64(), "attached to a running session");
+        Ok(())
+    }
+
+    /// Changes the size of the terminal `id`.
+    ///
+    /// # Errors
+    ///
+    /// Those of [`SessionManager::resize`].
+    pub fn resize(&self, id: SessionId, size: PtySize) -> Result<(), PtyError> {
+        let manager = self.manager().map_err(|_| PtyError::UnknownSession(id))?;
+        manager.resize(id, size)?;
+        if let Some(terminal) = lock(&self.owners).get(&id) {
+            lock_attachment(&terminal.attachment).size = size;
+        }
+        Ok(())
+    }
+
+    /// Records that the frontend processed `bytes` of the output of the
+    /// terminal `id`. What it acknowledges for a replay was never counted
+    /// by the session, and is not passed on.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the manager is not running.
+    pub fn acknowledge(&self, id: SessionId, bytes: u64) -> Result<(), String> {
+        let manager = self.manager()?;
+        let mut bytes = bytes;
+        if let Some(terminal) = lock(&self.owners).get(&id) {
+            let mut attachment = lock_attachment(&terminal.attachment);
+            let skipped = bytes.min(attachment.replay_acks);
+            attachment.replay_acks -= skipped;
+            bytes -= skipped;
+        }
+        if bytes > 0 {
+            manager.acknowledge(id, bytes);
+        }
+        Ok(())
     }
 
     /// Closes every terminal of the window `owner`, killing their
@@ -341,12 +501,11 @@ pub fn session_is_gone(error: &PtyError) -> bool {
     matches!(error, PtyError::UnknownSession(_) | PtyError::Exited)
 }
 
-/// Delivers what a session produces to the channel of its frontend.
+/// Delivers what a session produces to the channel of its frontend, and
+/// keeps the recent output for the next one (see [`Attachment`]).
 struct ChannelSink {
-    channel: Channel<InvokeResponseBody>,
+    attachment: SharedAttachment,
     owners: Arc<Owners>,
-    /// A failed delivery was logged already: once is enough.
-    delivery_failed: bool,
     /// The session the terminal runs for, to tell the workspace its exit.
     session: Option<SessionLink>,
     /// Records that the session printed something.
@@ -354,11 +513,14 @@ struct ChannelSink {
 }
 
 impl ChannelSink {
-    fn send(&mut self, session: SessionId, body: InvokeResponseBody) {
-        if let Err(source) = self.channel.send(body)
-            && !self.delivery_failed
+    fn send(attachment: &mut Attachment, session: SessionId, body: InvokeResponseBody) {
+        let Some(channel) = &attachment.channel else {
+            return;
+        };
+        if let Err(source) = channel.send(body)
+            && !attachment.delivery_failed
         {
-            self.delivery_failed = true;
+            attachment.delivery_failed = true;
             warn!(
                 session_id = session.as_u64(),
                 error = %source,
@@ -374,7 +536,9 @@ impl SessionSink for ChannelSink {
             // A time and a flag: nothing that could hold the output up.
             activity.touch();
         }
-        self.send(session, InvokeResponseBody::Raw(bytes));
+        let mut attachment = lock_attachment(&self.attachment);
+        attachment.replay.push(&bytes);
+        Self::send(&mut attachment, session, InvokeResponseBody::Raw(bytes));
     }
 
     fn exited(&mut self, session: SessionId, status: ExitStatus) {
@@ -403,7 +567,7 @@ impl SessionSink for ChannelSink {
             }
         }
         match event.body() {
-            Ok(body) => self.send(session, body),
+            Ok(body) => Self::send(&mut lock_attachment(&self.attachment), session, body),
             Err(source) => warn!(
                 session_id = session.as_u64(),
                 error = %source,
@@ -413,8 +577,9 @@ impl SessionSink for ChannelSink {
     }
 
     fn is_alive(&self) -> bool {
-        // A channel that failed belongs to a webview that is gone.
-        !self.delivery_failed
+        // A channel that failed belongs to a webview that is gone. A
+        // terminal between a reload and its new page waits for it.
+        !lock_attachment(&self.attachment).delivery_failed
     }
 }
 
@@ -616,6 +781,134 @@ mod tests {
             cols: 0,
             rows: 0
         }));
+    }
+
+    /// A program that prints `ready`, then `got <line>` for every line it
+    /// reads.
+    fn echoing_program() -> SessionOptions {
+        let (program, args): (&str, &[&str]) = if cfg!(windows) {
+            (
+                "powershell.exe",
+                &[
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-Command",
+                    "Write-Output 'ready'; while ($null -ne ($l = [Console]::ReadLine())) { Write-Output \"got $l\" }",
+                ],
+            )
+        } else {
+            (
+                "/bin/sh",
+                &[
+                    "-c",
+                    "echo ready; while read line; do echo \"got $line\"; done",
+                ],
+            )
+        };
+        SessionOptions::new(PtyCommand::new(program).args(args))
+    }
+
+    #[test]
+    fn a_reloaded_page_attaches_to_its_running_terminal_again() {
+        let state = TerminalState::start();
+        let (first, first_messages) = channel();
+        let id = state.create("main", &echoing_program(), first).unwrap();
+        wait_for_output(&first_messages, "ready");
+        let manager = Arc::clone(state.manager().unwrap());
+        let process = manager.process_id(id).expect("no process");
+
+        // The page reloads: the terminal keeps running, unseen.
+        assert_eq!(state.release_page("main"), 1);
+        assert_eq!(state.release_page("other"), 0);
+        manager.write(id, b"while-away\r").unwrap();
+        // Recorded for the replay, while nothing shows it.
+        let deadline = Instant::now() + TIMEOUT;
+        while !String::from_utf8_lossy(&replay_of(&state, id)).contains("got while-away") {
+            assert!(Instant::now() < deadline, "the output was not kept");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        let (second, second_messages) = channel();
+        state
+            .attach("main", id, PtySize::new(100, 30), second)
+            .unwrap();
+
+        // The new channel gets the replay first, then what follows.
+        let Ok(Message::Output(replay)) = second_messages.recv_timeout(TIMEOUT) else {
+            panic!("no replay");
+        };
+        let replay = String::from_utf8_lossy(&replay).into_owned();
+        assert!(replay.contains("ready"), "{replay:?}");
+        assert!(replay.contains("got while-away"), "{replay:?}");
+        manager.write(id, b"after\r").unwrap();
+        wait_for_output(&second_messages, "got after");
+        // Nothing reached the channel of the old page after the reload.
+        let late: Vec<Message> = first_messages.try_iter().collect();
+        assert!(
+            late.iter().all(|message| match message {
+                Message::Output(bytes) => !String::from_utf8_lossy(bytes).contains("after"),
+                Message::Json(_) => false,
+            }),
+            "{late:?}"
+        );
+        // The same process: nothing was started again.
+        assert_eq!(manager.process_id(id), Some(process));
+        assert_eq!(state.owner_of(id).as_deref(), Some("main"));
+        assert_eq!(size_of(&state, id), PtySize::new(100, 30));
+        state.close(id);
+    }
+
+    #[test]
+    fn what_is_acknowledged_for_a_replay_is_not_passed_on() {
+        let state = TerminalState::start();
+        let (first, first_messages) = channel();
+        let id = state.create("main", &echoing_program(), first).unwrap();
+        wait_for_output(&first_messages, "ready");
+        state.release_page("main");
+        let (second, _second_messages) = channel();
+        state
+            .attach("main", id, PtySize::new(80, 24), second)
+            .unwrap();
+        let replayed = replay_acks_of(&state, id);
+        assert!(replayed > 0);
+
+        state.acknowledge(id, replayed - 1).unwrap();
+        assert_eq!(replay_acks_of(&state, id), 1);
+        state.acknowledge(id, 10).unwrap();
+        assert_eq!(replay_acks_of(&state, id), 0);
+        state.close(id);
+    }
+
+    #[test]
+    fn attaching_to_a_terminal_that_is_gone_fails() {
+        let state = TerminalState::start();
+        let (channel, _messages) = channel();
+
+        let error = state
+            .attach(
+                "main",
+                SessionId::from_raw(987_654),
+                PtySize::new(80, 24),
+                channel,
+            )
+            .unwrap_err();
+
+        assert_eq!(error.kind, ErrorKind::NotFound);
+    }
+
+    fn replay_of(state: &TerminalState, id: SessionId) -> Vec<u8> {
+        let owners = lock(&state.owners);
+        lock_attachment(&owners[&id].attachment).replay.replay()
+    }
+
+    fn replay_acks_of(state: &TerminalState, id: SessionId) -> u64 {
+        let owners = lock(&state.owners);
+        lock_attachment(&owners[&id].attachment).replay_acks
+    }
+
+    fn size_of(state: &TerminalState, id: SessionId) -> PtySize {
+        let owners = lock(&state.owners);
+        lock_attachment(&owners[&id].attachment).size
     }
 
     #[test]
