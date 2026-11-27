@@ -70,6 +70,8 @@ export function ClaudeSetupDialog() {
   const action = mode === "update" ? "Update" : mode === "repair" ? "Repair" : "Install";
   const progress =
     mode === "update" ? "Updating…" : mode === "repair" ? "Repairing…" : "Installing…";
+  // Nothing is installed blind: only once the user saw what changes.
+  const canInstall = preview.status === "ready" && !installing;
 
   return (
     <Modal
@@ -98,7 +100,7 @@ export function ClaudeSetupDialog() {
             className="link-button"
             onClick={() => void workbench.claude.loadPreview()}
           >
-            Try again
+            Retry
           </button>
         </p>
       )}
@@ -112,10 +114,13 @@ export function ClaudeSetupDialog() {
           ))}
         </ul>
       )}
-      <p className="modal-text claude-note">
-        Your existing Claude Code hooks and settings are not changed. You can remove the integration
-        at any time, from the bottom of the sidebar.
-      </p>
+      {preview.status === "ready" && (
+        <p className="modal-text claude-note" data-testid="claude-note">
+          {preview.preview.note ??
+            "Existing hooks are kept; termx only adds the entries listed above."}{" "}
+          You can remove them at any time, from the bottom of the sidebar.
+        </p>
+      )}
       {installing && (
         <p className="modal-text" role="status" data-testid="claude-installing">
           {progress}
@@ -126,11 +131,18 @@ export function ClaudeSetupDialog() {
           {action} failed. {describeIntegrationError(failed.error)}
         </p>
       )}
+      {mode === "install" && (
+        <p className="modal-text claude-later" id="claude-later">
+          Not now? You can enable it later from the sidebar.
+        </p>
+      )}
       <div className="modal-actions">
         <button
           type="button"
           className="button"
           data-testid="claude-not-now"
+          data-autofocus
+          aria-describedby={mode === "install" ? "claude-later" : undefined}
           disabled={installing}
           onClick={() => {
             if (mode === "install") void workbench.declineClaude();
@@ -143,8 +155,7 @@ export function ClaudeSetupDialog() {
           type="button"
           className="button button-primary"
           data-testid="claude-install"
-          data-autofocus
-          disabled={installing}
+          disabled={!canInstall}
           onClick={() => void workbench.installClaude()}
         >
           {installing ? progress : failed ? "Try again" : action}
