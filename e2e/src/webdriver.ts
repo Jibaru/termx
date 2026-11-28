@@ -21,6 +21,24 @@ const SCRIPT_TIMEOUT_MS = 15_000;
 /** How long the script that asks whether the page is loaded may run. */
 const PAGE_PROBE_TIMEOUT_MS = 1_000;
 
+/**
+ * Commands that take longer than this, in milliseconds, are reported. A
+ * healthy one answers in a few milliseconds; one that waited for a timeout
+ * explains a step that took much longer than usual.
+ */
+const SLOW_COMMAND_MS = 2_000;
+
+/** Reports a slow command: what it was, how long it took, how it ended. */
+function reportSlow(method: string, path: string, started: number, outcome: string): void {
+  const elapsed = Math.round(performance.now() - started);
+  if (elapsed < SLOW_COMMAND_MS) return;
+  // The session in the path is noise; the command is what matters.
+  const command = path.replace(/^\/session\/[^/]+/, "");
+  console.warn(
+    `[webdriver] slow command: ${method} ${command || "/"} ${String(elapsed)} ms, ${outcome}`,
+  );
+}
+
 export class WebDriverError extends Error {
   constructor(
     message: string,
@@ -53,13 +71,21 @@ async function request(
   path: string,
   body?: unknown,
 ): Promise<unknown> {
-  const response = await fetch(`${origin}${path}`, {
-    method,
-    headers: body === undefined ? undefined : { "content-type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-    signal: AbortSignal.timeout(COMMAND_TIMEOUT_MS),
-  });
-  const text = await response.text();
+  const started = performance.now();
+  let response: Response;
+  let text: string;
+  try {
+    response = await fetch(`${origin}${path}`, {
+      method,
+      headers: body === undefined ? undefined : { "content-type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: AbortSignal.timeout(COMMAND_TIMEOUT_MS),
+    });
+    text = await response.text();
+  } catch (error) {
+    reportSlow(method, path, started, `no answer (${String(error)})`);
+    throw error;
+  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
@@ -71,6 +97,7 @@ async function request(
   }
   const value = isEnvelope(parsed) ? parsed.value : parsed;
   const failure = errorOf(value);
+  reportSlow(method, path, started, failure?.error ?? `status ${String(response.status)}`);
   if (failure || !response.ok) {
     throw new WebDriverError(
       `${method} ${path} failed: ${failure?.message ?? text.slice(0, 200)}`,
