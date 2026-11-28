@@ -4,6 +4,7 @@ import { NotificationPrefs } from "../attention/notificationPrefs";
 import { type ClaudeBackend, NO_CLAUDE } from "../claude/backend";
 import { ClaudeIntegrationStore } from "../claude/integration";
 import { reportError } from "../lib/errorReporting";
+import { type FocusSource, windowFocusSource } from "../lib/windowFocus";
 import {
   isCommandError,
   type NewSession,
@@ -99,8 +100,8 @@ const INITIAL_UI: UiState = {
 export interface WorkbenchOptions {
   /** The commands of the Claude Code integration; none when omitted. */
   claude?: ClaudeBackend;
-  /** Whether the window has the focus. */
-  windowFocused?: () => boolean;
+  /** Whether the user can be looking at the window; the window's own when omitted. */
+  focus?: FocusSource;
 }
 
 export class Workbench {
@@ -115,6 +116,8 @@ export class Workbench {
   readonly notificationPrefs = new NotificationPrefs();
   /** Notifications, the badge and announcements about sessions that wait. */
   readonly attention: AttentionMonitor;
+  /** Whether the user can be looking at the window. */
+  readonly focus: FocusSource;
 
   constructor(
     readonly workspace: WorkspaceStore,
@@ -122,11 +125,12 @@ export class Workbench {
     options: WorkbenchOptions = {},
   ) {
     this.claude = new ClaudeIntegrationStore(options.claude ?? NO_CLAUDE);
+    this.focus = options.focus ?? windowFocusSource();
     this.attention = new AttentionMonitor({
       workspace,
       claude: this.claude,
       prefs: this.notificationPrefs,
-      windowFocused: options.windowFocused ?? (() => document.hasFocus()),
+      focus: this.focus,
       announce: this.announce,
     });
   }
@@ -258,7 +262,7 @@ export class Workbench {
 
   private async bootstrapOnce(): Promise<void> {
     this.attention.start();
-    void this.claude.load();
+    this.claude.start(this.focus);
     const workspace = await this.workspace.start();
     if (!workspace) {
       this.bootstrapped = null;
@@ -507,6 +511,12 @@ export class Workbench {
         return;
       }
     }
+  };
+
+  /** The user clicked a notification about `id`: show it, or say it is gone. */
+  openFromNotification = (id: SessionId): void => {
+    if (this.session(id)) void this.activate(id);
+    else this.hint("That session was closed.");
   };
 
   // --- The Claude Code integration ---------------------------------------------

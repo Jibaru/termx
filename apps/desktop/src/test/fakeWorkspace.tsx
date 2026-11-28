@@ -5,6 +5,7 @@ import { App } from "../App";
 import type { Binding } from "../keybindings/keybindings";
 import type { Session, SessionId, WorkspaceDelta, WorkspaceSnapshot } from "../lib/ipc";
 import type { Platform } from "../lib/platform";
+import { type FocusSource, manualFocusSource } from "../lib/windowFocus";
 import { type ControllerFactory, SessionStore } from "../terminal/sessionStore";
 import type { AutoStart, TerminalController, TerminalStatus } from "../terminal/TerminalController";
 import { Workbench } from "../workspace/workbench";
@@ -162,8 +163,8 @@ export async function renderApp(
     bindings?: Binding[];
     /** The Claude Code integration; installed, with consent, when omitted. */
     claude?: ReturnType<typeof fakeClaude>;
-    /** Whether the window has the focus; yes when omitted. */
-    windowFocused?: () => boolean;
+    /** Whether the user can be looking at the window; yes when omitted. */
+    focus?: FocusSource;
   } = {},
 ) {
   const ipc = recordIPC((command) => (command === "core_version" ? "0.0.0" : undefined));
@@ -172,7 +173,7 @@ export async function renderApp(
   const claude = options.claude ?? fakeClaude();
   const workbench = new Workbench(new WorkspaceStore(fake.backend), terminals.store, {
     claude: claude.backend,
-    windowFocused: options.windowFocused ?? (() => true),
+    focus: options.focus ?? manualFocusSource(),
   });
   const view = render(
     <App

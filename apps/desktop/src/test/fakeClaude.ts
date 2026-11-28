@@ -41,6 +41,7 @@ export function fakeClaude(initial: ClaudeIntegration = INSTALLED, responders: R
   const calls: ClaudeCall[] = [];
   let state: ClaudeIntegration = { ...initial };
   let clicked: ((id: SessionId) => void) | null = null;
+  let changed: (() => void) | null = null;
 
   const answer = (command: keyof ClaudeBackend, args: unknown[], fallback: () => unknown) => {
     calls.push({ command, args });
@@ -72,6 +73,12 @@ export function fakeClaude(initial: ClaudeIntegration = INSTALLED, responders: R
       }),
     notify: (notification) => answer("notify", [notification], () => undefined),
     setAttentionBadge: (count) => answer("setAttentionBadge", [count], () => undefined),
+    onClaudeIntegrationChanged: (handler) => {
+      changed = handler;
+      return Promise.resolve(() => {
+        changed = null;
+      });
+    },
     onNotificationClicked: (handler) => {
       clicked = handler;
       return Promise.resolve(() => {
@@ -89,8 +96,15 @@ export function fakeClaude(initial: ClaudeIntegration = INSTALLED, responders: R
     clicked(id);
   };
 
+  /** The Rust side says the integration changed. */
+  const announceChange = () => {
+    if (!changed) throw new Error("nobody listens to changes of the integration");
+    changed();
+  };
+
   return {
     backend,
+    announceChange,
     calls,
     callsOf,
     click,
