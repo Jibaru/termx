@@ -162,6 +162,24 @@ describe("agent states in the sidebar", () => {
     expect(pane).toHaveAttribute("data-attention", "true");
   });
 
+  it("stops showing agent states when the plugin is removed outside termx", async () => {
+    const fake = fakeClaude();
+    await renderApp(workspace([claude("s-1", { agent: agent("waitingForPermission") })]), {
+      claude: fake,
+    });
+    expect(row("s-1")).toHaveAttribute("data-attention", "true");
+
+    fake.setState({ plugin: "notInstalled" });
+    act(() => {
+      fake.announceChange();
+    });
+    await flush();
+
+    expect(within(row("s-1")).getByTestId("agent-slot")).toHaveAttribute("data-status", "none");
+    expect(row("s-1")).not.toHaveAttribute("data-attention");
+    expect(screen.queryByTestId("attention-queue")).toBeNull();
+  });
+
   it("shows no agent state while the plugin is not installed", async () => {
     await renderApp(workspace([claude("s-1", { agent: agent("waitingForPermission") })]), {
       claude: fakeClaude({ ...INSTALLED, plugin: "notInstalled", consent: "declined" }),
@@ -309,6 +327,19 @@ describe("going to the sessions that wait", () => {
 });
 
 describe("notifications from the window", () => {
+  it("say so when the session of a notification was closed since", async () => {
+    const fake = fakeClaude();
+    const view = await renderApp(workspace([claude("s-1")]), { claude: fake });
+
+    act(() => {
+      fake.click("s-gone");
+    });
+    await flush();
+
+    expect(view.callsOf("showSession")).toEqual([]);
+    expect(screen.getByTestId("hint")).toHaveTextContent("That session was closed.");
+  });
+
   it("are sent for a session out of sight, announced, and a click shows the session", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const fake = fakeClaude();

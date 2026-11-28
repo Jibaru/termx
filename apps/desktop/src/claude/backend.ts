@@ -15,6 +15,7 @@ export interface ClaudeBackend {
   notify: typeof ipc.notify;
   setAttentionBadge: typeof ipc.setAttentionBadge;
   onNotificationClicked: typeof ipc.onNotificationClicked;
+  onClaudeIntegrationChanged: typeof ipc.onClaudeIntegrationChanged;
 }
 
 /**
@@ -30,10 +31,19 @@ export const NO_CLAUDE: ClaudeBackend = {
   notify: unavailable,
   setAttentionBadge: unavailable,
   onNotificationClicked: () => Promise.resolve(() => undefined),
+  onClaudeIntegrationChanged: () => Promise.resolve(() => undefined),
 };
 
+/** What `NO_CLAUDE` rejects with: there is no integration to ask. */
+export class IntegrationUnavailableError extends Error {
+  constructor() {
+    super("this window has no Claude Code integration");
+    this.name = "IntegrationUnavailableError";
+  }
+}
+
 function unavailable(): Promise<never> {
-  return Promise.reject(new Error("this build has no Claude Code integration"));
+  return Promise.reject(new IntegrationUnavailableError());
 }
 
 /** The real commands, on the Rust side. */
@@ -46,4 +56,5 @@ export const TAURI_CLAUDE: ClaudeBackend = {
   notify: ipc.notify,
   setAttentionBadge: ipc.setAttentionBadge,
   onNotificationClicked: ipc.onNotificationClicked,
+  onClaudeIntegrationChanged: ipc.onClaudeIntegrationChanged,
 };

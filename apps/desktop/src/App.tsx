@@ -237,9 +237,7 @@ function Window() {
       }),
       backend.onQuitRequested(workbench.requestQuit),
       // A click on a notification brings its session to the front.
-      workbench.claude.backend.onNotificationClicked((id) => {
-        if (workbench.session(id)) void workbench.activate(id);
-      }),
+      workbench.claude.backend.onNotificationClicked(workbench.openFromNotification),
     ];
     return () => {
       for (const stop of stops) {

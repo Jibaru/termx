@@ -7,7 +7,8 @@ import {
   describeError,
   isCommandError,
 } from "../lib/ipc";
-import type { ClaudeBackend } from "./backend";
+import type { FocusSource } from "../lib/windowFocus";
+import { type ClaudeBackend, IntegrationUnavailableError } from "./backend";
 
 /**
  * The Claude Code integration as the window knows it: whether Claude Code
@@ -17,8 +18,10 @@ import type { ClaudeBackend } from "./backend";
 
 export type IntegrationState =
   | { status: "loading" }
-  /** The Rust side does not answer: this build has no integration. */
+  /** This build has no integration: its commands do not exist. */
   | { status: "unavailable" }
+  /** Reading it failed; termx tries again (`RETRY_MS`), and on focus. */
+  | { status: "failed" }
   | { status: "ready"; info: ClaudeIntegration };
 
 export type Operation =
@@ -51,6 +54,9 @@ export interface IntegrationSnapshot {
 /** What the setup dialog offers, from where the integration stands. */
 export type SetupMode = "install" | "update" | "repair";
 
+/** How long to wait before reading the integration again after a failure. */
+export const RETRY_MS = [1_000, 2_000, 5_000, 15_000, 60_000] as const;
+
 export class ClaudeIntegrationStore {
   private snapshot: IntegrationSnapshot = {
     state: { status: "loading" },
@@ -58,8 +64,54 @@ export class ClaudeIntegrationStore {
     preview: { status: "idle" },
   };
   private readonly listeners = new Set<() => void>();
+  private failures = 0;
+  private retry: ReturnType<typeof setTimeout> | null = null;
+  private stops: (() => void)[] = [];
 
   constructor(readonly backend: ClaudeBackend) {}
+
+  /**
+   * Reads the integration, and again whenever it may have changed: when the
+   * window gets the focus back (Claude Code installed meanwhile, the plugin
+   * removed by hand) and when the Rust side says so
+   * (`claude-integration-changed`). Returns how to stop.
+   */
+  start(focus: FocusSource): () => void {
+    if (this.stops.length > 0) return this.stop;
+    let wasFocused = focus.focused();
+    const stopFocus = focus.subscribe(() => {
+      const focused = focus.focused();
+      if (focused && !wasFocused) void this.load();
+      wasFocused = focused;
+    });
+    let stopChanges: (() => void) | null = null;
+    let stopped = false;
+    this.backend
+      .onClaudeIntegrationChanged(() => void this.load())
+      .then(
+        (unlisten) => {
+          if (stopped) unlisten();
+          else stopChanges = unlisten;
+        },
+        () => undefined,
+      );
+    this.stops = [
+      stopFocus,
+      () => {
+        stopped = true;
+        stopChanges?.();
+      },
+    ];
+    void this.load();
+    return this.stop;
+  }
+
+  stop = (): void => {
+    for (const stop of this.stops) stop();
+    this.stops = [];
+    if (this.retry !== null) clearTimeout(this.retry);
+    this.retry = null;
+  };
 
   subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener);
@@ -113,15 +165,33 @@ export class ClaudeIntegrationStore {
     }
   }
 
-  /** Reads where the integration stands. Never rejects. */
+  /**
+   * Reads where the integration stands. Never rejects. After a failure it
+   * tries again later, waiting longer each time (`RETRY_MS`); a build
+   * without the integration is "unavailable", quietly, and is not asked
+   * again.
+   */
   load = async (): Promise<void> => {
+    if (this.snapshot.state.status === "unavailable") return;
+    if (this.retry !== null) clearTimeout(this.retry);
+    this.retry = null;
     try {
       const info = await this.backend.getClaudeIntegration();
+      this.failures = 0;
       this.set({ state: { status: "ready", info } });
-    } catch {
-      // A build whose Rust side has no integration: nothing to show. The
-      // failure was logged by `call` or by the Rust side.
-      if (this.snapshot.state.status !== "ready") this.set({ state: { status: "unavailable" } });
+    } catch (error) {
+      if (error instanceof IntegrationUnavailableError) {
+        this.set({ state: { status: "unavailable" } });
+        return;
+      }
+      // Logged by `call` or by the Rust side. What was known stays.
+      if (this.snapshot.state.status !== "ready") this.set({ state: { status: "failed" } });
+      const delay = RETRY_MS[Math.min(this.failures, RETRY_MS.length - 1)];
+      this.failures += 1;
+      this.retry = setTimeout(() => {
+        this.retry = null;
+        void this.load();
+      }, delay);
     }
   };
 
@@ -213,7 +283,7 @@ const ERROR_LABELS: Record<string, string> = {
 
 /** What went wrong, in words, by its kind; a kind not known here shows its message. */
 export function describeIntegrationError(error: IntegrationFailure): string {
-  const label = ERROR_LABELS[error.kind];
+  const label = Object.hasOwn(ERROR_LABELS, error.kind) ? ERROR_LABELS[error.kind] : undefined;
   if (label === undefined) return error.message;
   if (error.message === "" || error.message === label) return `${label}.`;
   return `${label}: ${error.message}`;

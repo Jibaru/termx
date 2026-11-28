@@ -1,28 +1,37 @@
 import type { ClaudeIntegrationStore } from "../claude/integration";
 import type { Session, SessionId, WorkspaceSnapshot } from "../lib/ipc";
+import type { FocusSource } from "../lib/windowFocus";
 import { visibleSessions } from "../workspace/layoutTree";
 import type { WorkspaceStore } from "../workspace/workspaceStore";
 import { attentionQueue, isWaiting, viewAgent, waitKey } from "./agent";
 import type { NotificationPrefs } from "./notificationPrefs";
 
 /**
- * Tells the user when a session starts to need them, without crying wolf.
+ * Tells the user when a session starts to need them, without crying wolf
+ * and without losing a wait.
  *
- * - **Once per wait.** A session that starts to wait is signalled once; it
- *   is signalled again only for a new wait (a new `waitingSince`).
- * - **Flapping is ignored.** A wait is signalled after `SETTLE_MS`, and only
- *   if it still lasts: a permission granted at once by a rule never shows.
- *   A session signalled less than `COOLDOWN_MS` ago is not signalled again.
- * - **Bursts are one notification.** The waits that start within
- *   `SETTLE_MS` of the first go out together: "3 sessions need you".
+ * Each wait of a session (identified by its `waitingSince`) is followed
+ * until it ends:
+ *
+ * - **It settles first.** A wait is signalled only once it lasted
+ *   `SETTLE_MS`: a permission granted at once by a rule never shows. Every
+ *   wait of a burst gets that time, not only the first.
+ * - **Bursts are one notification.** Waits that start within `SETTLE_MS` of
+ *   the first of a burst go out together, once the last of them settled:
+ *   "3 sessions need you".
  * - **Not while the user looks at it.** No OS notification for a session
- *   shown in a pane of the focused window. The others, and every session
- *   while the window is in the background, are notified, if the user did
- *   not turn notifications off.
- * - "Done" is signalled the same way when the user turned it on.
+ *   shown in a pane of the focused, visible window. The wait is kept: if
+ *   the user looks away while it still waits, it is notified then.
+ * - **No repeat within `COOLDOWN_MS`.** After an OS notification about a
+ *   session, a new wait of the same session is held, not dropped, and
+ *   notified when the cooldown ends, if it still waits. The cooldown only
+ *   starts when a notification was actually sent.
+ * - **Once per wait.** A wait is notified at most once; with notifications
+ *   turned off when it settles, it is not notified later.
+ * - "Done" follows the same rules when the user turned it on.
  *
- * Every signal is also announced to screen readers (`announce`), and the
- * badge of the app always holds the number of sessions that wait.
+ * Every wait that settles is also announced to screen readers (`announce`),
+ * and the badge of the app always holds the number of sessions that wait.
  *
  * Nothing is sent before the plugin reports (`reporting`), and the waits
  * found at start-up are the baseline: a reload notifies nothing.
@@ -30,17 +39,30 @@ import type { NotificationPrefs } from "./notificationPrefs";
 
 /** How long a wait must last before it is signalled; also the window of a burst. */
 export const SETTLE_MS = 2_000;
-/** How long after a signal the same session is not signalled again. */
+/** How long after a notification about a session no other one is sent about it. */
 export const COOLDOWN_MS = 30_000;
 
 type SignalKind = "waiting" | "done";
+
+/** One wait (or one "done") of a session, followed until it ends. */
+interface Signal {
+  id: SessionId;
+  kind: SignalKind;
+  /** Identifies the wait: a new one has a new key. */
+  key: string;
+  /** When termx saw it start. */
+  seen: number;
+  announced: boolean;
+  /** Notified, or never to be: it settled while notifications were off. */
+  settledNotification: boolean;
+}
 
 export interface MonitorDeps {
   workspace: WorkspaceStore;
   claude: ClaudeIntegrationStore;
   prefs: NotificationPrefs;
-  /** Whether the window has the focus. */
-  windowFocused: () => boolean;
+  /** Whether the user can be looking at the window. */
+  focus: FocusSource;
   /** Says something to screen readers, politely. */
   announce: (text: string) => void;
   now?: () => number;
@@ -49,13 +71,14 @@ export interface MonitorDeps {
 export class AttentionMonitor {
   private readonly now: () => number;
   private baseline = false;
-  /** The current wait of each session that waits. */
-  private waits = new Map<SessionId, string>();
+  /** The signal being followed for each session, if any. */
+  private signals = new Map<SessionId, Signal>();
   /** The status of the agent of each session that reports one. */
   private statuses = new Map<SessionId, string>();
-  private readonly pending = new Map<SessionId, SignalKind>();
+  /** When the last OS notification about each session was sent. */
+  private readonly notifiedAt = new Map<SessionId, number>();
   private timer: ReturnType<typeof setTimeout> | null = null;
-  private readonly signalled = new Map<SessionId, number>();
+  private timerAt: number | null = null;
   private badge: number | null = null;
   private stops: (() => void)[] = [];
 
@@ -69,6 +92,9 @@ export class AttentionMonitor {
       this.stops = [
         this.deps.workspace.subscribe(this.evaluate),
         this.deps.claude.subscribe(this.evaluate),
+        this.deps.prefs.subscribe(this.review),
+        // Looking away from a session that waits can make it due.
+        this.deps.focus.subscribe(this.review),
       ];
       this.evaluate();
     }
@@ -78,94 +104,180 @@ export class AttentionMonitor {
   stop = (): void => {
     for (const stop of this.stops) stop();
     this.stops = [];
-    if (this.timer !== null) clearTimeout(this.timer);
-    this.timer = null;
+    this.clearTimer();
   };
 
+  /** Follows what the workspace says now: waits that start and end. */
   private evaluate = (): void => {
     const workspace = this.deps.workspace.workspace;
     const claude = this.deps.claude;
     if (!workspace || claude.getSnapshot().state.status === "loading") return;
 
     const sessions = claude.reporting ? workspace.sessions : [];
-    const waits = new Map<SessionId, string>();
     const statuses = new Map<SessionId, string>();
+    const signals = new Map<SessionId, Signal>();
+    const now = this.now();
+    let waiting = 0;
     for (const session of sessions) {
-      if (isWaiting(session)) waits.set(session.id, waitKey(session));
       const view = viewAgent(session.agent);
       if (view && !view.stale) statuses.set(session.id, view.icon);
-    }
-
-    if (this.baseline) {
-      for (const [id, key] of waits) {
-        if (this.waits.get(id) !== key) this.enter(id, "waiting");
+      const previous = this.signals.get(session.id);
+      let key: string | null = null;
+      let kind: SignalKind = "waiting";
+      if (isWaiting(session)) {
+        waiting += 1;
+        key = waitKey(session);
+      } else if (view?.icon === "done" && !view.stale) {
+        const before = this.statuses.get(session.id);
+        kind = "done";
+        // A session that just finished, or one followed since it did.
+        if (previous?.kind === "done") key = previous.key;
+        else if (before !== undefined && before !== "done")
+          key = `${session.id}\u0000done:${String(now)}`;
       }
-      for (const [id, status] of statuses) {
-        const before = this.statuses.get(id);
-        if (status === "done" && before !== undefined && before !== "done") this.enter(id, "done");
-      }
-      // What ended before it settled is forgotten.
-      for (const [id, kind] of [...this.pending]) {
-        const still = kind === "waiting" ? waits.has(id) : statuses.get(id) === "done";
-        if (!still) this.pending.delete(id);
+      if (key === null) continue;
+      if (previous?.key === key) {
+        signals.set(session.id, previous);
+      } else {
+        signals.set(session.id, {
+          id: session.id,
+          kind,
+          key,
+          seen: now,
+          // The waits found at start-up are never signalled.
+          announced: !this.baseline,
+          settledNotification: !this.baseline,
+        });
       }
     }
     this.baseline = true;
-    this.waits = waits;
+    this.signals = signals;
     this.statuses = statuses;
-    this.syncBadge(waits.size);
+    this.syncBadge(waiting);
+    this.review();
   };
 
-  private enter(id: SessionId, kind: SignalKind): void {
-    const last = this.signalled.get(id);
-    if (last !== undefined && this.now() - last < COOLDOWN_MS) return;
-    // Waiting wins over done.
-    if (this.pending.get(id) !== "waiting") this.pending.set(id, kind);
-    this.timer ??= setTimeout(this.flush, SETTLE_MS);
+  /** Sends what is due, and sets a timer for what will be. */
+  private review = (): void => {
+    const workspace = this.deps.workspace.workspace;
+    if (!workspace || !this.deps.claude.reporting) return;
+    const now = this.now();
+    let next: number | null = null;
+    const later = (at: number) => {
+      next = next === null ? at : Math.min(next, at);
+    };
+
+    // Screen readers hear every wait once it settled.
+    const toAnnounce = this.due(
+      [...this.signals.values()].filter((signal) => !signal.announced),
+      now,
+      later,
+    );
+    if (toAnnounce.length > 0) {
+      for (const signal of toAnnounce) signal.announced = true;
+      const [waiting, done] = this.sessionsOf(workspace, toAnnounce);
+      this.deps.announce(announcement(waiting, done));
+    }
+
+    // OS notifications.
+    const settings = this.deps.prefs.get();
+    const looking = this.deps.focus.focused() ? visibleSessions(workspace.layout) : new Set();
+    const candidates: Signal[] = [];
+    for (const signal of this.signals.values()) {
+      if (signal.settledNotification) continue;
+      const settled = now >= signal.seen + SETTLE_MS;
+      const wanted = signal.kind === "waiting" ? settings.waiting : settings.done;
+      if (!wanted) {
+        // Off when it settles: never notified.
+        if (settled) signal.settledNotification = true;
+        else later(signal.seen + SETTLE_MS);
+        continue;
+      }
+      // Kept for when the user looks away.
+      if (looking.has(signal.id)) {
+        if (!settled) later(signal.seen + SETTLE_MS);
+        continue;
+      }
+      const last = this.notifiedAt.get(signal.id);
+      if (last !== undefined && now < last + COOLDOWN_MS) {
+        later(last + COOLDOWN_MS);
+        continue;
+      }
+      candidates.push(signal);
+    }
+    const toNotify = this.due(candidates, now, later);
+    if (toNotify.length > 0) {
+      const [waiting, done] = this.sessionsOf(workspace, toNotify);
+      const notification = describeNotification(waiting, done);
+      if (notification && this.deps.claude.available) {
+        for (const signal of toNotify) {
+          signal.settledNotification = true;
+          this.notifiedAt.set(signal.id, now);
+        }
+        this.deps.claude.backend.notify(notification).catch(ignoreFailure);
+      }
+    }
+
+    this.schedule(next);
+  };
+
+  /**
+   * The signals of `candidates` that are due now: the burst of the oldest
+   * one (those seen within `SETTLE_MS` of it), once the last of the burst
+   * settled. Tells `later` when the rest will be due.
+   */
+  private due(candidates: Signal[], now: number, later: (at: number) => void): Signal[] {
+    const result: Signal[] = [];
+    let rest = [...candidates].sort((a, b) => a.seen - b.seen);
+    while (rest.length > 0) {
+      const first = rest[0];
+      if (!first) break;
+      const burst = rest.filter((signal) => signal.seen <= first.seen + SETTLE_MS);
+      const dueAt = Math.max(...burst.map((signal) => signal.seen)) + SETTLE_MS;
+      if (now < dueAt) {
+        later(dueAt);
+        break;
+      }
+      result.push(...burst);
+      rest = rest.filter((signal) => !burst.includes(signal));
+    }
+    return result;
   }
 
-  private flush = (): void => {
-    this.timer = null;
-    const workspace = this.deps.workspace.workspace;
-    const pending = [...this.pending];
-    this.pending.clear();
-    if (!workspace || !this.deps.claude.reporting) return;
-
+  private sessionsOf(workspace: WorkspaceSnapshot, signals: Signal[]): [Session[], Session[]] {
     const byId = new Map(workspace.sessions.map((session) => [session.id, session]));
+    const order = new Map(attentionQueue(workspace).map((session, index) => [session.id, index]));
     const waiting: Session[] = [];
     const done: Session[] = [];
-    for (const [id, kind] of pending) {
-      const session = byId.get(id);
+    for (const signal of signals) {
+      const session = byId.get(signal.id);
       if (!session) continue;
-      if (kind === "waiting" && isWaiting(session)) waiting.push(session);
-      else if (kind === "done" && viewAgent(session.agent)?.icon === "done") done.push(session);
+      (signal.kind === "waiting" ? waiting : done).push(session);
     }
-    if (waiting.length === 0 && done.length === 0) return;
-
     // The oldest wait first, as in the queue.
-    const order = new Map(attentionQueue(workspace).map((session, index) => [session.id, index]));
     waiting.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
+    return [waiting, done];
+  }
 
-    const at = this.now();
-    for (const session of [...waiting, ...done]) this.signalled.set(session.id, at);
-    this.deps.announce(announcement(waiting, done));
-
-    const settings = this.deps.prefs.get();
-    const looking = this.lookingAt(workspace);
-    const notify = (session: Session, kind: SignalKind) =>
-      !looking.has(session.id) && (kind === "waiting" ? settings.waiting : settings.done);
-    const notification = describeNotification(
-      waiting.filter((session) => notify(session, "waiting")),
-      done.filter((session) => notify(session, "done")),
+  private schedule(at: number | null): void {
+    if (at === this.timerAt) return;
+    this.clearTimer();
+    if (at === null) return;
+    this.timerAt = at;
+    this.timer = setTimeout(
+      () => {
+        this.timer = null;
+        this.timerAt = null;
+        this.review();
+      },
+      Math.max(0, at - this.now()),
     );
-    if (notification && this.deps.claude.available) {
-      this.deps.claude.backend.notify(notification).catch(ignoreFailure);
-    }
-  };
+  }
 
-  /** The sessions the user sees now: on screen, in the focused window. */
-  private lookingAt(workspace: WorkspaceSnapshot): Set<SessionId> {
-    return this.deps.windowFocused() ? visibleSessions(workspace.layout) : new Set();
+  private clearTimer(): void {
+    if (this.timer !== null) clearTimeout(this.timer);
+    this.timer = null;
+    this.timerAt = null;
   }
 
   private syncBadge(count: number): void {
