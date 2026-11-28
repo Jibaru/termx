@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { useApp } from "../src/fixture.ts";
 import { isAlive } from "../src/processes.ts";
 import { inFront, stepTimer, ticksOf, upTo } from "../src/sessions.ts";
-import { waitFor } from "../src/wait.ts";
+import { DEFAULT_TIMEOUT_MS } from "../src/wait.ts";
 
 /**
  * How many ticks the program prints, one every `TICK_MS`: 12 s, long
@@ -35,15 +35,12 @@ describe("reloading the page", () => {
       "window.__TERMX_OLD_PAGE__ = true; setTimeout(() => location.reload(), 50); return true;",
     );
     // The old page is gone once its mark is: only then is what is in front
-    // the new page's.
-    await waitFor(
-      () =>
-        app.driver
-          .execute<boolean>(
-            "return document.readyState === 'complete' && !window.__TERMX_OLD_PAGE__;",
-          )
-          .catch(() => false),
-      { what: "the page to load again" },
+    // the new page's. Asked with the short timeout of `waitForPage`: a
+    // question that reaches the old page as it goes away is never answered,
+    // and waiting 15 s for it outlasted the program, which ends after 12 s.
+    await app.driver.waitForPage(
+      DEFAULT_TIMEOUT_MS,
+      "return document.readyState === 'complete' && !window.__TERMX_OLD_PAGE__;",
     );
 
     const after = await inFront(

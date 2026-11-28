@@ -2,7 +2,8 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
-    include: ["specs/**/*.e2e.ts"],
+    // The suite, and the tests of its own code, which need no application.
+    include: ["specs/**/*.e2e.ts", "src/**/*.test.ts"],
     // One application at a time: they would fight over the keyboard focus
     // and the clipboard, and CI machines have few cores.
     fileParallelism: false,
