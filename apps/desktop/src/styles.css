@@ -1269,6 +1269,10 @@ body {
   color: var(--color-danger);
 }
 
+.claude-status-text[data-tone="warn"] {
+  color: var(--color-warning);
+}
+
 .notification-toggles {
   display: flex;
   flex-direction: column;

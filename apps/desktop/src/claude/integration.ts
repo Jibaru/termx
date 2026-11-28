@@ -150,7 +150,22 @@ export class ClaudeIntegrationStore {
   /** The first launch with Claude Code: ask whether to install the plugin. */
   get shouldAsk(): boolean {
     const info = this.info;
-    return info !== null && info.claudeInstalled && info.consent === "unasked";
+    return (
+      info !== null &&
+      info.claudeInstalled &&
+      info.consent === "unasked" &&
+      info.plugin === "notInstalled"
+    );
+  }
+
+  /**
+   * Why termx will not install now, or `null`: another `termx` entry in
+   * the settings of Claude Code (`conflict`), or hooks turned off by policy
+   * (`blocked`). Install is never offered then.
+   */
+  get refusal(): "conflict" | "blocked" | null {
+    const plugin = this.info?.plugin;
+    return plugin === "conflict" || plugin === "blocked" ? plugin : null;
   }
 
   /** What the setup dialog offers now. */
@@ -272,12 +287,21 @@ function asError(error: unknown): IntegrationFailure {
   return { kind: "internal", message: describeError(error) };
 }
 
-const ERROR_LABELS: Record<string, string> = {
-  claudeNotFound: "Claude Code was not found on this computer",
+/**
+ * The words for each kind of failure the integration reports or its
+ * commands reject with.
+ */
+const ERROR_LABELS: Partial<Record<IntegrationFailure["kind"], string>> = {
+  invalidSettings: "Your Claude Code settings file is not valid JSON, so termx left it alone",
+  conflict:
+    "Another “termx” plugin entry exists in your Claude Code settings; termx won’t touch it",
+  blocked: "Your organisation’s managed settings disable hooks",
+  senderMissing: "This build of termx lacks the program the hooks run",
+  permissionDenied:
+    "termx is not allowed to write your Claude Code settings (the file is read-only)",
   storageFull: "The disk is full",
-  permissionDenied: "termx is not allowed to write to the folder of Claude Code",
-  notFound: "A file termx needs was not found",
-  invalidArgument: "Claude Code did not accept the plugin",
+  notFound: "Your Claude Code settings file is a link to a file that does not exist",
+  io: "termx could not read or write your Claude Code settings",
   internal: "Something went wrong",
 };
 

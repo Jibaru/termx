@@ -1,5 +1,5 @@
 import type { ClaudeIntegrationStore } from "../claude/integration";
-import type { Session, SessionId, WorkspaceSnapshot } from "../lib/ipc";
+import type { AttentionNotification, Session, SessionId, WorkspaceSnapshot } from "../lib/ipc";
 import type { FocusSource } from "../lib/windowFocus";
 import { visibleSessions } from "../workspace/layoutTree";
 import type { WorkspaceStore } from "../workspace/workspaceStore";
@@ -306,7 +306,7 @@ function waitLabel(session: Session): string {
 export function describeNotification(
   waiting: readonly Session[],
   done: readonly Session[],
-): { title: string; body: string; sessionId: SessionId } | null {
+): AttentionNotification | null {
   const first = waiting[0] ?? done[0];
   if (!first) return null;
   const doneNote =
