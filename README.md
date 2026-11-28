@@ -67,13 +67,13 @@ and what the plugin sends.
 
 ### Which session needs you
 
-termx can show what the agent of each Claude Code session is doing: working,
-waiting for your permission, waiting for your answer, or done. For that it
-installs a small plugin in Claude Code, once you agree: the first time termx
-finds Claude Code it asks, and shows the exact list of entries the plugin
-adds before you can install it. Hooks you already have are kept, and
-**Remove**, at the bottom of the sidebar, takes the plugin out again. If you
-said not now, **Enable Claude Code status** in the same place asks again.
+The first time termx finds Claude Code it asks, with a banner, and shows
+the exact list of entries the plugin adds before you can install it.
+Hooks you already have are kept, and **Remove**, at the bottom of the
+sidebar, takes the plugin out again. If you said not now, **Enable Claude
+Code status** in the same place asks again. When another `termx` entry is
+already in your Claude Code settings, or managed settings turn hooks off,
+termx says so there and installs nothing.
 
 - A session that waits for you is marked on its row (a magenta bar and
   icon, a bold title) and in the header of its pane. A collapsed project
@@ -89,11 +89,13 @@ said not now, **Enable Claude Code status** in the same place asks again.
   it still waits, it is notified then. Several at once are one
   notification, and the same session is notified at most once every 30
   seconds: a new wait within that time is notified once they are over, if
-  it still waits. Click a notification to go to the session. The icon of termx shows how many sessions wait. "Notify me when a
-  session needs me", at the bottom of the sidebar, turns notifications off;
-  "Also when a session is done" turns them on for finished sessions.
-- A session that stopped reporting is shown dimmed, with when it last
-  reported, and never as waiting.
+  it still waits. Click a notification to go to the session. The icon of
+  termx shows how many sessions wait, where the system shows such a badge.
+  "Notify me when a session needs me", at the bottom of the sidebar, turns
+  notifications off; "Also when a session is done" turns them on for
+  finished sessions.
+- A session whose state termx can no longer vouch for is shown dimmed,
+  with when it last reported, and never as waiting.
 
 ## Using the terminal
 

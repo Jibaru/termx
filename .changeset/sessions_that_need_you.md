@@ -16,7 +16,8 @@ waiting for you, once you let it install its Claude Code plugin.
   Windows and Linux, goes to it; pressed again, to the next one.
 - A notification tells you when a session starts to wait while you are
   looking elsewhere; a burst is one notification, and clicking it shows the
-  session. The app icon shows how many sessions wait. Notifications can be
+  session. The app icon shows how many sessions wait (on macOS and some
+  Linux desktops). Notifications can be
   turned off, and turned on for finished sessions, at the bottom of the
   sidebar.
 - The first time termx finds Claude Code it asks before installing anything,
