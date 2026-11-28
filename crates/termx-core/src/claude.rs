@@ -405,13 +405,21 @@ enum Rewrite {
 #[derive(Debug, Clone)]
 pub struct Integration {
     paths: Paths,
+    /// Runs right after termx wrote the settings: a test writes there as
+    /// another program would.
+    #[cfg(test)]
+    after_write: Option<fn(&Path)>,
 }
 
 impl Integration {
     /// The integration at `paths`.
     #[must_use]
     pub fn new(paths: Paths) -> Self {
-        Self { paths }
+        Self {
+            paths,
+            #[cfg(test)]
+            after_write: None,
+        }
     }
 
     /// Where everything is.
@@ -612,7 +620,7 @@ impl Integration {
         // The text the edit was made on: if it is not the one recorded
         // (changed in between), the record cannot give it back.
         let edited_from = std::cell::RefCell::new(None::<Option<String>>);
-        self.rewrite_settings(|text| {
+        let written = self.rewrite_settings(|text| {
             *edited_from.borrow_mut() = Some(text.map(str::to_owned));
             let mut document = Document::parse(
                 text.filter(|text| !text.trim().is_empty())
@@ -642,9 +650,19 @@ impl Integration {
             record.restorable = false;
             record.before = None;
         }
-        let after = self
-            .settings_text()?
-            .map(|text| plugin::hash(text.as_bytes()));
+        // The hash of exactly what termx left, never of the file read
+        // again: another program (Claude Code) may have written in between,
+        // and its text must never count as termx's. If the file is not
+        // what termx left any more, it cannot be given back.
+        #[cfg(test)]
+        if let Some(after_write) = self.after_write {
+            after_write(&self.paths.settings());
+        }
+        let after = written.as_deref().map(plugin::hash);
+        if self.settings_text()?.map(String::into_bytes) != written {
+            record.restorable = false;
+            record.before = None;
+        }
         self.write_record(&Record { after, ..record })?;
         info!(version = %plugin::version(), "claude code plugin installed");
         Ok(())
@@ -1038,14 +1056,17 @@ impl Integration {
     }
 
     /// Rewrites the settings with what `produce` makes of their text
-    /// (`None` when there is no file). Backs them up the first time,
+    /// (`None` when there is no file), and returns what the file holds as
+    /// termx left it: the bytes it wrote, or those it found and kept, or
+    /// `None` for no file. Never read again: another program may have
+    /// written since. Backs them up the first time,
     /// refuses a read-only file and a link to nothing, writes atomically
     /// through a link, and starts over once if the file changed just
     /// before the rename.
     fn rewrite_settings(
         &self,
         produce: impl Fn(Option<&str>) -> Result<Rewrite, IntegrationError>,
-    ) -> Result<(), IntegrationError> {
+    ) -> Result<Option<Vec<u8>>, IntegrationError> {
         let settings = self.paths.settings();
         let is_link =
             fs::symlink_metadata(&settings).is_ok_and(|meta| meta.file_type().is_symlink());
@@ -1070,7 +1091,7 @@ impl Integration {
                 .map(|bytes| String::from_utf8_lossy(bytes).into_owned());
             let wanted = produce(text.as_deref())?;
             if matches!(wanted, Rewrite::Keep) {
-                return Ok(());
+                return Ok(before);
             }
             if fs::metadata(&target).is_ok_and(|meta| meta.permissions().readonly()) {
                 return Err(IntegrationError::new(
@@ -1115,7 +1136,10 @@ impl Integration {
                 Rewrite::Keep => true,
             };
             if done {
-                return Ok(());
+                return Ok(match wanted {
+                    Rewrite::Write(text) => Some(text.into_bytes()),
+                    Rewrite::Remove | Rewrite::Keep => None,
+                });
             }
         }
         Err(IntegrationError::new(
@@ -1444,6 +1468,47 @@ fn make_executable(_path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Writes to the settings as Claude Code would, right after termx did.
+    fn claude_code_writes(path: &Path) {
+        let text = fs::read_to_string(path).unwrap();
+        let edited = text.replacen('{', "{\"claudeCode\": \"wrote this\", ", 1);
+        fs::write(path, edited).unwrap();
+    }
+
+    #[test]
+    fn a_write_right_after_termx_wrote_is_never_given_away_on_uninstall() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path();
+        let sender = root.join("termx-cli");
+        fs::write(&sender, b"sender").unwrap();
+        fs::create_dir_all(root.join("claude")).unwrap();
+        fs::write(
+            root.join("claude").join("settings.json"),
+            "{\"model\": \"opus\"}\n",
+        )
+        .unwrap();
+        let mut integration = Integration::new(Paths {
+            config_dir: root.join("claude"),
+            plugin_dir: root.join("state").join(PLUGIN_DIR),
+            consent_file: None,
+            sender,
+            home: Some(root.to_owned()),
+            search_path: None,
+            managed_settings: Vec::new(),
+        });
+        integration.after_write = Some(claude_code_writes);
+
+        integration.install().unwrap();
+        integration.after_write = None;
+        integration.uninstall().unwrap();
+
+        let left: Value = serde_json::from_str(
+            &fs::read_to_string(root.join("claude").join("settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(left, json!({"claudeCode": "wrote this", "model": "opus"}));
+    }
 
     #[test]
     fn a_file_changed_just_before_the_rename_is_not_overwritten() {
