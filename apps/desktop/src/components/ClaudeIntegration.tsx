@@ -15,6 +15,14 @@ import { Modal } from "./Modal";
  * where it stands and offers to enable, update or remove it.
  */
 
+/** Why termx installs nothing, by the status of the plugin. */
+const REFUSALS = {
+  conflict:
+    "Another “termx” plugin entry exists in your Claude Code settings; termx won’t touch it.",
+  blocked:
+    "Your organisation’s managed settings disable hooks, so Claude Code does not run those of termx.",
+} as const;
+
 const WHAT_IT_DOES =
   "termx shows when each Claude session is working or needs you: a mark on its row, a list of the sessions waiting for you, and a notification when you are looking elsewhere.";
 
@@ -71,7 +79,8 @@ export function ClaudeSetupDialog() {
   const progress =
     mode === "update" ? "Updating…" : mode === "repair" ? "Repairing…" : "Installing…";
   // Nothing is installed blind: only once the user saw what changes.
-  const canInstall = preview.status === "ready" && !installing;
+  const refusal = workbench.claude.refusal;
+  const canInstall = preview.status === "ready" && !installing && refusal === null;
 
   return (
     <Modal
@@ -87,6 +96,11 @@ export function ClaudeSetupDialog() {
           ? "A newer version of the plugin of termx for Claude Code is available. Updating it changes:"
           : `${WHAT_IT_DOES} To do that, termx adds a small plugin to Claude Code, which changes:`}
       </p>
+      {refusal !== null && (
+        <p className="form-error" role="alert" data-testid="claude-refusal">
+          termx cannot install the plugin. {REFUSALS[refusal]}
+        </p>
+      )}
       {preview.status === "loading" && (
         <p className="modal-text" role="status">
           Checking what would change…
@@ -151,15 +165,17 @@ export function ClaudeSetupDialog() {
         >
           Not now
         </button>
-        <button
-          type="button"
-          className="button button-primary"
-          data-testid="claude-install"
-          disabled={!canInstall}
-          onClick={() => void workbench.installClaude()}
-        >
-          {installing ? progress : failed ? "Try again" : action}
-        </button>
+        {refusal === null && (
+          <button
+            type="button"
+            className="button button-primary"
+            data-testid="claude-install"
+            disabled={!canInstall}
+            onClick={() => void workbench.installClaude()}
+          >
+            {installing ? progress : failed ? "Try again" : action}
+          </button>
+        )}
       </div>
     </Modal>
   );
@@ -298,6 +314,47 @@ export function ClaudeStatus() {
               onClick={workbench.openClaudeSetup}
             >
               Repair…
+            </button>{" "}
+            ·{" "}
+            <button
+              type="button"
+              className="link-button"
+              data-testid="claude-remove"
+              onClick={workbench.openClaudeRemove}
+            >
+              Remove
+            </button>
+          </p>
+        </div>
+      );
+    case "conflict":
+      return (
+        <div className="claude-status" data-testid="claude-status" data-state="conflict">
+          <p className="claude-status-text" data-tone="warn">
+            Claude Code status is off. {REFUSALS.conflict}
+          </p>
+          <button
+            type="button"
+            className="link-button"
+            onClick={() => void workbench.claude.load()}
+          >
+            Check again
+          </button>
+        </div>
+      );
+    case "blocked":
+      return (
+        <div className="claude-status" data-testid="claude-status" data-state="blocked">
+          <p className="claude-status-text" data-tone="warn">
+            Claude Code integration: installed, but not running. {REFUSALS.blocked}
+          </p>
+          <p className="claude-status-text">
+            <button
+              type="button"
+              className="link-button"
+              onClick={() => void workbench.claude.load()}
+            >
+              Check again
             </button>{" "}
             ·{" "}
             <button

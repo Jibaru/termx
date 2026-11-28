@@ -1,4 +1,4 @@
-import { fireEvent, screen, within } from "@testing-library/react";
+import { act, fireEvent, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { NO_CLAUDE } from "../claude/backend";
@@ -112,10 +112,27 @@ describe("the first launch with Claude Code", () => {
   it.each([
     [
       "permissionDenied",
-      "~/.claude is read-only",
-      "Install failed. termx is not allowed to write to the folder of Claude Code: ~/.claude is read-only",
+      "~/.claude/settings.json is read-only",
+      "Install failed. termx is not allowed to write your Claude Code settings (the file is read-only): ~/.claude/settings.json is read-only",
     ],
+    [
+      "invalidSettings",
+      "",
+      "Install failed. Your Claude Code settings file is not valid JSON, so termx left it alone.",
+    ],
+    [
+      "conflict",
+      "",
+      "Install failed. Another “termx” plugin entry exists in your Claude Code settings; termx won’t touch it.",
+    ],
+    ["senderMissing", "", "Install failed. This build of termx lacks the program the hooks run."],
     ["storageFull", "", "Install failed. The disk is full."],
+    [
+      "notFound",
+      "",
+      "Install failed. Your Claude Code settings file is a link to a file that does not exist.",
+    ],
+    ["internal", "boom", "Install failed. Something went wrong: boom"],
     ["somethingNew", "The plugin folder is a file", "Install failed. The plugin folder is a file"],
   ])("says why an install failed (%s), and can try again", async (kind, message, expected) => {
     let attempts = 0;
@@ -298,14 +315,47 @@ describe("the integration in the sidebar footer", () => {
       claude: fakeClaude({
         ...INSTALLED,
         plugin: "error",
-        error: { kind: "notFound", message: "hooks.json is missing" },
+        error: { kind: "io", message: "settings.json: input/output error" },
       }),
     });
 
     expect(screen.getByTestId("claude-status")).toHaveTextContent(
-      "Claude Code integration has a problem: A file termx needs was not found: hooks.json is missing",
+      "Claude Code integration has a problem: termx could not read or write your Claude Code settings: settings.json: input/output error",
     );
     expect(screen.getByTestId("claude-repair")).toBeInTheDocument();
+  });
+
+  it("says honestly when another termx entry is in the way, and never offers Install", async () => {
+    await renderApp(shell(), {
+      claude: fakeClaude({ claudeInstalled: true, plugin: "conflict", consent: "unasked" }),
+    });
+
+    expect(screen.queryByTestId("claude-consent-banner")).toBeNull();
+    expect(screen.getByTestId("claude-status")).toHaveTextContent(
+      "Claude Code status is off. Another “termx” plugin entry exists in your Claude Code settings; termx won’t touch it.",
+    );
+    expect(screen.queryByTestId("claude-enable")).toBeNull();
+    expect(screen.queryByTestId("claude-remove")).toBeNull();
+  });
+
+  it("says when hooks are blocked by policy, and offers no Install there either", async () => {
+    const fake = fakeClaude({ ...INSTALLED, plugin: "blocked" });
+    const view = await renderApp(shell(), { claude: fake });
+
+    expect(screen.getByTestId("claude-status")).toHaveTextContent(
+      "installed, but not running. Your organisation’s managed settings disable hooks",
+    );
+    expect(screen.queryByTestId("notify-waiting")).toBeNull();
+    // The dialog, if it opens anyway, explains and has no Install.
+    act(() => {
+      view.workbench.openClaudeSetup();
+    });
+    await flush();
+    const dialog = screen.getByTestId("claude-setup-dialog");
+    expect(within(dialog).getByTestId("claude-refusal")).toHaveTextContent(
+      "Your organisation’s managed settings disable hooks",
+    );
+    expect(within(dialog).queryByTestId("claude-install")).toBeNull();
   });
 
   it("does not ask without Claude Code, and explains why it is off", async () => {

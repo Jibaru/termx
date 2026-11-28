@@ -72,7 +72,8 @@ export function fakeClaude(initial: ClaudeIntegration = INSTALLED, responders: R
         state = { ...state, consent };
       }),
     notify: (notification) => answer("notify", [notification], () => undefined),
-    setAttentionBadge: (count) => answer("setAttentionBadge", [count], () => undefined),
+    // Whether the platform shows a badge.
+    setAttentionBadge: (count) => answer("setAttentionBadge", [count], () => true),
     onClaudeIntegrationChanged: (handler) => {
       changed = handler;
       return Promise.resolve(() => {
