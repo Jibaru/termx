@@ -730,3 +730,179 @@ fn the_record_of_what_was_there_is_private_and_goes_with_the_plugin() {
 
     assert!(!record.exists());
 }
+
+/// Makes the installed plugin outdated, as a new build of termx does.
+fn new_build(setup: &Setup) {
+    fs::write(&setup.integration.paths().sender, b"a newer hook sender").unwrap();
+    assert_eq!(setup.integration.status().plugin, PluginStatus::Outdated);
+}
+
+/// The user's edit made after installing: "opus" becomes "sonnet".
+fn edit_model(setup: &Setup) {
+    let edited = setup.settings_text().replace("\"opus\"", "\"sonnet\"");
+    fs::write(setup.settings(), edited).unwrap();
+}
+
+/// What uninstalling must leave: the user's settings with the edit, and
+/// nothing of termx.
+fn assert_edit_kept_and_termx_gone(setup: &Setup) {
+    let value = setup.settings_value();
+    assert_eq!(value["model"], "sonnet", "{value}");
+    assert!(value.get("extraKnownMarketplaces").is_none(), "{value}");
+    assert!(value.get("enabledPlugins").is_none(), "{value}");
+    assert_eq!(
+        value["hooks"],
+        serde_json::from_str::<Value>(MASCOT_SETTINGS).unwrap()["hooks"]
+    );
+}
+
+#[test]
+fn edits_made_before_an_upgrade_survive_uninstalling() {
+    let setup = Setup::with_settings(MASCOT_SETTINGS);
+    setup.integration.install().unwrap();
+    edit_model(&setup);
+    new_build(&setup);
+
+    assert!(setup.integration.upgrade().unwrap());
+    setup.integration.uninstall().unwrap();
+
+    assert_edit_kept_and_termx_gone(&setup);
+}
+
+#[test]
+fn edits_made_before_installing_again_survive_uninstalling() {
+    let setup = Setup::with_settings(MASCOT_SETTINGS);
+    setup.integration.install().unwrap();
+    edit_model(&setup);
+
+    setup.integration.install().unwrap();
+    setup.integration.uninstall().unwrap();
+
+    assert_edit_kept_and_termx_gone(&setup);
+}
+
+#[test]
+fn entries_removed_by_hand_then_keys_added_then_installing_again_keeps_every_edit() {
+    let setup = Setup::with_settings(MASCOT_SETTINGS);
+    setup.integration.install().unwrap();
+    // The user removes the entries of termx by hand, and adds their own,
+    // in the objects termx had created.
+    let mut value = setup.settings_value();
+    value["extraKnownMarketplaces"] =
+        json!({"mine": {"source": {"source": "github", "repo": "me/mine"}}});
+    value["enabledPlugins"] = json!({"mine@mine": true});
+    value["model"] = json!("sonnet");
+    fs::write(
+        setup.settings(),
+        serde_json::to_string_pretty(&value).unwrap(),
+    )
+    .unwrap();
+
+    setup.integration.install().unwrap();
+    setup.integration.uninstall().unwrap();
+
+    let left = setup.settings_value();
+    assert_eq!(left["model"], "sonnet");
+    assert_eq!(
+        left["extraKnownMarketplaces"],
+        json!({"mine": {"source": {"source": "github", "repo": "me/mine"}}})
+    );
+    assert_eq!(left["enabledPlugins"], json!({"mine@mine": true}));
+}
+
+#[test]
+fn an_upgrade_with_no_edit_in_between_still_gives_the_file_back_exactly() {
+    let setup = Setup::with_settings(MASCOT_SETTINGS);
+    setup.integration.install().unwrap();
+    new_build(&setup);
+
+    assert!(setup.integration.upgrade().unwrap());
+    setup.integration.uninstall().unwrap();
+
+    assert_eq!(setup.settings_text(), MASCOT_SETTINGS);
+}
+
+#[test]
+fn hooks_blocked_by_policy_keep_the_settings_untouched() {
+    let setup = Setup::with_settings(MASCOT_SETTINGS);
+    let managed = setup.home.join("managed-settings.json");
+    fs::write(&managed, r#"{"allowManagedHooksOnly": true}"#).unwrap();
+    let mut paths = setup.integration.paths().clone();
+    paths.managed_settings = vec![managed];
+    let integration = Integration::new(paths);
+
+    let refused = integration.install().unwrap_err();
+
+    assert_eq!(refused.kind, IntegrationErrorKind::Blocked);
+    assert_eq!(setup.settings_text(), MASCOT_SETTINGS);
+    assert!(!setup.backup().exists());
+    let note = integration.note().unwrap().unwrap();
+    assert!(note.contains("allowManagedHooksOnly"), "{note}");
+    assert!(note.contains("will not change your settings"), "{note}");
+}
+
+#[test]
+fn without_a_record_objects_holding_only_termx_go_with_it() {
+    let setup = Setup::with_settings("{\"model\": \"opus\"}");
+    setup.integration.install().unwrap();
+    fs::remove_file(setup.integration.paths().record()).unwrap();
+
+    setup.integration.uninstall().unwrap();
+
+    assert_eq!(setup.settings_value(), json!({"model": "opus"}));
+
+    // But an object that holds something else stays.
+    let setup = Setup::with_settings("{\"enabledPlugins\": {\"other@x\": true}}");
+    setup.integration.install().unwrap();
+    fs::write(setup.integration.paths().record(), "not json").unwrap();
+    setup.integration.uninstall().unwrap();
+    assert_eq!(
+        setup.settings_value(),
+        json!({"enabledPlugins": {"other@x": true}})
+    );
+}
+
+#[test]
+fn uninstalling_gives_back_the_configuration_that_was_installed_into() {
+    let setup = Setup::with_settings(MASCOT_SETTINGS);
+    setup.integration.install().unwrap();
+    // CLAUDE_CONFIG_DIR points somewhere else now.
+    let mut paths = setup.integration.paths().clone();
+    paths.config_dir = setup.home.join("other-config");
+    fs::create_dir_all(&paths.config_dir).unwrap();
+    fs::write(paths.config_dir.join("settings.json"), "{\"theirs\": 1}").unwrap();
+    let moved = Integration::new(paths.clone());
+
+    moved.uninstall().unwrap();
+
+    assert_eq!(setup.settings_text(), MASCOT_SETTINGS);
+    assert_eq!(
+        fs::read_to_string(paths.config_dir.join("settings.json")).unwrap(),
+        "{\"theirs\": 1}"
+    );
+
+    // The one installed into is gone: said so, and termx's own files go.
+    setup.integration.install().unwrap();
+    fs::remove_dir_all(&setup.integration.paths().config_dir).unwrap();
+    let error = moved.uninstall().unwrap_err();
+    assert_eq!(error.kind, IntegrationErrorKind::NotFound);
+    assert!(!setup.plugin_dir().exists());
+}
+
+#[test]
+fn a_record_of_claude_code_with_another_source_type_is_not_ours() {
+    let setup = Setup::with_settings(MASCOT_SETTINGS);
+    setup.integration.install().unwrap();
+    let state = setup.integration.paths().config_dir.join("plugins");
+    fs::create_dir_all(state.join("cache").join("termx")).unwrap();
+    let known = json!({"termx": {"source": {"source": "file", "path": setup.plugin_dir().to_string_lossy()}}});
+    fs::write(state.join("known_marketplaces.json"), known.to_string()).unwrap();
+
+    setup.integration.uninstall().unwrap();
+
+    let left: Value =
+        serde_json::from_str(&fs::read_to_string(state.join("known_marketplaces.json")).unwrap())
+            .unwrap();
+    assert_eq!(left, known);
+    assert!(state.join("cache").join("termx").exists());
+}

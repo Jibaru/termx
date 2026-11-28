@@ -362,8 +362,17 @@ struct Record {
     version: u32,
     /// The plugin directory installed.
     plugin_dir: PathBuf,
+    /// The configuration directory of Claude Code installed into.
+    #[serde(default)]
+    config_dir: Option<PathBuf>,
     /// The text of the settings before, `None` when there was no file.
+    /// Only used when [`restorable`](Self::restorable).
     before: Option<String>,
+    /// Whether `before` may be written back: the settings have gone from
+    /// `before` to what termx wrote with nobody else changing them. Lost
+    /// for good the first time termx finds them changed by someone else.
+    #[serde(default)]
+    restorable: bool,
     /// The hash of the settings as termx last wrote them.
     after: Option<String>,
     /// `extraKnownMarketplaces` was there.
@@ -501,6 +510,12 @@ impl Integration {
         let document = self.read_settings()?;
         let found = self.check_settings(document.as_ref())?;
         let binary = self.sender_binary()?;
+        if let Some(blocked) = self.blocked_by_policy(document.as_ref()) {
+            return Ok(Some(format!(
+                "{} termx will not change your settings while that is so.",
+                blocked.message
+            )));
+        }
         let marketplace = found.marketplace == Present::Ours;
         let enabled = found.enabled == Some(true);
         let entries = match (marketplace, enabled) {
@@ -545,22 +560,48 @@ impl Integration {
         let document = self.read_settings()?;
         let found = self.check_settings(document.as_ref())?;
         let binary = self.sender_binary()?;
+        if let Some(blocked) = self.blocked_by_policy(document.as_ref()) {
+            return Err(blocked);
+        }
+        let current = self.settings_text()?;
+        let existed = |member: &str| {
+            document
+                .as_ref()
+                .is_some_and(|document| document.get(&[member]).is_some())
+        };
         // What was there before, recorded before anything changes. A
-        // record of an earlier install of this directory is kept: it knows
-        // what was there before that one.
+        // record of an earlier install of this directory is kept, since it
+        // knows what was there before that one; but once the settings are
+        // not what termx last wrote, the text from before may never be
+        // written back (it would undo the edits made since), and objects
+        // there now that do not hold termx's entries are the user's.
         let record = match self.read_record() {
-            Some(record) => record,
+            Some(mut record) => {
+                let edited = record.after.as_deref()
+                    != current
+                        .as_deref()
+                        .map(|text| plugin::hash(text.as_bytes()))
+                        .as_deref();
+                if edited {
+                    record.restorable = false;
+                    record.before = None;
+                    record.marketplaces_existed |=
+                        existed("extraKnownMarketplaces") && found.marketplace != Present::Ours;
+                    record.enabled_plugins_existed |=
+                        existed("enabledPlugins") && found.enabled != Some(true);
+                }
+                record.config_dir = Some(self.paths.config_dir.clone());
+                record
+            }
             None => Record {
                 version: 1,
                 plugin_dir: self.paths.plugin_dir.clone(),
-                before: self.settings_text()?,
+                config_dir: Some(self.paths.config_dir.clone()),
+                before: current.clone(),
+                restorable: true,
                 after: None,
-                marketplaces_existed: document
-                    .as_ref()
-                    .is_some_and(|document| document.get(&["extraKnownMarketplaces"]).is_some()),
-                enabled_plugins_existed: document
-                    .as_ref()
-                    .is_some_and(|document| document.get(&["enabledPlugins"]).is_some()),
+                marketplaces_existed: existed("extraKnownMarketplaces"),
+                enabled_plugins_existed: existed("enabledPlugins"),
                 marketplace_before: found.marketplace == Present::Ours,
                 enabled_before: found.enabled == Some(true),
             },
@@ -568,7 +609,11 @@ impl Integration {
         self.write_record(&record)?;
         self.write_plugin(&binary)?;
         let path = self.paths.plugin_dir.to_string_lossy().into_owned();
+        // The text the edit was made on: if it is not the one recorded
+        // (changed in between), the record cannot give it back.
+        let edited_from = std::cell::RefCell::new(None::<Option<String>>);
         self.rewrite_settings(|text| {
+            *edited_from.borrow_mut() = Some(text.map(str::to_owned));
             let mut document = Document::parse(
                 text.filter(|text| !text.trim().is_empty())
                     .unwrap_or("{}\n"),
@@ -592,6 +637,11 @@ impl Integration {
                 Rewrite::Write(edited)
             })
         })?;
+        let mut record = record;
+        if edited_from.into_inner().as_ref() != Some(&current) {
+            record.restorable = false;
+            record.before = None;
+        }
         let after = self
             .settings_text()?
             .map(|text| plugin::hash(text.as_bytes()));
@@ -637,6 +687,26 @@ impl Integration {
     /// changed, and the kinds of input and output errors.
     pub fn uninstall(&self) -> Result<(), IntegrationError> {
         let record = self.read_record();
+        // Installed into another configuration (CLAUDE_CONFIG_DIR changed
+        // since): that is the one to give back.
+        if let Some(config_dir) = record.as_ref().and_then(|record| record.config_dir.clone())
+            && !same_path(&config_dir, &self.paths.config_dir)
+        {
+            if !config_dir.is_dir() {
+                let error = IntegrationError::new(
+                    IntegrationErrorKind::NotFound,
+                    format!(
+                        "termx installed its plugin into the Claude Code configuration in {}, which is gone: there was nothing left to remove there.",
+                        self.shown(&config_dir)
+                    ),
+                );
+                self.remove_own_files()?;
+                return Err(error);
+            }
+            let mut paths = self.paths.clone();
+            paths.config_dir = config_dir;
+            return Integration::new(paths).uninstall();
+        }
         let document = self.read_settings()?;
         let found = match &document {
             Some(document) => Found {
@@ -660,6 +730,7 @@ impl Integration {
                 };
                 // Untouched since termx wrote it: as it was before.
                 if let Some(record) = &record
+                    && record.restorable
                     && record.after.as_deref() == Some(plugin::hash(text.as_bytes()).as_str())
                 {
                     return Ok(match &record.before {
@@ -670,8 +741,10 @@ impl Integration {
                 let mut document =
                     Document::parse(text).map_err(|error| self.settings_error(&error))?;
                 let original = document.text();
+                // Without a record, an object that holds nothing but the
+                // entry of termx goes with it: termx would have created it.
                 let created =
-                    |existed: fn(&Record) -> bool| record.as_ref().is_some_and(|r| !existed(r));
+                    |existed: fn(&Record) -> bool| record.as_ref().is_none_or(|r| !existed(r));
                 if found.marketplace == Present::Ours
                     && !record
                         .as_ref()
@@ -706,6 +779,13 @@ impl Integration {
             })?;
             self.forget_in_claude_state();
         }
+        self.remove_own_files()?;
+        info!("claude code plugin uninstalled");
+        Ok(())
+    }
+
+    /// Removes the plugin directory and the record.
+    fn remove_own_files(&self) -> Result<(), IntegrationError> {
         for (path, directory) in [
             (&self.paths.plugin_dir, true),
             (&self.paths.record(), false),
@@ -721,7 +801,6 @@ impl Integration {
                 Err(error) => return Err(IntegrationError::io("could not remove", path, &error)),
             }
         }
-        info!("claude code plugin uninstalled");
         Ok(())
     }
 
@@ -768,7 +847,7 @@ impl Integration {
         if found.marketplace == Present::Absent || found.enabled != Some(true) {
             return Ok((PluginStatus::NotInstalled, None));
         }
-        if let Some(blocked) = self.blocked_by_policy(&document) {
+        if let Some(blocked) = self.blocked_by_policy(Some(&document)) {
             return Err(blocked);
         }
         let version = plugin::installed_version(&self.paths.plugin_dir);
@@ -785,7 +864,7 @@ impl Integration {
 
     /// Why Claude Code does not run the hooks of the plugin, if it does
     /// not: see the [module documentation](self#hooks-turned-off-by-policy).
-    fn blocked_by_policy(&self, user: &Document) -> Option<IntegrationError> {
+    fn blocked_by_policy(&self, user: Option<&Document>) -> Option<IntegrationError> {
         let managed: Vec<Value> = self
             .paths
             .managed_settings
@@ -821,7 +900,7 @@ impl Integration {
                 "The managed settings of Claude Code on this computer allow managed hooks only (allowManagedHooksOnly): the plugin is installed but its hooks do not run.",
             );
         }
-        if user.get(&["disableAllHooks"]) == Some(Value::Bool(true)) {
+        if user.is_some_and(|user| user.get(&["disableAllHooks"]) == Some(Value::Bool(true))) {
             return blocked(
                 "Your Claude Code settings turn hooks off (disableAllHooks): the plugin is installed but its hooks do not run.",
             );
@@ -1168,9 +1247,13 @@ impl Integration {
         let known = plugins.join("known_marketplaces.json");
         let ours = self.edit_claude_state(&known, |document| {
             let ours = document
-                .get(&[plugin::NAME, "source", "path"])
-                .and_then(|path| path.as_str().map(PathBuf::from))
-                .is_some_and(|path| same_path(&path, &self.paths.plugin_dir));
+                .get(&[plugin::NAME, "source"])
+                .is_some_and(|source| {
+                    source["source"] == "directory"
+                        && source["path"]
+                            .as_str()
+                            .is_some_and(|path| same_path(Path::new(path), &self.paths.plugin_dir))
+                });
             ours && document.remove(&[], plugin::NAME, false).unwrap_or(false)
         });
         // The cache and the installs of the marketplace "termx" are this
