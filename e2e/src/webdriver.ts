@@ -148,18 +148,27 @@ export class WebDriver {
    * server answers before the page is there, and a script sent while the
    * webview is still loading is never answered, or runs in a document that
    * is about to be replaced.
+   *
+   * Also what waits for the page that replaces another, with `loaded`: a
+   * script that returns `true` once the new page is there. A script that
+   * reaches the old page as it goes away is not answered either, and with
+   * the usual timeout it would hold the wait for 15 s (macOS, where WebKit
+   * drops it).
    */
-  async waitForPage(timeoutMs: number): Promise<void> {
+  async waitForPage(
+    timeoutMs: number,
+    loaded = `return document.readyState === "complete" && location.protocol !== "about:";`,
+  ): Promise<void> {
     // A script that is not answered is given up quickly, and sent again.
     await this.command("POST", "/timeouts", { script: PAGE_PROBE_TIMEOUT_MS });
-    await waitFor(
-      () =>
-        this.execute<boolean>(
-          `return document.readyState === "complete" && location.protocol !== "about:";`,
-        ).catch(() => false),
-      { what: "the page of the application to be loaded", timeoutMs },
-    );
-    await this.command("POST", "/timeouts", { script: SCRIPT_TIMEOUT_MS });
+    try {
+      await waitFor(() => this.execute<boolean>(loaded).catch(() => false), {
+        what: "the page of the application to be loaded",
+        timeoutMs,
+      });
+    } finally {
+      await this.command("POST", "/timeouts", { script: SCRIPT_TIMEOUT_MS });
+    }
   }
 
   /** A screenshot of the page, as a PNG file. */
